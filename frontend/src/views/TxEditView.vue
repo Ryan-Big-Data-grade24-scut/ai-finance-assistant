@@ -14,6 +14,10 @@
  */
 const props = defineProps<{ id?: string }>()
 
+const save = () => {
+  // 单笔修正页仍保留原项目骨架；报告原型不在这里写入假数据。
+}
+
 // 接真实接口时打开：
 // const save = async () => {
 //   await fetch(`/api/tx/${props.id}/override`, {

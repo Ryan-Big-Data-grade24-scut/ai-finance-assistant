@@ -19,6 +19,14 @@ const preview = ref<any>(null)
 const result = ref<any>(null)
 const busy = ref(false)
 
+const onFile = (event: Event) => {
+  file.value = (event.target as HTMLInputElement).files?.[0] ?? null
+}
+
+const commit = () => {
+  // 导入功能由另一条开发线负责；此副本只保证页面可以独立构建。
+}
+
 // 接真实接口时打开：
 // const onFile = async (e: Event) => {
 //   file.value = (e.target as HTMLInputElement).files?.[0] ?? null

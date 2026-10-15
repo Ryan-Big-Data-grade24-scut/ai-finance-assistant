@@ -22,7 +22,7 @@ const router = createRouter({
       props: route => ({
         type: (route.query.type as string) ?? 'expense',
         period: (route.query.period as string) ?? 'month',
-        value: (route.query.value as string) ?? '2026-09',
+        value: (route.query.value as string) ?? '2026-10',
         tab: (route.query.tab as string) ?? 'summary',
       }),
     },
@@ -36,6 +36,11 @@ const router = createRouter({
       name: 'tx',
       component: () => import('@/views/TxEditView.vue'),
       props: route => ({ id: route.query.id }),
+    },
+    {
+      path: '/transactions',
+      name: 'transactions',
+      component: () => import('@/views/TransactionsView.vue'),
     },
   ],
 })

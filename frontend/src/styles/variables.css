@@ -9,7 +9,7 @@
   /* --- 语义色 --- */
   --color-expense: #e5484d;
   --color-income: #30a46c;
-  --color-bg: #f5f6f8;
+  --color-bg: #f4f7fb;
   --color-card: #ffffff;
   --color-border: #e4e6eb;
   --color-text: #1c1e21;
@@ -54,7 +54,14 @@ body {
   background: var(--color-bg);
   color: var(--color-text);
   font-size: var(--font-sm);
+  min-width: 320px;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
+
+button, input, select, textarea { font-family: inherit; }
+button:focus-visible, a:focus-visible { outline: 3px solid rgba(54, 121, 237, .28); outline-offset: 2px; }
+html, body, #app, .app { max-width: 100%; overflow-x: hidden; }
 
 .card {
   background: var(--color-card);
