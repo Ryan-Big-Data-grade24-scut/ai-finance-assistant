@@ -32,6 +32,30 @@ AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工
 .\scripts\check.ps1             # 自检：缺什么、哪个服务没起来
 ```
 
+### MCP 接入（给 AI 客户端用）
+
+`backend/mcp/server.py`（11 个工具，只读 9 + 可写 2）以 stdio 方式运行。自检：
+
+```powershell
+.venv\Scripts\python.exe -m backend.mcp.server --selftest
+```
+
+Claude Desktop 等客户端的配置（把 `<项目路径>` 换成实际路径）：
+
+```json
+{
+  "mcpServers": {
+    "ai-finance-assistant": {
+      "command": "<项目路径>/.venv/Scripts/python.exe",
+      "args": ["-m", "backend.mcp.server"],
+      "cwd": "<项目路径>"
+    }
+  }
+}
+```
+
+设计边界见 `docs/设计/第一轮/04_MCP.md`。红线：MCP 层只转发，`backend/mcp/` 里出现 `conn.execute` / `sqlite3` 直接打回。
+
 ### 三个坑（都是实测踩出来的，别改回去）
 
 **1. 必须用 `.venv`。** `fastapi` 会拽着 `starlette` 一起装。直接 `pip install` 到全局 Anaconda 会把全局 starlette 降级，弄坏别的项目。所有脚本已强制走项目 venv。
@@ -39,6 +63,8 @@ AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工
 **2. 前端必须在后端跑着的时候开。** 前端写相对路径 `/api/xxx`，靠 `vite.config.ts` 的 proxy 转发到 8000。**代码里不允许硬编码 `http://localhost:8000`** —— 开发能跑，部署必挂。
 
 **3. Windows 编码。** 本项目所有 `.ps1` 必须是 **UTF-8 with BOM**（PowerShell 5.1 按 GBK 读，无 BOM 会乱码）；`requirements.txt` 同理。改脚本时别把 BOM 弄丢。
+
+**4. 项目根不能有 `mcp/` 目录。** MCP SDK 在 PyPI 上的包名就叫 `mcp`，根级放一个 `mcp/` 目录会把 SDK 遮蔽，`import mcp` 直接炸。所以 MCP 服务器放在 `backend/mcp/`（子包不冲突），`requirements.txt` 里 `mcp` 也钉死了 `<2`（2.x 把 FastMCP 改名，现有写法会失效）。
 
 ---
 
@@ -50,7 +76,7 @@ AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工
 |---|---|---|
 | ① 跨平台账单导入 | 🟡 微信已实测通过（1058 笔，与账单自报汇总分毫不差）；支付宝已写未验证（缺 ZIP 密码）；其他平台未开始 | ⬜ 只有上传骨架，没接后端 |
 | ② 生成 preset 报告 | ✅ 7 个接口全部跑通，数字口径逐条验证过 | ❌ **纯摆设**（见下） |
-| ③ MCP 接入 | ⬜ 未实现，`mcp/server.py` 不存在 | — |
+| ③ MCP 接入 | ✅ 11 个工具全部实现（`backend/mcp/server.py`），selftest + stdio 实测通过 | — |
 
 ### ② 的前端现在完全是摆设
 
@@ -112,7 +138,8 @@ backend/
   overrides.py         ★ 写修正的唯一入口
   main.py              FastAPI 入口（零业务逻辑）
   importer/            账单解析（wechat 已验证 / alipay 待验）
-  reports/             7 个报告组件
+  reports/             7 个报告组件 + 待分类清单
+  mcp/                 MCP 服务器（backend.mcp.server，11 个工具）
 frontend/src/views/    3 页骨架（账单 / 导入 / 改单）
 scripts/               setup / start-all / start-*-* / check
 docs/设计/             设计文档
@@ -140,7 +167,7 @@ docs/设计/             设计文档
 
 | 事项 | 谁做 |
 |---|---|
-| `mcp/server.py` —— 11 个工具 | 你 |
+| MCP 真实客户端实测（Claude Desktop 接入） | 你 |
 | 支付宝导入验证 | 需要解压密码 |
 | 第三方平台适配（美团 / 银行卡 / 电商） | 分到导入功能的人 |
 | `frontend/components/` 9 个组件 | 队友 |
