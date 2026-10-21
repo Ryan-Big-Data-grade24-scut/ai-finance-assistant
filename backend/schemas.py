@@ -253,6 +253,16 @@ class PaginatedResp(BaseModel):
     items: list[TxItem] = Field(description="按 tx_time 降序")
 
 
+class PendingResp(BaseModel):
+    """未修正交易清单 —— MCP 的 list_pending_classification 专用"""
+
+    total: int = Field(
+        description="未修正交易的总数。items 被截断时也返回全量数，"
+                    "AI 靠它判断要不要继续处理"
+    )
+    items: list[TxItem] = Field(description="按 tx_time 降序，服务端最多返回 50 条")
+
+
 # ============================================================================
 #  5. 修正 —— 写入口
 # ============================================================================
