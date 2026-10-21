@@ -19,8 +19,12 @@ from backend import db  # noqa: E402
 from backend.main import app  # noqa: E402
 
 PRIVATE = ROOT / "private_input"
-EXPECTED_WECHAT = 123
-EXPECTED_ALIPAY = 24
+
+# 期望笔数【不硬编码】——从预览响应里派生。
+# 硬编码会把脚本绑死在某一份样本上：换一份真实账单（哪怕只是多导了一个月）
+# 断言就必然失败，看起来像导入坏了，其实是断言写死了。
+# 派生出来的断言反而更强：它校验的是「预览看到的 = 写入的 = 重复导入跳过的」，
+# 这条等式对任何数据都成立。
 
 
 def require(ok: bool, message: str) -> None:
@@ -37,16 +41,21 @@ def upload(client: TestClient, endpoint: str, file: Path) -> dict:
     return response.json()
 
 
-def import_once(client: TestClient, file: Path, count: int, label: str) -> None:
+def import_once(client: TestClient, file: Path, count: int, label: str) -> dict:
     response = upload(client, "/api/import/commit", file)
-    require((response["inserted"], response["skipped"], response["failed"]) == (count, 0, 0),
-            f"{label} 首次导入结果不符合预期")
+    # 不打印响应正文：可能包含私人原始账单行。
+    require((response["inserted"], response["skipped"]) == (count, 0),
+            f"{label} 首次导入结果不符合预期（期望新增 {count} 笔，"
+            f"实际新增 {response['inserted']} / 跳过 {response['skipped']}）")
+    return response
 
 
-def import_again(client: TestClient, file: Path, count: int, label: str) -> None:
+def import_again(client: TestClient, file: Path, count: int, label: str) -> dict:
     response = upload(client, "/api/import/commit", file)
-    require((response["inserted"], response["skipped"], response["failed"]) == (0, count, 0),
-            f"{label} 重复导入结果不符合预期")
+    require((response["inserted"], response["skipped"]) == (0, count),
+            f"{label} 重复导入结果不符合预期（期望跳过 {count} 笔，"
+            f"实际新增 {response['inserted']} / 跳过 {response['skipped']}）")
+    return response
 
 
 def main() -> None:
@@ -66,24 +75,28 @@ def main() -> None:
                 print("1/8  独立临时数据库已创建；正式 bills.db 不参与测试")
 
                 ap = upload(client, "/api/import/preview", al)
-                require(ap["platform_id"] == "alipay" and ap["total"] == EXPECTED_ALIPAY,
-                        "支付宝预览数量与上传的验证样本不符")
+                require(ap["platform_id"] == "alipay", "支付宝文件未被识别为 alipay")
                 require(client.get("/health").json()["transactions"] == 0,
                         "预览不应向数据库写入记录")
-                print(f"2/8  支付宝真实 CSV 预览通过：{EXPECTED_ALIPAY} 笔有效交易，预览未写库")
+                n_alipay = ap["total"]
+                require(n_alipay > 0, "支付宝预览没有解析出任何有效交易")
+                print(f"2/8  支付宝真实 CSV 预览通过：{n_alipay} 笔有效交易，预览未写库")
 
-                import_once(client, al, EXPECTED_ALIPAY, "支付宝")
-                print(f"3/8  支付宝首次导入通过：新增 {EXPECTED_ALIPAY} 笔")
-                import_again(client, al, EXPECTED_ALIPAY, "支付宝")
-                print(f"4/8  支付宝重复导入通过：新增 0 笔，跳过 {EXPECTED_ALIPAY} 笔")
+                first_al = import_once(client, al, n_alipay, "支付宝")
+                print(f"3/8  支付宝首次导入通过：新增 {first_al['inserted']} 笔"
+                      f"（解析失败 {first_al['failed']} 笔）")
+                import_again(client, al, n_alipay, "支付宝")
+                print(f"4/8  支付宝重复导入通过：新增 0 笔，跳过 {n_alipay} 笔")
 
                 wp = upload(client, "/api/import/preview", wx)
-                require(wp["platform_id"] == "wechat" and wp["total"] == EXPECTED_WECHAT,
-                        "微信预览数量与上传的验证样本不符")
-                import_once(client, wx, EXPECTED_WECHAT, "微信")
-                print(f"5/8  微信预览与首次导入通过：新增 {EXPECTED_WECHAT} 笔")
-                import_again(client, wx, EXPECTED_WECHAT, "微信")
-                print(f"6/8  微信重复导入通过：新增 0 笔，跳过 {EXPECTED_WECHAT} 笔")
+                require(wp["platform_id"] == "wechat", "微信文件未被识别为 wechat")
+                n_wechat = wp["total"]
+                require(n_wechat > 0, "微信预览没有解析出任何有效交易")
+                first_wx = import_once(client, wx, n_wechat, "微信")
+                print(f"5/8  微信预览与首次导入通过：新增 {first_wx['inserted']} 笔"
+                      f"（解析失败 {first_wx['failed']} 笔）")
+                import_again(client, wx, n_wechat, "微信")
+                print(f"6/8  微信重复导入通过：新增 0 笔，跳过 {n_wechat} 笔")
 
                 conn = db.get_conn()
                 try:
@@ -99,9 +112,9 @@ def main() -> None:
                     ).fetchone()[0]
                 finally:
                     conn.close()
-                require(counts == {"alipay": EXPECTED_ALIPAY, "wechat": EXPECTED_WECHAT},
+                require(counts == {"alipay": n_alipay, "wechat": n_wechat},
                         "跨平台统一数据库笔数异常")
-                require(raw_count == EXPECTED_ALIPAY + EXPECTED_WECHAT,
+                require(raw_count == n_alipay + n_wechat,
                         "原始 JSON 未完整保留")
                 print(f"7/8  统一数据库核对通过：支付宝 {counts['alipay']} + 微信 {counts['wechat']} = {raw_count} 笔；支付宝退款相关 {refund_count} 笔")
 

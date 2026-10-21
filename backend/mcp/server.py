@@ -36,6 +36,19 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# ── 控制台编码容错（Windows 必做）─────────────────────────────
+# --selftest 里有一堆 ✓ / ✗ 打印。Windows 控制台默认 GBK 编不出这些字符，
+# 一旦碰到就是 UnicodeEncodeError 直接崩 —— main.py 已经踩过同一个坑。
+# 这里兜住：编不出来就替换，绝不让打印把自检或服务干掉。
+#
+# ⚠️ 不影响 MCP 协议通道：SDK 走的是 TextIOWrapper(sys.stdout.buffer, encoding="utf-8")，
+#    是套在 buffer 上的新包装器，不受这里对 sys.stdout 本身的重配置影响。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:      # 非标准流（被测试捕获等）直接跳过
+        pass
+
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from backend import db, overrides, reports  # noqa: E402
