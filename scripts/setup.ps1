@@ -1,12 +1,13 @@
 ﻿<#
   scripts\setup.ps1 —— 一次性环境初始化
 
+  换电脑 / 新队友上手，只需要跑这一个脚本。
+  前提：先安装 Python 3.10+ 和 Node.js；其余环境由本脚本初始化。
+
   做三件事：
       1. 建 .venv 虚拟环境
-      2. 装后端依赖
+      2. 装后端及测试依赖
       3. 装前端依赖
-
-  换电脑 / 新队友上手，只需要跑这一个脚本。
 #>
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -22,7 +23,7 @@ if (-not $py) {
 python --version
 
 Write-Host ''
-Write-Host '=== 2/3 建虚拟环境 + 装后端依赖 ===' -ForegroundColor Cyan
+Write-Host '=== 2/3 建虚拟环境 + 装后端和测试依赖 ===' -ForegroundColor Cyan
 
 # 外部命令（pip / npm）会往 stderr 写进度和提示，
 # 在 $ErrorActionPreference='Stop' 下，PowerShell 会把任何 stderr 输出
@@ -43,19 +44,34 @@ if (-not (Test-Path '.venv')) {
 
 & '.\.venv\Scripts\pip.exe' install -r requirements.txt --disable-pip-version-check
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  装后端依赖失败（退出码 $LASTEXITCODE）" -ForegroundColor Red
+    Write-Host "  装后端/测试依赖失败（退出码 $LASTEXITCODE）" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host '  验证 pytest 已安装' -ForegroundColor Cyan
+& '.\.venv\Scripts\python.exe' -m pytest --version
+if ($LASTEXITCODE -ne 0) {
+    Write-Host '  pytest 不可用，请检查 requirements.txt 和安装日志' -ForegroundColor Red
     exit 1
 }
 
 Write-Host ''
 Write-Host '=== 3/3 装前端依赖 ===' -ForegroundColor Cyan
-$npm = Get-Command npm -ErrorAction SilentlyContinue
+# 优先调用 npm.cmd，避免 PowerShell 对 npm.ps1 的执行策略问题。
+$npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+if (-not $npm) {
+    $npm = Get-Command npm -ErrorAction SilentlyContinue
+}
 if (-not $npm) {
     Write-Host '  没找到 npm，跳过前端。装了 Node.js 之后重跑本脚本。' -ForegroundColor Yellow
 } else {
-    npm --version
+    & $npm.Source --version
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '  npm 版本检查失败' -ForegroundColor Red
+        exit 1
+    }
     Push-Location 'frontend'
-    npm install
+    & $npm.Source install
     $npmCode = $LASTEXITCODE
     Pop-Location
     if ($npmCode -ne 0) {
@@ -69,4 +85,5 @@ Write-Host '完成。接下来：' -ForegroundColor Green
 Write-Host '  .\scripts\start-all.ps1        一键起前后端' -ForegroundColor White
 Write-Host '  .\scripts\start-backend.ps1   只起后端 (8000)' -ForegroundColor White
 Write-Host '  .\scripts\start-frontend.ps1  只起前端 (5173)' -ForegroundColor White
+Write-Host '  .\.venv\Scripts\python.exe -m pytest -q  运行自动化测试' -ForegroundColor White
 Write-Host ''
