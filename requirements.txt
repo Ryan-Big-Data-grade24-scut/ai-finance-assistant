@@ -7,6 +7,18 @@ python-multipart>=0.0.9      # 文件上传
 # ---- 导入器 ----
 openpyxl>=3.1                # 微信 .xlsx
 
+# ---- MCP ----
+mcp>=1.2,<2                  # MCP SDK v1（FastMCP），要求 Python >= 3.10。
+                             # 不要放开 <2：2.x 把 FastMCP 改名为 MCPServer，
+                             # backend/mcp/server.py 的写法会直接失效
+
+# ---- 测试 ----
+# tests/ 下的 20 个用例要跑得起来，这两个是必需的：
+#   pytest  —— 测试框架
+#   httpx   —— fastapi.testclient 依赖它（Starlette 1.x 起不再自带）
+pytest>=8.0
+httpx>=0.27
+
 # SQLite 用标准库 sqlite3，不需要额外依赖
 
 # ---- 测试 ----

@@ -43,14 +43,19 @@ AI 连接时读工具 schema 来决定「有哪些工具、参数叫什么」。
 │（不在我们应用里）  │
 └────────┬─────────┘
          │ MCP
-┌────────▼─────────┐
-│  mcp/server.py   │
-└────────┬─────────┘
+┌────────▼───────────────┐
+│ backend/mcp/server.py  │
+└────────┬───────────────┘
          │ 调用同一批 Python 函数
    ┌─────┴─────┐
    ▼           ▼
 reports/   overrides.py
 ```
+
+> **为什么在 `backend/` 下而不是文档早期写的根级 `mcp/`：**
+> PyPI 上 SDK 的包名就叫 `mcp`，项目根放一个 `mcp/` 目录会把 SDK 遮蔽，
+> `import mcp` 直接崩。子包 `backend.mcp` 不冲突。`requirements.txt` 里
+> `mcp` 同时钉死了 `<2`（2.x 把 FastMCP 改名为 MCPServer，现有写法会失效）。
 
 **MCP 只做转发，不做数据访问。**
 
@@ -112,11 +117,11 @@ def set_override(tx_id: int, data: schemas.OverrideIn) -> schemas.OverrideResp:
 
 ## 四、一个容易踩的坑
 
-**不要在 `mcp/server.py` 里直接 `conn.execute(...)`。**
+**不要在 `backend/mcp/server.py` 里直接 `conn.execute(...)`。**
 
 ```
-❌ 在 mcp/server.py 里直接 conn.execute("UPDATE ...")
-✅ 在 mcp/server.py 里调 overrides.set_override(...)
+❌ 在 backend/mcp/server.py 里直接 conn.execute("UPDATE ...")
+✅ 在 backend/mcp/server.py 里调 overrides.set_override(...)
 ```
 
 前者绕过了唯一的 403 校验点。**这不是风格问题，是把整个项目的核心约束作废。**
@@ -127,7 +132,10 @@ def set_override(tx_id: int, data: schemas.OverrideIn) -> schemas.OverrideResp:
 
 ## 五、状态
 
-**未实现。** 依赖的 ① 导入（微信部分）和 ② 报告都已就绪，可以随时开工。
+**✅ 后端已实现**（`backend/mcp/server.py`）。11 个工具全部就位，`--selftest` 覆盖：
+注册表完整、防线①（协议 schema 无原始字段）、读闭环、写闭环（临时库验证
+`updated_by="mcp"` 落库）、防线②（传 `amount` 被 extra=forbid 拒绝）、404 语义。
+stdio 真实客户端会话实测通过。待做：Claude Desktop 等真实客户端接入实测。
 
 实现要点见 `1-3_MCP接入.md`。
 

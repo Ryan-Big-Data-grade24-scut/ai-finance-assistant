@@ -11,8 +11,10 @@ date_from / date_to 【覆盖】period，不是叠加。
 from __future__ import annotations
 
 from .. import db
-from ..schemas import PaginatedResp, TxItem
-from ._common import direction_of, period_bounds, type_of
+from ..schemas import PaginatedResp, PendingResp
+from ._common import direction_of, period_bounds, row_to_tx_item, type_of
+
+PENDING_CAP = 50   # 待分类清单是「待办」不是全量导出，服务端硬收口
 
 
 def query_transactions(q) -> PaginatedResp:
@@ -71,13 +73,32 @@ def query_transactions(q) -> PaginatedResp:
 
     return PaginatedResp(
         total=total, page=q.page, size=q.size,
-        items=[TxItem(
-            id=r["id"], source=r["source"], tx_time=r["tx_time"],
-            date=r["date"], direction=type_of(r["direction"]), amount=r["amount"],
-            pay_method=r["pay_method"] or "", counterparty=r["counterparty"] or "",
-            item=r["item"] or "", category=r["category"] or "",
-            subcat=r["subcat"] or "", is_exempt=bool(r["is_exempt"]),
-            funding=r["funding"] or "自有", note=r["note"] or "",
-            is_overridden=bool(r["is_overridden"]),
-        ) for r in rows],
+        items=[row_to_tx_item(r) for r in rows],
     )
+
+
+def list_pending(limit: int = 20) -> PendingResp:
+    """未人工修正过的交易（is_overridden = 0），按 tx_time 降序。
+
+    给 MCP 的 list_pending_classification 用 —— AI 帮用户分类时的候选清单。
+    这份清单的口径与 HTTP 的 /api/report/transactions 完全一致（同查 v_tx）。
+    """
+    n = max(1, min(limit, PENDING_CAP))
+
+    conn = db.get_conn()
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM v_tx WHERE is_overridden = 0"
+        ).fetchone()["n"]
+        rows = conn.execute(
+            "SELECT id, source, tx_time, date, direction, amount, pay_method, "
+            "counterparty, item, category, subcat, is_exempt, funding, "
+            "note, is_overridden "
+            "FROM v_tx WHERE is_overridden = 0 "
+            "ORDER BY tx_time DESC, id DESC LIMIT :limit",
+            {"limit": n},
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return PendingResp(total=total, items=[row_to_tx_item(r) for r in rows])

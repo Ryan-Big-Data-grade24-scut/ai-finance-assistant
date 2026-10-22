@@ -25,8 +25,8 @@ from __future__ import annotations
 from typing import Any
 
 from . import db
-from .reports._common import type_of
-from .schemas import OverrideIn, OverrideResp, TxDetailResp, TxItem
+from .reports._common import row_to_tx_item, type_of
+from .schemas import OverrideIn, OverrideResp, TxDetailResp
 
 # ── 绝对不允许出现在修正请求里的字段 ──────────────────────
 FORBIDDEN_FIELDS = frozenset({
@@ -69,26 +69,6 @@ SELECT tx_id, manual_category, manual_subcat, is_exempt,
        exempt_reason, funding, note, updated_by, updated_at
 FROM tx_overrides WHERE tx_id = ?
 """
-
-
-def _row_to_tx_item(row) -> TxItem:
-    return TxItem(
-        id=row["id"],
-        source=row["source"],
-        tx_time=row["tx_time"],
-        date=row["date"],
-        direction=type_of(row["direction"]),
-        amount=row["amount"],
-        pay_method=row["pay_method"] or "",
-        counterparty=row["counterparty"] or "",
-        item=row["item"] or "",
-        category=row["category"] or "",
-        subcat=row["subcat"] or "",
-        is_exempt=bool(row["is_exempt"]),
-        funding=row["funding"] or "自有",
-        note=row["note"] or "",
-        is_overridden=bool(row["is_overridden"]),
-    )
 
 
 def _row_to_override(row) -> OverrideResp | None:
@@ -197,7 +177,7 @@ def get_tx_detail(tx_id: int) -> TxDetailResp:
     finally:
         conn.close()
     return TxDetailResp(
-        raw=_row_to_tx_item(raw),
+        raw=row_to_tx_item(raw),
         override=_row_to_override(ovr),
     )
 
