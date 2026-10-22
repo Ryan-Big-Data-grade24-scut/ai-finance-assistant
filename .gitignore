@@ -12,16 +12,11 @@ db/backups/
 *.zip
 !db/schema.sql
 
-# 仅允许 sample_data/ 中经脱敏、可公开的演示样例。
-# 不要把真实账单放进 sample_data/；这些例外是为了正常提交演示样例，
-# 不应通过 git add -f 绕过忽略规则。
+# 仅允许 sample_data/ 顶层的虚构 CSV/ZIP 演示样例。
+# 不允许 XLSX 或嵌套目录中的文件，以降低真实账单误提交风险。
 !sample_data/
 !sample_data/*.csv
-!sample_data/**/*.csv
-!sample_data/*.xlsx
-!sample_data/**/*.xlsx
 !sample_data/*.zip
-!sample_data/**/*.zip
 
 # ---- Python ----
 __pycache__/

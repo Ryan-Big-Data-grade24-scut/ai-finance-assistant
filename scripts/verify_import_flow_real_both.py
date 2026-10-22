@@ -56,9 +56,12 @@ def import_once(client: TestClient, file: Path, count: int, label: str) -> dict:
     inserted = response["inserted"]
     skipped = response["skipped"]
     failed = response["failed"]
+
+    # preview.total 只统计有效交易。commit 还可能显式报告无效行
+    # （例如 amount <= 0）；failed 不计入有效交易的 inserted/skipped 等式。
     require(
-        failed == 0 and inserted + skipped == count,
-        f"{label} 首次导入未完整处理预览中的交易",
+        inserted + skipped == count and isinstance(failed, int) and failed >= 0,
+        f"{label} 首次导入未完整处理预览中的有效交易，或失败计数无效",
     )
     require(
         inserted > 0,
@@ -67,12 +70,30 @@ def import_once(client: TestClient, file: Path, count: int, label: str) -> dict:
     return response
 
 
-def import_again(client: TestClient, file: Path, count: int, label: str) -> dict:
+def import_again(
+    client: TestClient,
+    file: Path,
+    count: int,
+    label: str,
+    expected_failed: int,
+) -> dict:
     response = upload(client, "/api/import/commit", file)
+    inserted = response["inserted"]
+    skipped = response["skipped"]
+    failed = response["failed"]
+
+    # 重复导入时，有效交易应全部跳过；无效行仍须显式报告 failed。
     require(
-        (response["inserted"], response["skipped"], response["failed"])
-        == (0, count, 0),
-        f"{label} 重复导入结果不符合预期",
+        inserted == 0 and skipped == count,
+        f"{label} 重复导入的有效交易结果不符合预期",
+    )
+    require(
+        isinstance(failed, int) and failed >= 0,
+        f"{label} 重复导入返回了无效的失败计数",
+    )
+    require(
+        failed == expected_failed,
+        f"{label} 重复导入的失败计数与首次导入不一致",
     )
     return response
 
@@ -110,16 +131,21 @@ def main() -> None:
                 al_first = import_once(client, al, al_count, "支付宝")
                 print(
                     f"3/8  支付宝首次导入通过：新增 {al_first['inserted']} 笔，"
-                    f"跳过 {al_first['skipped']} 笔文件内重复记录"
+                    f"跳过有效交易 {al_first['skipped']} 笔，"
+                    f"显式报告失败记录 {al_first['failed']} 笔"
                 )
-                import_again(client, al, al_count, "支付宝")
+                al_again = import_again(
+                    client, al, al_count, "支付宝", al_first["failed"]
+                )
                 require(
                     client.get("/health").json()["transactions"]
                     == al_first["inserted"],
                     "支付宝重复导入不应新增数据库记录",
                 )
                 print(
-                    f"4/8  支付宝重复导入通过：新增 0 笔，跳过 {al_count} 笔"
+                    f"4/8  支付宝重复导入通过：新增 0 笔，"
+                    f"跳过有效交易 {al_count} 笔，"
+                    f"显式报告失败记录 {al_again['failed']} 笔"
                 )
 
                 wp = upload(client, "/api/import/preview", wx)
@@ -134,8 +160,9 @@ def main() -> None:
                 )
 
                 wx_first = import_once(client, wx, wx_count, "微信")
-
-                import_again(client, wx, wx_count, "微信")
+                wx_again = import_again(
+                    client, wx, wx_count, "微信", wx_first["failed"]
+                )
                 require(
                     client.get("/health").json()["transactions"]
                     == al_first["inserted"] + wx_first["inserted"],
@@ -143,8 +170,9 @@ def main() -> None:
                 )
                 print(
                     f"6/8  微信首次与重复导入通过：首次新增 {wx_first['inserted']} 笔，"
-                    f"跳过文件内重复 {wx_first['skipped']} 笔；"
-                    f"重复导入新增 0 笔，跳过 {wx_count} 笔"
+                    f"首次跳过有效交易 {wx_first['skipped']} 笔、失败记录 "
+                    f"{wx_first['failed']} 笔；重复导入新增 0 笔，"
+                    f"跳过有效交易 {wx_count} 笔、失败记录 {wx_again['failed']} 笔"
                 )
 
                 conn = db.get_conn()
@@ -168,17 +196,16 @@ def main() -> None:
                 finally:
                     conn.close()
 
+                # 与预览有效交易数对账，避免仅与 commit 响应对账而漏检漏写。
                 expected_counts = {
-                    "alipay": al_first["inserted"],
-                    "wechat": wx_first["inserted"],
+                    "alipay": al_count,
+                    "wechat": wx_count,
                 }
                 require(
                     counts == expected_counts,
-                    "跨平台统一数据库笔数与首次导入结果不一致",
+                    "数据库内各平台笔数与预览有效交易数不一致",
                 )
-                expected_raw_count = (
-                    al_first["inserted"] + wx_first["inserted"]
-                )
+                expected_raw_count = al_count + wx_count
                 require(
                     raw_count == expected_raw_count,
                     "原始 JSON 未完整保留",
