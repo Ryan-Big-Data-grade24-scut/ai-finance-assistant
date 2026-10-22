@@ -60,19 +60,26 @@
 **不要在 MCP 里自己写 SQL。**
 
 ```
-❌ 在 mcp/server.py 里直接 conn.execute("UPDATE ...")
-✅ 在 mcp/server.py 里调 overrides.set_override(...)
+❌ 在 backend/mcp/server.py 里直接 conn.execute("UPDATE ...")
+✅ 在 backend/mcp/server.py 里调 overrides.set_override(...)
 ```
 
 `overrides.py` 是唯一有校验的地方。绕过它，整个项目的核心约束就作废了。
 
 参数模型直接复用 `backend/schemas.py`，MCP 的 schema 和 HTTP 的 schema 永远一致。
 
+⚠️ 落地路径是 `backend/mcp/server.py`，不是根级 `mcp/server.py` ——
+PyPI 上 SDK 的包名就叫 `mcp`，根级目录会遮蔽 SDK（详见 `04_MCP.md`）。
+
 ---
 
 ## 当前状态
 
-**未实现。** 依赖的功能一（导入）、功能二（报告）都已就绪，可以直接开工。
+**✅ 后端已实现**（`backend/mcp/server.py`，用 `python -m backend.mcp.server` 启动）。
+
+- 11 个工具全部就位；`--selftest` 覆盖注册表 / 防线① / 读写闭环 / 403 与 404 语义
+- stdio 真实客户端会话实测通过
+- 待做：Claude Desktop 等真实客户端接入实测（README「跑起来」一节有配置示例）
 
 ---
 

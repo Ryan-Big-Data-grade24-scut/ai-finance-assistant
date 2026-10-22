@@ -8,6 +8,8 @@ from __future__ import annotations
 import calendar as _cal
 from datetime import date, timedelta
 
+from ..schemas import TxItem
+
 # 收支方向：前端 type 参数 → 库里 direction 字段
 TYPE_TO_DIRECTION = {"expense": "支出", "income": "收入"}
 
@@ -72,4 +74,28 @@ def where_clause(period: str, value: str, alias: str = "") -> tuple[str, dict]:
     return (
         f"{p}date BETWEEN :period_start AND :period_end",
         {"period_start": start, "period_end": end},
+    )
+
+
+def row_to_tx_item(row) -> TxItem:
+    """v_tx 一行 → TxItem。
+
+    报告层与 overrides.py 共用的唯一映射器 —— 两边各写一遍迟早对不上口径。
+    """
+    return TxItem(
+        id=row["id"],
+        source=row["source"],
+        tx_time=row["tx_time"],
+        date=row["date"],
+        direction=type_of(row["direction"]),
+        amount=row["amount"],
+        pay_method=row["pay_method"] or "",
+        counterparty=row["counterparty"] or "",
+        item=row["item"] or "",
+        category=row["category"] or "",
+        subcat=row["subcat"] or "",
+        is_exempt=bool(row["is_exempt"]),
+        funding=row["funding"] or "自有",
+        note=row["note"] or "",
+        is_overridden=bool(row["is_overridden"]),
     )

@@ -1,18 +1,20 @@
-﻿# ---- 后端 ----
+﻿
+# ---- Backend ----
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.6
-python-multipart>=0.0.9      # 文件上传
+python-multipart>=0.0.9
 
-# ---- 导入器 ----
-openpyxl>=3.1                # 微信 .xlsx
+# ---- Importer ----
+openpyxl>=3.1
 
-# SQLite 用标准库 sqlite3，不需要额外依赖
+# ---- MCP ----
+mcp>=1.2,<2
 
-# ---- 测试 ----
-pytest>=8.0                  # 自动化测试运行器
-httpx>=0.27                  # 兼容较旧的 Starlette TestClient
-httpx2                        # 当前 Starlette TestClient 优先使用，避免 httpx 弃用警告
+# ---- Tests ----
+pytest>=8.0
+httpx>=0.27
+httpx2
 
-# ---- 前端（另装）----
+# ---- Frontend (install separately) ----
 # cd frontend && npm install

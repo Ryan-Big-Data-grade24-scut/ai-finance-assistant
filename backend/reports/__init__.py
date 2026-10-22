@@ -1,5 +1,5 @@
 """
-backend/reports/ —— 7 个 preset 报告组件
+backend/reports/ —— 只读查询组件（7 个 preset 报告 + 待分类清单）
 
 硬约束
 ======
@@ -17,7 +17,7 @@ from .trend import get_trend
 from .category import get_by_category
 from .method import get_by_method
 from .income_rank import get_income_rank
-from .transactions import query_transactions
+from .transactions import query_transactions, list_pending
 
 __all__ = [
     "get_summary",
@@ -27,4 +27,5 @@ __all__ = [
     "get_by_method",
     "get_income_rank",
     "query_transactions",
+    "list_pending",
 ]
