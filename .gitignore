@@ -1,4 +1,4 @@
-# ---- 账本数据：每个���每个人的，必须忽略 ----
+# ---- 账本数据：每个人的真实账本数据，必须忽略 ----
 db/*.db
 db/*.db-wal
 db/*.db-shm
@@ -11,6 +11,17 @@ db/backups/
 *.csv
 *.zip
 !db/schema.sql
+
+# 仅允许 sample_data/ 中经脱敏、可公开的演示样例。
+# 不要把真实账单放进 sample_data/；这些例外是为了正常提交演示样例，
+# 不应通过 git add -f 绕过忽略规则。
+!sample_data/
+!sample_data/*.csv
+!sample_data/**/*.csv
+!sample_data/*.xlsx
+!sample_data/**/*.xlsx
+!sample_data/*.zip
+!sample_data/**/*.zip
 
 # ---- Python ----
 __pycache__/
@@ -36,3 +47,6 @@ dist/
 .DS_Store
 Thumbs.db
 *.swp
+
+# ---- 私人真实账单：绝不提交到 Git ----
+/private_input/
