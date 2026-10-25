@@ -194,3 +194,33 @@ def clear_override(tx_id: int, updated_by: str = "ui") -> None:
             c.execute("DELETE FROM tx_overrides WHERE tx_id = ?", (tx_id,))
     finally:
         conn.close()
+
+
+def delete_transaction(tx_id: int, deleted_by: str = "ui") -> None:
+    """从明细和统计中删除一笔交易，但不改动原始凭证。
+
+    墓碑记录会让 v_tx 隐藏该交易；transactions_raw 及其 dedupe_key 保留，
+    所以重复导入同一账单也不会让该交易重新出现。
+    """
+    if not isinstance(tx_id, int) or tx_id <= 0:
+        raise TxNotFound(tx_id)
+
+    conn = db.get_conn()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM transactions_raw WHERE id = ?", (tx_id,)
+        ).fetchone()
+        if exists is None:
+            raise TxNotFound(tx_id)
+
+        with db.transaction(conn) as c:
+            c.execute(
+                "INSERT INTO tx_deletions (tx_id, deleted_by, reason, deleted_at) "
+                "VALUES (?, ?, ?, datetime('now')) "
+                "ON CONFLICT(tx_id) DO UPDATE SET "
+                "deleted_by = excluded.deleted_by, reason = excluded.reason, "
+                "deleted_at = datetime('now')",
+                (tx_id, deleted_by, "用户从交易明细删除"),
+            )
+    finally:
+        conn.close()

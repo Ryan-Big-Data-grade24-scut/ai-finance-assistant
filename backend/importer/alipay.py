@@ -50,6 +50,12 @@ HEADER_MAP = {
 
 ENCODINGS = ("utf-8-sig", "gbk", "gb18030", "utf-8")
 
+# 支付宝 CSV 在交易表后会追加统计尾注。这些内容不是坏账单，不能计入
+# ParseIssues；遇到分隔线或已知汇总项即说明交易表已经结束。
+FOOTER_PREFIXES = (
+    "共", "已收入:", "待收入:", "已支出:", "待支出:", "导出时间:",
+)
+
 
 def decode_csv(data: bytes) -> str:
     """按优先级尝试解码。支付宝导出多为 GBK。"""
@@ -67,6 +73,19 @@ def find_header_row(lines: list[str], max_scan: int = 40) -> int:
         if "收/支" in ln and ("交易时间" in ln or "交易创建时间" in ln):
             return i
     raise ValueError("未找到支付宝表头行")
+
+
+def is_footer_row(raw_row: list[str]) -> bool:
+    """识别支付宝交易表后的分隔线、汇总和导出信息。"""
+    if not raw_row:
+        return False
+    first = clean(raw_row[0])
+    if not first:
+        return False
+    compact = first.replace(" ", "")
+    if len(compact) >= 8 and set(compact) <= {"-", "=", "_"}:
+        return True
+    return any(compact.startswith(prefix) for prefix in FOOTER_PREFIXES)
 
 
 def parse(path: Path, password: str | None = None,
@@ -122,6 +141,8 @@ def parse(path: Path, password: str | None = None,
     for raw_row in reader:
         if not raw_row or not clean(raw_row[0]):
             continue
+        if is_footer_row(raw_row):
+            break
 
         def get(key: str):
             idx = col.get(key)
