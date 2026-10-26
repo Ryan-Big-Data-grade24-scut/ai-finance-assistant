@@ -16,6 +16,7 @@
       </RouterLink>
       <nav class="nav">
         <RouterLink to="/bill" class="nav-item">账单报告</RouterLink>
+        <RouterLink to="/star" class="nav-item">星图账本</RouterLink>
         <RouterLink to="/import" class="nav-item">导入账单</RouterLink>
       </nav>
     </header>

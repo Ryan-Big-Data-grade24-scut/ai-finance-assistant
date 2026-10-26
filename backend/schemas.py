@@ -14,7 +14,7 @@ backend/schemas.py —— 唯一契约
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -398,3 +398,223 @@ EXAMPLE_INCOME_RANK = {
          "counterparty": "", "tx_type": "转账红包", "source": "微信支付"},
     ]
 }
+
+
+# ============================================================================
+#  6. 账本（第二轮）—— 账本代数引擎
+#
+#  ⚠️ 口径提醒：账本的数字和第一轮 reports 的数字**不是一回事**。
+#     reports 是「平台口径的平铺统计」；账本是「用户自己分的组」。
+#     两者不许相加，也不许互相校验。
+#
+#  ⚠️ 写操作只有一个入口 POST /api/ledger/op，body 是判别联合：
+#     漏传字段 / 传错字段在 Pydantic 层就被拒，不会漏到引擎里。
+# ============================================================================
+
+LedgerOpType = Literal[
+    "set_op", "split", "unsplit", "create_node",
+    "dissolve_node", "reassign", "attach_tx", "detach_tx",
+]
+LedgerNodeOp = Literal["ADD", "NET"]
+LedgerRole = Literal["primary", "mirror"]
+
+
+class LedgerBookCreate(BaseModel):
+    """建账 —— 用户定义的一个「阶段」"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="账本名字，如 '2026 十月'")
+    date_from: str = Field(description="起始日期 'YYYY-MM-DD'。建账时按区间冻结成员，之后不可改")
+    date_to: str = Field(description="结束日期 'YYYY-MM-DD'（含当天）")
+    note: str | None = Field(default=None, description="备注，可空")
+
+
+class LedgerBookOut(BaseModel):
+    book_id: str = Field(description="账本 id，如 'bk_0001'")
+    name: str
+    date_from: str
+    date_to: str
+    member_count: int = Field(description="这本账里的交易笔数（建账时按区间冻结）")
+    created_at: str = Field(description="创建时间 'YYYY-MM-DD HH:MM:SS'")
+
+
+class LedgerBookListResp(BaseModel):
+    books: list[LedgerBookOut] = Field(description="所有账本，按创建时间倒序")
+
+
+class LedgerNodeOut(BaseModel):
+    node_id: str = Field(description="节点 id，格式 '{book_id}:n0007' —— 自带归属前缀")
+    parent_id: str | None = Field(description="父节点 id；根节点为 null")
+    name: str = Field(description="节点名")
+    op: LedgerNodeOp = Field(description="聚合方式：ADD 直接相加 / NET 净额化")
+    kind: Literal["root", "group", "external_income"] = Field(
+        description="external_income 是分裂镜像腿的专用落点（代数 I4）"
+    )
+    depth: int = Field(description="深度，根为 0")
+    e: float = Field(description="该节点的支出分量，单位元，两位小数")
+    i: float = Field(description="该节点的收入分量，单位元，两位小数")
+    net: float = Field(description="净值 i - e，正数是净流入")
+    child_count: int = Field(description="子节点数")
+    leg_count: int = Field(description="本节点直接持有的腿数")
+
+
+class LedgerLegOut(BaseModel):
+    tx_id: int = Field(description="交易 id，指向 transactions_raw.id")
+    role: LedgerRole = Field(description="primary 主腿 / mirror 分裂产生的镜像腿")
+    node_id: str = Field(description="这条腿挂在哪个节点上")
+    e: float = Field(description="腿的支出分量")
+    i: float = Field(description="腿的收入分量")
+
+
+class LedgerTreeResp(BaseModel):
+    """整棵树的权威快照 —— 前端乐观更新后必须用它覆盖本地状态"""
+
+    book_id: str
+    root_id: str
+    root_e: float = Field(description="根节点的支出分量")
+    root_i: float = Field(description="根节点的收入分量")
+    root_net: float = Field(description="根节点净值")
+    nodes: list[LedgerNodeOut]
+    legs: list[LedgerLegOut]
+    focus_node_ids: list[str] = Field(
+        default_factory=list, description="焦点节点的子树 id 列表；只是提示，不裁剪 nodes"
+    )
+
+
+class LedgerInvariantOut(BaseModel):
+    name: str = Field(description="检查项代号：I1/I2/T1/I3/I4/I5/I6/AUDIT")
+    ok: bool = Field(description="是否通过")
+    message: str = Field(description="不通过时的中文说明，通过时为空串")
+
+
+class LedgerStatusResp(BaseModel):
+    book_id: str
+    total_tx: int = Field(description="本账交易总数")
+    placed_tx: int = Field(description="已归位（已有腿）的笔数")
+    unplaced_tx: int = Field(description="未归位的笔数")
+    node_count: int
+    leg_count: int
+    root_e: float
+    root_i: float
+    root_net: float
+    invariants: list[LedgerInvariantOut]
+    invariants_ok: bool = Field(description="全部不变量是否通过")
+    current_seq: int = Field(description="当前操作序号")
+    can_undo: bool
+    can_redo: bool
+
+
+class LedgerOpResp(LedgerTreeResp):
+    """写操作的响应 —— 树 + 序号 + 警告"""
+
+    seq: int = Field(description="本次操作之后的序号")
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="人话警告，如「这次操作让总账少了 12.60 元」。不是错误。",
+    )
+
+
+# ---- 八个 op 分支 ----
+#  每个分支 extra="forbid"：传错字段在 Pydantic 层就被拒。
+#  前端 switch (op.op) 能穷尽检查（判别联合 → 联合类型 → 穷尽 switch）。
+
+class LedgerOpSetOp(BaseModel):
+    """切节点的聚合方式：ADD ↔ NET。注意净额化有损，切回 ADD 不保证数值还原"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["set_op"]
+    node_id: str = Field(description="目标节点 id")
+    op_value: LedgerNodeOp = Field(description="新的聚合方式")
+
+
+class LedgerOpSplit(BaseModel):
+    """分裂一笔交易。只对涉及外部额度（亲情卡/他人代付）的交易有效"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["split"]
+    tx_id: int = Field(description="要分裂的交易 id")
+
+
+class LedgerOpUnsplit(BaseModel):
+    """把分裂的两条腿合回一条。数值会变（分裂本身不守恒），这是预期行为"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["unsplit"]
+    tx_id: int
+
+
+class LedgerOpCreateNode(BaseModel):
+    """建子节点：把若干腿从父节点挪到新节点"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["create_node"]
+    parent_id: str = Field(description="父节点 id")
+    name: str = Field(description="新节点的名字")
+    op_value: LedgerNodeOp = Field(default="ADD", description="新节点的聚合方式")
+    tx_ids: list[int] = Field(default_factory=list, description="要挪进新节点的交易 id")
+
+
+class LedgerOpDissolveNode(BaseModel):
+    """解散分组：成员挪回父节点，节点删除"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["dissolve_node"]
+    node_id: str
+
+
+class LedgerOpReassign(BaseModel):
+    """改交易归属 —— AI 分类插件唯一的写操作"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["reassign"]
+    tx_id: int
+    to_node_id: str = Field(description="挪到哪个节点")
+
+
+class LedgerOpAttachTx(BaseModel):
+    """把一笔交易纳入本账"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["attach_tx"]
+    tx_id: int
+    node_id: str | None = Field(default=None, description="放到哪个节点；不给就放根节点")
+
+
+class LedgerOpDetachTx(BaseModel):
+    """把一笔交易移出本账"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["detach_tx"]
+    tx_id: int
+
+
+LedgerOpIn = Annotated[
+    Union[
+        LedgerOpSetOp,
+        LedgerOpSplit,
+        LedgerOpUnsplit,
+        LedgerOpCreateNode,
+        LedgerOpDissolveNode,
+        LedgerOpReassign,
+        LedgerOpAttachTx,
+        LedgerOpDetachTx,
+    ],
+    Field(discriminator="op"),
+]
+
+
+class LedgerOpRequest(BaseModel):
+    """POST /api/ledger/op 的请求体"""
+
+    book_id: str = Field(description="操作作用在哪本账上。不引入「当前账本」这种隐式状态")
+    op: LedgerOpIn = Field(description="具体操作，按 op 字段判别分支")
+    updated_by: str = Field(default="ui", description="谁发起的：'ui' / 'mcp'")

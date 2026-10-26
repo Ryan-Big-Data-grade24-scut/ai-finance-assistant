@@ -5,10 +5,11 @@ backend/main.py —— FastAPI 入口
 它只做四件事：注册路由 / 启动建表 / 统一错误响应 / CORS。
 看到 if/else 里的业务判断，说明逻辑漏进来了，该挪到 reports/ 或 overrides/。
 
-路由分三类：
+路由分四类：
     /api/import/*   导入      → importer/
     /api/report/*   只读查询   → reports/
     /api/tx/*       写修正    → overrides.py（唯一入口）
+    /api/ledger/*   账本      → ledger/service.py（唯一写入口 /api/ledger/op）
 
 启动后打开 http://localhost:8000/docs
     所有 11 个接口 + 字段说明 + 可直接 Try it out
@@ -29,9 +30,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend import db, overrides, reports                    # noqa: E402
 from backend import overrides as overrides_mod                # noqa: E402
 from backend.importer import ImportResult, parse_file, import_file  # noqa: E402
+from backend import importer as importer_mod                   # noqa: E402
 from backend.importer.base import ParseIssues  # noqa: E402
 from backend.overrides import ForbiddenFieldError, TxNotFound  # noqa: E402
 from backend import schemas as S                              # noqa: E402
+from backend.ledger import service as ledger_service          # noqa: E402
+from backend.ledger.errors import LedgerError                # noqa: E402
 
 # ── 控制台编码容错（Windows 必做）─────────────────────────────
 # Windows 控制台默认 GBK。启动期只要有一个 print 碰到 GBK 编不出的字符
@@ -67,18 +71,28 @@ def health() -> dict:
     刻意放在 /health 而不是 /api/health —— 它不是业务接口，
     不该出现在 /docs 的业务列表里被当成"第 13 个接口"。
     """
-    conn = db.get_conn()
-    try:
-        total = conn.execute("SELECT COUNT(*) c FROM transactions_raw").fetchone()["c"]
-        batches = conn.execute("SELECT COUNT(*) c FROM import_batches").fetchone()["c"]
-    finally:
-        conn.close()
+    snap = db.health_snapshot()
     return {
         "status": "ok",
         "db": str(db.DB_PATH),
-        "transactions": total,
-        "batches": batches,
+        "transactions": snap["transactions"],
+        "batches": snap["batches"],
     }
+
+
+# ── 账本（第二轮）───────────────────────────────────────────
+#  唯一写路径：POST /api/ledger/op
+#  每个请求都显式带 book_id —— 不引入「当前账本」这个隐式状态
+#  （MCP 没有会话，HTTP 多标签页会互相踩）。
+
+@app.exception_handler(LedgerError)
+async def _ledger_error(_req, exc: LedgerError):
+    """引擎拒绝了一次操作。响应体 {code, message, detail}。
+
+    message 是**人话** —— 前端直接弹给用户，MCP 直接念给模型听。
+    """
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -210,16 +224,7 @@ async def import_commit(
 @app.get("/api/import/history")
 async def import_history():
     """导入批次记录。"""
-    conn = db.get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT b.*, p.name AS platform_name FROM import_batches b "
-            "LEFT JOIN platforms p ON p.id = b.platform_id "
-            "ORDER BY b.created_at DESC"
-        ).fetchall()
-    finally:
-        conn.close()
-    return {"batches": [dict(r) for r in rows]}
+    return {"batches": importer_mod.list_batches()}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -292,3 +297,77 @@ async def tx_clear_override(tx_id: int):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
+
+# ═══════════════════════════════════════════════════════════
+#  账本（第二轮 · 账本代数引擎）
+#
+#  口径提醒：账本的数字和 /api/report/* 的数字**不是一回事**。
+#  reports 是平台口径的平铺统计，账本是用户自己分的组。两者不相加。
+#
+#  写路径只有一个：POST /api/ledger/op
+#  每次都带 book_id —— 不引入「当前账本」这种隐式状态。
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/api/ledger/books", response_model=S.LedgerBookListResp, tags=["ledger"])
+def ledger_books():
+    """账本列表。用户定义的若干「阶段」，每阶段一本独立账。"""
+    books = ledger_service.list_books()
+    out = []
+    for b in books:
+        st = ledger_service.get_status(b.book_id)
+        out.append(S.LedgerBookOut(
+            book_id=b.book_id,
+            name=b.name,
+            date_from=b.date_from,
+            date_to=b.date_to,
+            member_count=st["total_tx"],
+            created_at=b.created_at,
+        ))
+    return S.LedgerBookListResp(books=out)
+
+
+@app.post("/api/ledger/books", response_model=S.LedgerTreeResp, tags=["ledger"])
+def ledger_create_book(body: S.LedgerBookCreate):
+    """建一本账：按区间冻结成员集，生成 M₀（根 + 全部腿的一层平铺树）。"""
+    return ledger_service.create_book(
+        body.name, body.date_from, body.date_to,
+        created_by="ui", note=body.note,
+    )
+
+
+@app.get("/api/ledger/tree", response_model=S.LedgerTreeResp, tags=["ledger"])
+def ledger_tree(book_id: str, focus_node_id: str | None = None):
+    """整棵树 + 每个节点的聚合值。focus_node_id 只是焦点提示，不裁剪内容。"""
+    return ledger_service.get_tree(book_id, focus_node_id)
+
+
+@app.get("/api/ledger/status", response_model=S.LedgerStatusResp, tags=["ledger"])
+def ledger_status(book_id: str):
+    """客观状态：多少笔已归位、多少笔待归、不变量是否通过、能不能撤销。"""
+    return ledger_service.get_status(book_id)
+
+
+@app.post("/api/ledger/op", response_model=S.LedgerOpResp, tags=["ledger"])
+def ledger_op(body: S.LedgerOpRequest):
+    """**唯一写入口**。body.op 是判别联合，按 op 字段选分支。"""
+    op = body.op.model_dump()
+    return ledger_service.apply_op(body.book_id, op, created_by=body.updated_by)
+
+
+@app.post("/api/ledger/undo", response_model=S.LedgerOpResp, tags=["ledger"])
+def ledger_undo(book_id: str):
+    """撤销一步。靠操作日志里的逆操作，不是靠算术。"""
+    return ledger_service.undo(book_id)
+
+
+@app.post("/api/ledger/redo", response_model=S.LedgerOpResp, tags=["ledger"])
+def ledger_redo(book_id: str):
+    """重做一步。"""
+    return ledger_service.redo(book_id)
+
+
+@app.post("/api/ledger/reset", response_model=S.LedgerOpResp, tags=["ledger"])
+def ledger_reset(book_id: str):
+    """回到 M₀ —— 树全 collapse 成「根 + 全部腿」。"""
+    return ledger_service.reset_to_m0(book_id)

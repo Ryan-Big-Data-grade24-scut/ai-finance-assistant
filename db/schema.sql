@@ -189,3 +189,119 @@ CREATE VIEW IF NOT EXISTS v_tx_counted AS
 SELECT *
 FROM v_tx
 WHERE is_exempt = 0;
+
+-- ============================================================================
+--  第二轮 · 账本层（代数引擎）
+--
+--  账本是**第四条平行通道**：与 importer / overrides / reports 互不相干。
+--  它只**读** transactions_raw + tx_overrides（取 funding 判定分裂适用域），
+--  只**写** ledger_* 表。永不 UPDATE/DELETE 原始层。
+--
+--  写这些表的代码**只允许**出现在 backend/ledger/store.py。
+--  验证：tests/test_ledger_guardrails.py（grep 零命中）
+-- ============================================================================
+
+-- ---- 账本 = 用户定义的一个「阶段」 ----
+CREATE TABLE IF NOT EXISTS ledger_books (
+    book_id      TEXT PRIMARY KEY,          -- 'bk_0001'
+    name         TEXT NOT NULL,             -- '2026 十月'
+    date_from    TEXT NOT NULL,             -- '2026-10-01'  建账时按区间冻结
+    date_to      TEXT NOT NULL,             -- '2026-10-31'  之后不可改
+    root_node_id TEXT NOT NULL,             -- '{book_id}:root'
+    note         TEXT,
+    created_by   TEXT NOT NULL DEFAULT 'ui',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ---- 账本成员集：显式物化 ----
+--  同一本账内一笔交易只出现一次；同一笔交易可以属于多本账（账本正交）。
+--  区间在建账时冻结，之后只能靠 attach/detach 显式增删。
+CREATE TABLE IF NOT EXISTS ledger_book_tx (
+    book_id  TEXT    NOT NULL REFERENCES ledger_books(book_id) ON DELETE CASCADE,
+    tx_id    INTEGER NOT NULL REFERENCES transactions_raw(id) ON DELETE RESTRICT,
+    added_by TEXT    NOT NULL DEFAULT 'ui',
+    added_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (book_id, tx_id)
+);
+
+-- ---- 树节点 ----
+--  node_id 自带归属前缀（'{book_id}:n0007'）⇒ 跨账本不可能撞。
+--  即使忘了传 book_id 也能从 node_id 反解归属，不一致就报 CROSS_BOOK。
+--  自引用 FK 用 ON DELETE RESTRICT：有子节点的节点删不掉，
+--  「解散分组」必须先把成员挪回去。
+CREATE TABLE IF NOT EXISTS ledger_nodes (
+    book_id    TEXT    NOT NULL REFERENCES ledger_books(book_id) ON DELETE CASCADE,
+    node_id    TEXT    NOT NULL,
+    parent_id  TEXT,
+    name       TEXT    NOT NULL,
+    op         TEXT    NOT NULL CHECK (op IN ('ADD', 'NET')),
+    kind       TEXT    NOT NULL DEFAULT 'group'
+                       CHECK (kind IN ('root', 'group', 'external_income')),
+    sort_key   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (book_id, node_id),
+    FOREIGN KEY (book_id, parent_id)
+        REFERENCES ledger_nodes(book_id, node_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_nodes_parent
+    ON ledger_nodes (book_id, parent_id);
+
+-- ---- 腿：只存**结构**，不存数值 ----
+--  e/i/amount 由 atoms 在读取时按规则实时算：
+--  规则一改，物化的数值就过期；结构（谁在哪）才需要持久化。
+CREATE TABLE IF NOT EXISTS ledger_legs (
+    book_id    TEXT    NOT NULL,
+    tx_id      INTEGER NOT NULL,
+    node_id    TEXT    NOT NULL,
+    role       TEXT    NOT NULL CHECK (role IN ('primary', 'mirror')),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (book_id, tx_id, role),
+    FOREIGN KEY (book_id, node_id)
+        REFERENCES ledger_nodes(book_id, node_id) ON DELETE RESTRICT,
+    FOREIGN KEY (book_id, tx_id)
+        REFERENCES ledger_book_tx(book_id, tx_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_legs_node
+    ON ledger_legs (book_id, node_id);
+
+-- ---- 操作日志：undo 靠日志，不靠算术 ----
+--  分裂不守恒、切 NET 有损 ⇒ 「还原」只能靠记录逆操作。
+CREATE TABLE IF NOT EXISTS ledger_ops (
+    op_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id         TEXT    NOT NULL REFERENCES ledger_books(book_id) ON DELETE CASCADE,
+    seq             INTEGER NOT NULL,
+    op_type         TEXT    NOT NULL,
+    payload         TEXT    NOT NULL,      -- JSON：正向参数
+    inverse_type    TEXT    NOT NULL,      -- JSON：逆操作类型
+    inverse_payload TEXT    NOT NULL,      -- JSON：逆操作参数
+    summary         TEXT,                  -- JSON：根值变化等摘要
+    created_by      TEXT    NOT NULL DEFAULT 'ui',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (book_id, seq)
+);
+
+-- ---- 撤销/重做状态 ----
+CREATE TABLE IF NOT EXISTS ledger_book_state (
+    book_id      TEXT    PRIMARY KEY REFERENCES ledger_books(book_id) ON DELETE CASCADE,
+    current_seq INTEGER NOT NULL DEFAULT 0,
+    redo_stack  TEXT    NOT NULL DEFAULT '[]'   -- JSON 数组：被撤销的 seq
+);
+
+-- ---- 快照：M₀ 与手动快照（「回到 M₀」的还原目标）----
+CREATE TABLE IF NOT EXISTS ledger_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    book_id     TEXT    NOT NULL REFERENCES ledger_books(book_id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    label       TEXT,
+    tree_json   TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_book
+    ON ledger_snapshots (book_id, seq);
+
+-- ---- 序号分配（节点 id / op 序号）----
+CREATE TABLE IF NOT EXISTS ledger_seq (
+    scope    TEXT PRIMARY KEY,      -- 'node:{book_id}' / 'op:{book_id}'
+    next_val INTEGER NOT NULL DEFAULT 1
+);

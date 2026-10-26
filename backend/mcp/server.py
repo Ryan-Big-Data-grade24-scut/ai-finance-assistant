@@ -54,6 +54,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from backend import db, overrides, reports  # noqa: E402
 from backend import schemas as S  # noqa: E402
 from backend.importer import import_file  # noqa: E402
+from backend.ledger import service as ledger_service  # noqa: E402
 
 mcp = FastMCP(
     "ai-finance-assistant",
@@ -63,7 +64,10 @@ mcp = FastMCP(
         "口径因人而异（转给爸妈的不算、买理财不算、还花呗不算……）："
         "拿不准就先问清用户的口径，再用 set_override 落地成豁免/分类，"
         "不要替用户假设。\n"
-        "原始记录永远不可修改 —— 试图传 amount / tx_time 等原始字段会被直接拒绝。"
+        "原始记录永远不可修改 —— 试图传 amount / tx_time 等原始字段会被直接拒绝。\n"
+        "账本（query_ledger_* / apply_ledger_op）是**另一套口径**，"
+        "和上面的报表数字不是一回事，不要相加也不要互相校验；"
+        "账本里的每个数都由后端算出，你只解读、不心算。"
     ),
 )
 
@@ -196,6 +200,99 @@ def import_bill(path: str,
 
 
 # ═══════════════════════════════════════════════════════════
+#  账本 3 个 —— 第二轮「账本代数引擎」
+#
+#  ⚠️ 账本的数字和上面 9 个报表工具的数字**不是一回事**：
+#     报表是平台口径的平铺统计，账本是用户自己分的组。两者不相加。
+#
+#  为什么用扁平可选参数而不是判别联合：
+#     MCP 的工具 schema 来自函数签名。判别联合会变成 oneOf，
+#     模型选分支时容易出错。扁平参数 + 一个 op 字符串更稳。
+# ═══════════════════════════════════════════════════════════
+
+@mcp.tool()
+def query_ledger_books() -> list:
+    """账本列表：用户定义的若干「阶段」，每阶段一本独立账，各有自己的树。
+
+    每本账的成员集在建账时按日期区间**冻结**了，互不重叠也不相加。
+    要看某一本的树，用 query_ledger_tree(book_id)。
+    """
+    return [
+        {
+            "book_id": b.book_id,
+            "name": b.name,
+            "date_from": b.date_from,
+            "date_to": b.date_to,
+            "created_at": b.created_at,
+        }
+        for b in ledger_service.list_books()
+    ]
+
+
+@mcp.tool()
+def query_ledger_tree(book_id: str, focus_node_id: str | None = None) -> dict:
+    """账本的整棵树：节点、每个节点的 (支出, 收入)、腿的归属。
+
+    focus_node_id 只影响返回里的 focus_node_ids 提示，不裁剪内容。
+    返回的 tree 就是**权威状态** —— 不要自己维护一份树再和它对比。
+    """
+    return ledger_service.get_tree(book_id, focus_node_id)
+
+
+@mcp.tool()
+def apply_ledger_op(
+    book_id: str,
+    op: str,
+    node_id: str | None = None,
+    tx_id: int | None = None,
+    to_node_id: str | None = None,
+    name: str | None = None,
+    op_value: str | None = None,
+    tx_ids: list[int] | None = None,
+) -> dict:
+    """对账本做一次修改（**唯一的写通道**）。
+
+    op 取值与所需参数：
+
+    - "set_op"          切节点的聚合方式。node_id=目标节点，op_value="ADD"|"NET"
+    - "split"           分裂一笔交易。tx_id=交易 id
+                        ⚠️ 只对「涉及外部额度」的交易有效（亲情卡/他人代付），
+                           别的会被拒绝 —— 那是设计，不是故障
+    - "unsplit"         把分裂的两条腿合回一条。tx_id=交易 id
+    - "create_node"     建分组。parent_id 走 node_id，name=分组名，
+                        op_value=新节点的聚合方式，tx_ids=要挪进去的交易 id 列表
+    - "dissolve_node"   解散分组。node_id=目标节点（成员会回到父节点）
+    - "reassign"        改交易归属。tx_id=交易 id，to_node_id=目标节点
+    - "attach_tx"       把一笔交易纳入本账。tx_id=交易 id（node_id 可选）
+    - "detach_tx"       把一笔交易移出本账。tx_id=交易 id
+
+    怎么用：
+
+    - **别逐笔调用做批量归类。** 想把 20 笔挪进同一个组，用一次
+      create_node 带 tx_ids=[...]，不要循环 20 次 reassign。
+    - **别改金额、时间、方向。** 账本层管不了这些 —— 那些是原始事实。
+    - 返回值里的 tree 就是权威状态，直接用它，不要自己推算数字。
+    - 引擎会拒绝非法组合并给出一句人话理由 —— 把那句话转述给用户，
+      不要自己另编一套解释。
+    """
+    payload: dict = {"op": op}
+    if node_id is not None:
+        # 建分组时 node_id 表示**父节点**；其它 op 里它就是目标节点
+        payload["parent_id" if op == "create_node" else "node_id"] = node_id
+    if tx_id is not None:
+        payload["tx_id"] = tx_id
+    if to_node_id is not None:
+        payload["to_node_id"] = to_node_id
+    if name is not None:
+        payload["name"] = name
+    if op_value is not None:
+        payload["op_value"] = op_value
+    if tx_ids is not None:
+        payload["tx_ids"] = list(tx_ids)
+    return ledger_service.apply_op(book_id, payload, created_by="mcp")
+
+
+# ═══════════════════════════════════════════════════════════
 #  自检 —— 不起服务，直接验证注册表和一条读写闭环
 # ═══════════════════════════════════════════════════════════
 
@@ -204,6 +301,7 @@ EXPECTED_TOOLS = {
     "query_by_category", "query_by_method", "query_income_rank",
     "query_transactions", "get_tx_detail", "list_pending_classification",
     "set_override", "import_bill",
+    "query_ledger_books", "query_ledger_tree", "apply_ledger_op",
 }
 
 
@@ -244,7 +342,7 @@ async def _selftest() -> int:
     if names != EXPECTED_TOOLS:
         print(f"✗ 工具注册表不符：{sorted(names)}")
         return 1
-    print(f"✓ 11 个工具已注册：{sorted(names)}")
+    print(f"✓ {len(EXPECTED_TOOLS)} 个工具已注册：{sorted(names)}")
 
     so = next(t for t in tools if t.name == "set_override")
     leaked = _walk_schema_props(so.inputSchema) & overrides.FORBIDDEN_FIELDS
@@ -335,6 +433,49 @@ async def _selftest() -> int:
                     print(f"✗ 404 语义丢失：{e}")
                     return 1
             print("✓ 404 语义：不存在的交易返回「交易不存在: 999」")
+
+            # ── 账本 3 步 ───────────────────────────────────
+            # 建账走 HTTP 层的 service（MCP 工具里没有「建账」——
+            # 建账是用户行为，不是 AI 的活儿）
+            lb = ledger_service.create_book("自检账", "2026-09-01", "2026-09-30")
+            lbid = lb["book"]["book_id"]
+
+            books = await mcp.call_tool("query_ledger_books", {})
+            if lbid not in _blocks_text(books):
+                print(f"✗ query_ledger_books 返回异常：{_blocks_text(books)[:200]}")
+                return 1
+            print("✓ 账本读闭环①：query_ledger_books 正常返回")
+
+            created = await mcp.call_tool(
+                "apply_ledger_op",
+                {"book_id": lbid, "op": "create_node",
+                 "node_id": lb["root_id"], "name": "测试组",
+                 "op_value": "ADD", "tx_ids": [1]},
+            )
+            ctext = _blocks_text(created)
+            if "nodes" not in ctext:
+                print(f"✗ apply_ledger_op 返回异常：{ctext[:300]}")
+                return 1
+            print("✓ 账本写闭环：apply_ledger_op 建组成功，返回权威树")
+
+            tree = await mcp.call_tool("query_ledger_tree", {"book_id": lbid})
+            if "root_id" not in _blocks_text(tree):
+                print(f"✗ query_ledger_tree 返回异常：{_blocks_text(tree)[:200]}")
+                return 1
+            print("✓ 账本读闭环②：query_ledger_tree 返回整棵树")
+
+            try:
+                await mcp.call_tool(
+                    "apply_ledger_op",
+                    {"book_id": lbid, "op": "split", "tx_id": 1},
+                )
+                print("✗ 不该分裂的交易竟然分裂成功 —— 适用域失守")
+                return 1
+            except Exception as e:
+                if "外部额度" not in str(e):
+                    print(f"✗ 拒绝理由不对：{e}")
+                    return 1
+            print("✓ 引擎拒绝语义：分裂不适用时拒绝并给出人话理由")
         finally:
             db.DB_PATH = real_path
 
