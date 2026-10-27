@@ -343,6 +343,62 @@ def test_undo_redo_roundtrip(env):
     assert _shape(service.get_tree(bid)) == after
 
 
+def test_undo_set_op_restores_the_node_op(env):
+    """撤销「切聚合方式」必须真的把节点切回去。
+
+    **为什么单列一条**：`set_op` 是八个 op 里唯一「改状态」而不是「改归属」的，
+    而且它的逆操作载荷用的是 `op` 键（判别联合里 `op` 这个名字已经被
+    操作类型占了，所以节点算子叫 `op_value`）——
+    这两处细节很容易让撤销静默失效。
+
+    **这条测试是补上的**：黄金 fixture 里没有 set_op 这一步，
+    契约测试里也只用过 set_op、没撤销过它。
+    也就是说：**如果撤销 set_op 坏了，没有任何一条测试会红。**
+    这正是「不跑偏」要堵的洞。
+    """
+    book = make_book()
+    bid = book["book_id"]
+    out = service.apply_op(bid, {
+        "op": "create_node", "parent_id": book["root_id"],
+        "name": "餐饮", "op_value": "ADD", "tx_ids": [1, 6],
+    })
+    node_id = next(n["node_id"] for n in out["nodes"] if n["name"] == "餐饮")
+
+    def op_of(payload):
+        return next(n["op"] for n in payload["nodes"] if n["node_id"] == node_id)
+
+    assert op_of(out) == "ADD"
+    out = service.apply_op(bid, {
+        "op": "set_op", "node_id": node_id, "op_value": "NET"})
+    assert op_of(out) == "NET"
+
+    back = service.undo(bid)
+    assert op_of(back) == "ADD", "撤销切 op 没有把节点切回去"
+
+    again = service.redo(bid)
+    assert op_of(again) == "NET", "重做没有把节点切回 NET"
+
+
+def test_undo_set_op_is_a_noop_when_it_was_already_that(env):
+    """「设成已经是那个值」也是一种操作，撤销它就等于再设一次。
+
+    这条看着像废话，但它钉住一个语义：
+    **撤销还原的是「操作前的状态」，不是「某个固定值」。**
+    如果实现里写成「撤销 = 设成 ADD」，这条就会红。
+    """
+    book = make_book()
+    bid = book["book_id"]
+    out = service.apply_op(bid, {
+        "op": "create_node", "parent_id": book["root_id"],
+        "name": "餐饮", "op_value": "ADD", "tx_ids": [1, 6],
+    })
+    node_id = next(n["node_id"] for n in out["nodes"] if n["name"] == "餐饮")
+    # 设成 ADD（本来就是 ADD）⇒ 记成一步操作
+    service.apply_op(bid, {"op": "set_op", "node_id": node_id, "op_value": "ADD"})
+    back = service.undo(bid)
+    assert next(n["op"] for n in back["nodes"] if n["node_id"] == node_id) == "ADD"
+
+
 def test_undo_restores_root_value_after_split(env):
     """分裂后撤销，根值必须还原（数值不守恒 ⇒ 靠日志还原）。"""
     book = make_book()

@@ -129,6 +129,8 @@ def test_golden_steps(env, golden):
                 payload["parent_id"] = _resolve(tree, payload["parent_id"])
             if "to_node_id" in payload:
                 payload["to_node_id"] = _resolve(tree, payload["to_node_id"])
+            if "node_id" in payload:
+                payload["node_id"] = _resolve(tree, payload["node_id"])
             if expect.get("rejected"):
                 with pytest.raises(LedgerError) as exc:
                     service.apply_op(bid, payload)
@@ -152,6 +154,16 @@ def test_golden_steps(env, golden):
         assert len(tree["legs"]) == expect["leg_count"], \
             f"步骤「{step['name']}」腿数不对：期望 {expect['leg_count']}，实际 {len(tree['legs'])}"
 
+        # 节点自身的 op（ADD / NET）也要钉住。
+        # 为什么单列：节点值只靠 e/i 判定的话，「切了 op 但数字碰巧没变」会漏过去
+        # —— 纯支出的组 ADD 和 NET 数值完全一样（见 fixture 第 3 步的 notes）。
+        for ref, want_op in (expect.get("node_ops") or {}).items():
+            nid = _resolve(tree, ref)
+            node = next((n for n in tree["nodes"] if n["node_id"] == nid), None)
+            assert node is not None, f"步骤「{step['name']}」里找不到节点 {ref}"
+            assert node["op"] == want_op, \
+                f"步骤「{step['name']}」节点 {ref} 的 op 不对：期望 {want_op}，实际 {node['op']}"
+
 
 def test_golden_invariants_stay_green(env, golden):
     """走完全部步骤后，不变量必须仍然全绿。"""
@@ -167,6 +179,8 @@ def test_golden_invariants_stay_green(env, golden):
             payload["parent_id"] = _resolve(tree, payload["parent_id"])
         if "to_node_id" in payload:
             payload["to_node_id"] = _resolve(tree, payload["to_node_id"])
+        if "node_id" in payload:
+            payload["node_id"] = _resolve(tree, payload["node_id"])
         try:
             tree = service.apply_op(bid, payload)
         except LedgerError:
