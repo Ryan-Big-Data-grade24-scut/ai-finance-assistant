@@ -36,6 +36,7 @@ dist/
 .env
 .env.*
 !.env.example
+.runtime/
 
 # ---- 编辑器 / 系统 ----
 .vscode/

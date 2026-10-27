@@ -34,6 +34,8 @@ let categoryChart: echarts.ECharts | null = null
 
 const currentType = computed<TxType>(() => props.type === 'income' ? 'income' : 'expense')
 const currentPeriod = computed<Period>(() => ['week', 'year'].includes(props.period) ? props.period as Period : 'month')
+const pickerMode = ref<Period>(currentPeriod.value)
+const pickerCursor = ref(new Date())
 const reportParams = computed<ReportParams>(() => ({ type: currentType.value, period: currentPeriod.value, value: props.value }))
 const isIncome = computed(() => currentType.value === 'income')
 const topCategory = computed(() => categories.value.majors[0])
@@ -43,18 +45,6 @@ const maxDayAmount = computed(() => Math.max(...calendar.value.days.map(item => 
 const periodTabs: { key: Period; label: string }[] = [
   { key: 'week', label: '周' }, { key: 'month', label: '月' }, { key: 'year', label: '年' },
 ]
-const periodOptions = computed(() => {
-  const year = Number(props.value.slice(0, 4)) || new Date().getFullYear()
-  if (currentPeriod.value === 'year') return Array.from({ length: 5 }, (_, index) => ({ value: String(year + 1 - index), label: `${year + 1 - index}年` }))
-  if (currentPeriod.value === 'month') return Array.from({ length: 12 }, (_, index) => {
-    const month = 12 - index
-    return { value: `${year}-${String(month).padStart(2, '0')}`, label: `${year}年${month}月` }
-  })
-  return Array.from({ length: 53 }, (_, index) => {
-    const week = 53 - index
-    return { value: `${year}-W${String(week).padStart(2, '0')}`, label: `${year}年第${week}周` }
-  })
-})
 
 const money = (value: number) => new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)
 const compactMoney = (value: number) => value >= 10000 ? `${(value / 10000).toFixed(1)}万` : money(value)
@@ -96,6 +86,63 @@ function weekStart(value: string) {
 }
 function isoDate(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function periodValueDate(period: Period, value: string) {
+  if (period === 'week') return weekStart(value)
+  const year = Number(value.slice(0, 4)) || new Date().getFullYear()
+  const month = period === 'month' ? Math.max(1, Number(value.slice(5, 7)) || 1) : 1
+  return new Date(year, month - 1, 1)
+}
+
+const pickerTitle = computed(() => {
+  const year = pickerCursor.value.getFullYear()
+  if (pickerMode.value === 'week') return `${year}年${pickerCursor.value.getMonth() + 1}月`
+  if (pickerMode.value === 'month') return `${year}年`
+  const start = Math.floor(year / 10) * 10 - 1
+  return `${start} — ${start + 11}年`
+})
+const pickerDayCells = computed(() => {
+  const year = pickerCursor.value.getFullYear()
+  const month = pickerCursor.value.getMonth()
+  const leading = (new Date(year, month, 1).getDay() + 6) % 7
+  const count = new Date(year, month + 1, 0).getDate()
+  const cells: Array<{ key: string; day: number; date: Date } | null> = Array.from({ length: leading }, () => null)
+  for (let day = 1; day <= count; day += 1) {
+    const date = new Date(year, month, day)
+    cells.push({ key: isoDate(date), day, date })
+  }
+  return cells
+})
+const pickerMonths = computed(() => Array.from({ length: 12 }, (_, index) => ({
+  month: index + 1,
+  value: `${pickerCursor.value.getFullYear()}-${String(index + 1).padStart(2, '0')}`,
+})))
+const pickerYears = computed(() => {
+  const start = Math.floor(pickerCursor.value.getFullYear() / 10) * 10 - 1
+  return Array.from({ length: 12 }, (_, index) => start + index)
+})
+
+function pickerWeekValue(date: Date) {
+  const current = isoWeek(date)
+  return `${current.year}-W${String(current.week).padStart(2, '0')}`
+}
+function isPickerWeekSelected(date: Date) {
+  return pickerMode.value === 'week' && pickerWeekValue(date) === props.value
+}
+function shiftPicker(delta: number) {
+  const current = pickerCursor.value
+  if (pickerMode.value === 'week') pickerCursor.value = new Date(current.getFullYear(), current.getMonth() + delta, 1)
+  else if (pickerMode.value === 'month') pickerCursor.value = new Date(current.getFullYear() + delta, current.getMonth(), 1)
+  else pickerCursor.value = new Date(current.getFullYear() + delta * 10, 0, 1)
+}
+function choosePickerDay(date: Date) {
+  pickerOpen.value = false
+  replaceQuery({ period: 'week', value: pickerWeekValue(date) })
+}
+function choosePickerValue(value: string) {
+  pickerOpen.value = false
+  replaceQuery({ period: pickerMode.value, value })
 }
 
 const dayMap = computed(() => new Map(calendar.value.days.map(day => [day.date, day])))
@@ -158,16 +205,18 @@ function setPane(pane: 'overview' | 'category') {
   router.replace({ query: { ...router.currentRoute.value.query, tab: pane === 'overview' ? 'summary' : 'category' } })
 }
 function openPeriodPicker(period: Period) {
-  if (period !== currentPeriod.value) setPeriod(period)
+  pickerMode.value = period
+  const value = period === currentPeriod.value ? props.value : setPeriod(period)
+  pickerCursor.value = periodValueDate(period, value)
   pickerOpen.value = true
 }
-function choosePeriod(value: string) { pickerOpen.value = false; replaceQuery({ value }) }
 function setPeriod(period: Period) {
   const year = props.value.slice(0, 4) || String(new Date().getFullYear())
   let value = year
   if (period === 'month') value = `${year}-${String(new Date().getMonth() + 1).padStart(2, '0')}`
   if (period === 'week') { const current = isoWeek(new Date()); value = `${current.year}-W${String(current.week).padStart(2, '0')}` }
   replaceQuery({ period, value })
+  return value
 }
 function shiftPeriod(delta: number) {
   if (currentPeriod.value === 'year') { replaceQuery({ value: String(Number(props.value) + delta) }); return }
@@ -278,8 +327,24 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
         <button v-for="item in periodTabs" :key="item.key" :class="{ active: currentPeriod === item.key }" @click="openPeriodPicker(item.key)">{{ item.label }}<small>▼</small></button>
       </div>
       <div v-if="pickerOpen" class="period-picker">
-        <div><b>选择{{ currentPeriod === 'week' ? '周' : currentPeriod === 'month' ? '月份' : '年份' }}</b><button @click="pickerOpen = false">×</button></div>
-        <button v-for="option in periodOptions" :key="option.value" :class="{ active: option.value === props.value }" @click="choosePeriod(option.value)">{{ option.label }}</button>
+        <div class="period-picker-header"><b>选择{{ pickerMode === 'week' ? '周' : pickerMode === 'month' ? '月份' : '年份' }}</b><button type="button" aria-label="关闭" @click="pickerOpen = false">×</button></div>
+        <div class="picker-nav"><button type="button" aria-label="上一页" @click="shiftPicker(-1)">‹</button><strong>{{ pickerTitle }}</strong><button type="button" aria-label="下一页" @click="shiftPicker(1)">›</button></div>
+        <template v-if="pickerMode === 'week'">
+          <div class="picker-weekdays"><span v-for="name in ['一', '二', '三', '四', '五', '六', '日']" :key="name">{{ name }}</span></div>
+          <div class="picker-calendar-grid">
+            <template v-for="(cell, index) in pickerDayCells" :key="cell?.key || `picker-blank-${index}`">
+              <span v-if="!cell" class="picker-day blank" />
+              <button v-else type="button" class="picker-day" :class="{ selected: isPickerWeekSelected(cell.date), today: isToday(cell.key), 'has-record': dayMap.has(cell.key) }" @click="choosePickerDay(cell.date)"><b>{{ cell.day }}</b></button>
+            </template>
+          </div>
+          <p class="picker-help">点击任意日期，将选择它所在的完整一周</p>
+        </template>
+        <div v-else-if="pickerMode === 'month'" class="picker-option-grid months">
+          <button v-for="item in pickerMonths" :key="item.value" type="button" :class="{ selected: currentPeriod === 'month' && item.value === props.value }" @click="choosePickerValue(item.value)">{{ item.month }}月</button>
+        </div>
+        <div v-else class="picker-option-grid years">
+          <button v-for="year in pickerYears" :key="year" type="button" :class="{ selected: currentPeriod === 'year' && String(year) === props.value }" @click="choosePickerValue(String(year))">{{ year }}年</button>
+        </div>
       </div>
       <div class="filter-row">
         <div class="date-switcher"><button class="round-button" aria-label="上一周期" @click="shiftPeriod(-1)">‹</button><strong>{{ periodLabel }}</strong><button class="round-button" aria-label="下一周期" @click="shiftPeriod(1)">›</button></div>
@@ -375,6 +440,6 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
 @media(max-width:390px){.period-tabs{gap:26px}.view-tabs{gap:24px}.date-switcher .round-button{display:none}.date-switcher strong{text-align:left}.hero-orbit{display:none}.metric-grid{gap:8px}.calendar-cell small{transform:scale(.9)}}
 .report-page{max-width:100%;overflow-x:clip}.filter-row,.date-switcher{min-width:0}.type-toggle{flex:none}
 @media(max-width:720px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.report-card,.hero-card{max-width:100%;overflow:hidden}}
-.period-tabs button small{margin-left:4px;color:#9aa4b3;font-size:8px}.period-picker{position:absolute;z-index:40;top:58px;left:50%;width:min(520px,calc(100% - 32px));max-height:310px;overflow:auto;display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:14px;border:1px solid #e0e7f0;border-radius:18px;background:rgba(255,255,255,.98);box-shadow:0 20px 45px rgba(43,61,88,.18);transform:translateX(-50%)}.period-picker>div{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;padding:3px 4px 8px}.period-picker>div button{border:0;background:transparent;color:#7d8999;font-size:20px;cursor:pointer}.period-picker>button{padding:9px 8px;border:0;border-radius:10px;background:#f4f7fb;color:#59677b;cursor:pointer}.period-picker>button.active{background:#397ceb;color:#fff;font-weight:700}.heading-actions{display:flex;align-items:center;gap:9px}.chart-switch{display:flex;padding:3px;border-radius:10px;background:#edf2f8}.chart-switch button{padding:6px 10px;border:0;border-radius:8px;background:transparent;color:#748094;font-size:12px;cursor:pointer}.chart-switch button.active{background:#fff;color:#2f6fbe;font-weight:700;box-shadow:0 3px 9px rgba(55,77,110,.1)}.calendar-cell{border:0;font-family:inherit;cursor:pointer}.calendar-cell:disabled{cursor:default}.calendar-grid.heatmap .calendar-cell{transition:background .2s,color .2s}.category-legend button.active{background:#eaf2fd;color:#285f9f}.category-legend button.active b{color:#2f73c8}
-@media(max-width:720px){.period-picker{top:52px;grid-template-columns:repeat(2,1fr)}.heading-actions{align-items:flex-end;flex-direction:column}.average-pill{display:none}.chart-switch button{padding:6px 9px}.category-overview .section-heading{align-items:center}.category-overview .data-badge{display:none}}
+.period-tabs button small{margin-left:4px;color:#9aa4b3;font-size:8px}.period-picker{position:absolute;z-index:40;top:58px;left:50%;width:min(410px,calc(100% - 32px));padding:16px 18px 15px;border:1px solid #dce5ef;border-radius:20px;background:rgba(255,255,255,.98);box-shadow:0 22px 55px rgba(43,61,88,.2);transform:translateX(-50%)}.period-picker-header,.picker-nav{display:flex;align-items:center;justify-content:space-between}.period-picker-header{padding-bottom:10px}.period-picker-header>b{font-size:15px}.period-picker-header>button,.picker-nav>button{border:0;background:transparent;color:#7c8999;cursor:pointer}.period-picker-header>button{width:32px;height:32px;border-radius:50%;font-size:22px}.period-picker-header>button:hover,.picker-nav>button:hover{background:#f0f4f9}.picker-nav{padding:6px 0 13px}.picker-nav>strong{font-size:17px}.picker-nav>button{width:34px;height:34px;border-radius:10px;font-size:24px}.picker-weekdays,.picker-calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}.picker-weekdays{padding-bottom:6px;color:#909baa;text-align:center;font-size:11px}.picker-day{position:relative;min-height:38px;border:0;border-radius:9px;background:#f7f9fc;color:#566479;font:inherit;cursor:pointer}.picker-day.blank{visibility:hidden}.picker-day:hover{background:#e9f2ff;color:#2f6fbe}.picker-day.selected{background:#dcecff;color:#275f9f;border-radius:4px}.picker-day.today{box-shadow:inset 0 0 0 2px #6b9bd4}.picker-day.has-record:after{content:'';position:absolute;left:50%;bottom:4px;width:4px;height:4px;border-radius:50%;background:#3f83ee;transform:translateX(-50%)}.picker-day.selected.has-record:after{background:#275f9f}.picker-help{margin:10px 0 0;color:#8994a4;font-size:11px;text-align:center}.picker-option-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.picker-option-grid button{min-height:43px;padding:9px 7px;border:0;border-radius:11px;background:#f4f7fb;color:#59677b;font:inherit;cursor:pointer}.picker-option-grid button:hover{background:#e9f2ff;color:#2f6fbe}.picker-option-grid button.selected{background:#397ceb;color:#fff;font-weight:700}.heading-actions{display:flex;align-items:center;gap:9px}.chart-switch{display:flex;padding:3px;border-radius:10px;background:#edf2f8}.chart-switch button{padding:6px 10px;border:0;border-radius:8px;background:transparent;color:#748094;font-size:12px;cursor:pointer}.chart-switch button.active{background:#fff;color:#2f6fbe;font-weight:700;box-shadow:0 3px 9px rgba(55,77,110,.1)}.calendar-cell{border:0;font-family:inherit;cursor:pointer}.calendar-cell:disabled{cursor:default}.calendar-grid.heatmap .calendar-cell{transition:background .2s,color .2s}.category-legend button.active{background:#eaf2fd;color:#285f9f}.category-legend button.active b{color:#2f73c8}
+@media(max-width:720px){.period-picker{top:52px;width:min(390px,calc(100% - 20px));padding:14px}.picker-day{min-height:36px}.heading-actions{align-items:flex-end;flex-direction:column}.average-pill{display:none}.chart-switch button{padding:6px 9px}.category-overview .section-heading{align-items:center}.category-overview .data-badge{display:none}}
 </style>

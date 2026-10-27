@@ -118,6 +118,20 @@ CREATE INDEX IF NOT EXISTS idx_ovr_exempt
     ON tx_overrides (is_exempt) WHERE is_exempt = 0;
 
 -- ============================================================================
+--  用户删除标记 —— 原始凭证仍保持不可变
+--
+--  前端“删除”只在这里写一条墓碑记录。这样既能让交易从明细和报表消失，
+--  又能保留 dedupe_key，避免同一账单再次导入时把已删除记录重新加回来。
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS tx_deletions (
+    tx_id       INTEGER PRIMARY KEY
+                REFERENCES transactions_raw(id) ON DELETE CASCADE,
+    deleted_by  TEXT NOT NULL DEFAULT 'ui',
+    reason      TEXT,
+    deleted_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ============================================================================
 --  导入批次 —— 支持"这次导错了，回滚这一批"
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS import_batches (
@@ -179,7 +193,10 @@ SELECT
     CASE WHEN o.tx_id IS NULL THEN 0 ELSE 1 END  AS is_overridden
 
 FROM transactions_raw r
-LEFT JOIN tx_overrides o ON o.tx_id = r.id;
+LEFT JOIN tx_overrides o ON o.tx_id = r.id
+WHERE NOT EXISTS (
+    SELECT 1 FROM tx_deletions d WHERE d.tx_id = r.id
+);
 
 -- ============================================================================
 --  便捷视图：仅统计口径的"真消费"

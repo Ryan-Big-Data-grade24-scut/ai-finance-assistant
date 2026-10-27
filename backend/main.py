@@ -277,6 +277,13 @@ async def tx_detail(tx_id: int):
     return overrides.get_tx_detail(tx_id)
 
 
+@app.delete("/api/tx/{tx_id}")
+async def tx_delete(tx_id: int):
+    """从明细和所有统计中移除交易，同时保留原始凭证用于审计和去重。"""
+    overrides.delete_transaction(tx_id, deleted_by="ui")
+    return {"tx_id": tx_id, "deleted": True}
+
+
 @app.patch("/api/tx/{tx_id}/override", response_model=S.OverrideResp)
 async def tx_set_override(tx_id: int, data: S.OverrideIn):
     """修改一笔的分类 / 豁免 / 资金来源 / 备注。
