@@ -18,6 +18,8 @@ const error = ref('')
 const historyError = ref('')
 const historyBusy = ref(false)
 const confirmedLowConfidence = ref(false)
+const dragActive = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
 
 let lastPreviewFile: File | null = null
 let lastPreviewPassword = ''
@@ -43,8 +45,7 @@ function resetForChange() {
   lastPreviewPassword = ''
 }
 
-function onFile(event: Event) {
-  const selected = (event.target as HTMLInputElement).files?.[0] ?? null
+function selectFile(selected: File | null) {
   resetForChange()
   file.value = selected
   alipayPassword.value = ''
@@ -58,6 +59,23 @@ function onFile(event: Event) {
     error.value = '文件为空，请重新选择。'
     file.value = null
   }
+}
+
+function onFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  selectFile(input.files?.[0] ?? null)
+  // 允许用户连续选择同一个文件，并重新触发 change。
+  input.value = ''
+}
+
+function openFilePicker() {
+  if (busy.value !== 'commit') fileInput.value?.click()
+}
+
+function onDrop(event: DragEvent) {
+  dragActive.value = false
+  if (busy.value === 'commit') return
+  selectFile(event.dataTransfer?.files?.[0] ?? null)
 }
 
 function onPasswordInput(event: Event) {
@@ -138,7 +156,24 @@ onMounted(loadHistory)
       <p class="hint">支持微信支付 XLSX、支付宝 CSV / ZIP。先预览，确认后才会写入数据库。</p>
 
       <label class="input-label" for="bill-file">账单文件</label>
-      <input id="bill-file" type="file" accept=".xlsx,.csv,.zip" :disabled="busy === 'commit'" @change="onFile" />
+      <input ref="fileInput" id="bill-file" class="file-input" type="file" accept=".xlsx,.csv,.zip" :disabled="busy === 'commit'" @change="onFile" />
+      <div
+        class="drop-zone"
+        :class="{ active: dragActive, disabled: busy === 'commit' }"
+        role="button"
+        tabindex="0"
+        @click="openFilePicker"
+        @keydown.enter.prevent="openFilePicker"
+        @keydown.space.prevent="openFilePicker"
+        @dragenter.prevent="dragActive = true"
+        @dragover.prevent="dragActive = true"
+        @dragleave.prevent="dragActive = false"
+        @drop.prevent="onDrop"
+      >
+        <span class="drop-icon">⇩</span>
+        <strong>把账单文件拖到这里</strong>
+        <small>也可以点击选择文件 · 支持 XLSX、CSV、ZIP · 最大 25 MB</small>
+      </div>
       <p v-if="file" class="selected-file">已选择：{{ file.name }}（{{ (file.size / 1024).toFixed(1) }} KB）</p>
 
       <div v-if="isZip" class="password-field">
@@ -250,7 +285,12 @@ h3 { font-size: var(--font-lg); margin-bottom: var(--space-3); }
 .hint, .muted { color: var(--color-muted); }
 .hint { margin: var(--space-2) 0 var(--space-3); line-height: 1.6; }
 .input-label { font-weight: 600; display: block; margin: var(--space-3) 0 var(--space-2); }
-input[type='file'] { display: block; max-width: 100%; }
+.file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.drop-zone { min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: var(--space-4); border: 2px dashed #bdcce0; border-radius: 18px; background: #f7faff; color: #53657c; text-align: center; cursor: pointer; transition: .18s ease; }
+.drop-zone:hover, .drop-zone.active { border-color: var(--chart-1); background: #edf5ff; transform: translateY(-1px); }
+.drop-zone.disabled { opacity: .55; cursor: not-allowed; transform: none; }
+.drop-zone small { color: var(--color-muted); }
+.drop-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 13px; background: #deecfc; color: var(--chart-1); font-size: 25px; font-weight: 700; }
 input[type='password'] { width: min(100%, 380px); padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius); }
 .password-field { margin: var(--space-3) 0; }
 .selected-file { color: var(--color-text); margin-top: var(--space-2); overflow-wrap: anywhere; }

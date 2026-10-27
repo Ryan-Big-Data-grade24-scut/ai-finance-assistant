@@ -92,6 +92,77 @@ def test_alipay_gb18030_csv_and_zip(isolated_db: Path):
     assert repeat.skipped == 1
 
 
+def test_alipay_summary_footer_is_not_reported_as_invalid(isolated_db: Path):
+    path = alipay_file(isolated_db, extra_rows=[
+        '------------------------------------------------------------------------------------',
+        '共1笔记录',
+        '已收入:0笔,0.00元',
+        '待收入:0笔,0.00元',
+        '已支出:1笔,18.80元',
+        '待支出:0笔,0.00元',
+        '导出时间:[2026-10-25 19:21:56]    用户:模拟用户',
+    ])
+    issues = importer.ParseIssues()
+    rows = importer.parse_file(path, issues=issues)
+    assert len(rows) == 1
+    assert issues.failed == 0
+    assert issues.warnings == []
+
+
+def test_deleted_transaction_stays_hidden_after_duplicate_import(isolated_db: Path):
+    path = alipay_file(isolated_db)
+    first = importer.import_file(path)
+    assert first.inserted == 1
+
+    conn = db.get_conn()
+    try:
+        tx_id = conn.execute('SELECT id FROM transactions_raw').fetchone()[0]
+    finally:
+        conn.close()
+
+    from backend import overrides
+    overrides.delete_transaction(tx_id, deleted_by='test')
+
+    conn = db.get_conn()
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM transactions_raw').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM tx_deletions').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM v_tx').fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    repeat = importer.import_file(path)
+    assert (repeat.inserted, repeat.skipped) == (0, 1)
+    conn = db.get_conn()
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM v_tx').fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_delete_api_hides_transaction_from_detail_and_calendar(isolated_db: Path):
+    path = alipay_file(isolated_db)
+    importer.import_file(path)
+    conn = db.get_conn()
+    try:
+        tx_id = conn.execute('SELECT id FROM transactions_raw').fetchone()[0]
+    finally:
+        conn.close()
+
+    with TestClient(app) as client:
+        assert client.get(f'/api/tx/{tx_id}').status_code == 200
+        deleted = client.delete(f'/api/tx/{tx_id}')
+        assert deleted.status_code == 200
+        assert deleted.json() == {'tx_id': tx_id, 'deleted': True}
+        assert client.get(f'/api/tx/{tx_id}').status_code == 404
+        calendar = client.get(
+            '/api/report/calendar',
+            params={'type': 'expense', 'period': 'month', 'value': '2026-09'},
+        )
+        assert calendar.status_code == 200
+        assert calendar.json()['days'] == []
+
+
 def test_import_failure_rolls_back_all_rows(isolated_db: Path, monkeypatch):
     original = Row.to_sql_tuple
     counter = {'n': 0}

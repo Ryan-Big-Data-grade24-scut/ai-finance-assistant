@@ -46,6 +46,10 @@ export function getReportBundle(params: ReportParams) {
   ])
 }
 
+export function getCalendar(params: ReportParams) {
+  return getJson<CalendarResp>('/api/report/calendar', { ...params })
+}
+
 export function getTransactions(
   params: ReportParams,
   filters: {
@@ -70,4 +74,12 @@ export async function getTxDetail(id: number): Promise<TxDetailResp> {
   const response = await fetch(`/api/tx/${id}`)
   if (!response.ok) throw new Error(`交易详情加载失败（${response.status}）`)
   return response.json() as Promise<TxDetailResp>
+}
+
+export async function deleteTransaction(id: number): Promise<void> {
+  const response = await fetch(`/api/tx/${id}`, { method: 'DELETE' })
+  if (!response.ok) {
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.detail || `删除交易失败（${response.status}）`)
+  }
 }
