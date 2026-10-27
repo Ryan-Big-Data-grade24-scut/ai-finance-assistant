@@ -356,18 +356,18 @@ def ledger_op(body: S.LedgerOpRequest):
 
 
 @app.post("/api/ledger/undo", response_model=S.LedgerOpResp, tags=["ledger"])
-def ledger_undo(book_id: str):
+def ledger_undo(body: S.LedgerBookRef):
     """撤销一步。靠操作日志里的逆操作，不是靠算术。"""
-    return ledger_service.undo(book_id)
+    return ledger_service.undo(body.book_id)
 
 
 @app.post("/api/ledger/redo", response_model=S.LedgerOpResp, tags=["ledger"])
-def ledger_redo(book_id: str):
+def ledger_redo(body: S.LedgerBookRef):
     """重做一步。"""
-    return ledger_service.redo(book_id)
+    return ledger_service.redo(body.book_id)
 
 
 @app.post("/api/ledger/reset", response_model=S.LedgerOpResp, tags=["ledger"])
-def ledger_reset(book_id: str):
+def ledger_reset(body: S.LedgerBookRef):
     """回到 M₀ —— 树全 collapse 成「根 + 全部腿」。"""
-    return ledger_service.reset_to_m0(book_id)
+    return ledger_service.reset_to_m0(body.book_id)

@@ -278,6 +278,86 @@ def test_frontend_route_params_match_backend():
 
 
 # ──────────────────────────────────────────────────────────────
+#  护栏 10：前端发的参数，后端必须真的收得到
+# ──────────────────────────────────────────────────────────────
+
+def test_frontend_ledger_payload_matches_backend_body():
+    """前端 postJson 的 payload 键，必须是后端 body 模型的字段。
+
+    **为什么需要这条**：第一版骨架里，前端把 `book_id` 塞进 body、
+    后端按 query 收 —— 结果「撤销 / 重做 / 回到 M₀」三个按钮全坏，
+    而且**两边都不报错**：后端 422，前端只弹「请求失败」。
+    单元测试全绿，之前的护栏也全绿 —— 因为它们只查了参数**名**，
+    没查参数**放在哪**。
+
+    这条护栏查两件事：
+        ① 前端 payload 的每个键，后端 body 模型里得有（拼错字段要红）
+        ② 后端的账本 POST 路由不许有「必填的 query 参数」
+    """
+    import re
+
+    from backend import main as main_mod
+
+    # ① 前端：抓 postJson('/api/ledger/xxx', { ... }) 的路径和键
+    api = _text(FRONTEND / "api" / "ledger.ts")
+    calls = re.findall(
+        r"postJson<[^>]*>\(\s*'(/api/ledger[^']*)'\s*,\s*\{([^}]*)\}", api)
+    assert calls, "没在 api/ledger.ts 里抓到 postJson 调用 —— 护栏本身失效了"
+
+    # ② 后端：POST 路由 → body 模型 → 字段集合
+    body_fields: dict[str, set[str]] = {}
+    for route in main_mod.app.routes:
+        path = getattr(route, "path", "")
+        methods = getattr(route, "methods", set()) or set()
+        if not path.startswith("/api/ledger") or "POST" not in methods:
+            continue
+        body_params = getattr(route.dependant, "body_params", [])
+        assert body_params, f"{path} 的 POST handler 没有 body 模型"
+        model = body_params[0].field_info.annotation
+        assert hasattr(model, "model_fields"), f"{path} 的 body 不是 Pydantic 模型：{model}"
+        body_fields[path] = set(model.model_fields)
+
+    problems = []
+    for route, payload in calls:
+        keys = set()
+        for part in payload.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            key = part.split(":")[0].strip()
+            if key:
+                keys.add(key)
+        if route not in body_fields:
+            problems.append(f"{route}：后端没有这个 POST 路由")
+            continue
+        extra = keys - body_fields[route]
+        if extra:
+            problems.append(
+                f"{route}：前端发了后端 body 里没有的字段 {sorted(extra)}"
+                f"（后端收的是 {sorted(body_fields[route])}）")
+    assert not problems, "\n".join(problems)
+
+
+def test_ledger_post_routes_have_no_required_query_params():
+    """账本的 POST 路由不许有必填的 query 参数 —— POST 的参数一律走 body。
+
+    混着来过一次（body vs query），三个按钮静默坏掉。
+    """
+    from backend import main as main_mod
+
+    offenders = []
+    for route in main_mod.app.routes:
+        path = getattr(route, "path", "")
+        methods = getattr(route, "methods", set()) or set()
+        if not path.startswith("/api/ledger") or "POST" not in methods:
+            continue
+        for q in getattr(route.dependant, "query_params", []):
+            if q.required:
+                offenders.append(f"{path} 的 query 参数 {q.name} 是必填的")
+    assert not offenders, "\n".join(offenders)
+
+
+# ──────────────────────────────────────────────────────────────
 #  护栏 9：依赖方向单向无环
 # ──────────────────────────────────────────────────────────────
 

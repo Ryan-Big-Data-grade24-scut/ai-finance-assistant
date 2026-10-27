@@ -47,8 +47,12 @@ interface TreeItem {
   txId?: number
   isTx?: boolean
   op?: string
+  e?: number
+  i?: number
   children?: TreeItem[]
   itemStyle?: Record<string, unknown>
+  label?: Record<string, unknown>
+  emphasis?: Record<string, unknown>
   symbolSize?: number
 }
 
@@ -73,12 +77,17 @@ function buildData(tree: LedgerTree): TreeItem[] {
       value: magnitude,
       nodeId: node.node_id,
       op: node.op,
+      e: node.e,
+      i: node.i,
       symbolSize: Math.max(14, Math.min(52, 12 + Math.sqrt(magnitude) * 1.6)),
       itemStyle: {
         color: node.e > node.i ? '#376fae' : '#2f9e6f',
         borderColor: node.op === 'NET' ? '#e08a2e' : 'rgba(255,255,255,.85)',
         borderWidth: node.op === 'NET' ? 3 : 1.5,
       },
+      // 根节点的标签在径向布局里会旋转 90°、压在圆心上 —— 藏掉。
+      // 账本名在上面那个选择器里写着，不需要在图上再写一遍。
+      label: node.node_id === tree.root_id ? { show: false } : undefined,
     }
     const children: TreeItem[] = []
     for (const child of tree.nodes) {
@@ -92,7 +101,14 @@ function buildData(tree: LedgerTree): TreeItem[] {
         value: Math.abs(leg.e) + Math.abs(leg.i),
         txId: leg.tx_id,
         isTx: true,
+        e: leg.e,
+        i: leg.i,
         symbolSize: 7,
+        // ⚠️ τ 的标签**默认不画**。
+        //    几百条腿各带一个「τ123」会把整张图糊成一片黑 ——
+        //    名字挪到 tooltip / 悬停时才给。分组节点的标签照常显示。
+        label: { show: false },
+        emphasis: { label: { show: true } },
         itemStyle: {
           color: leg.i > leg.e ? '#2f9e6f' : '#8fa8c4',
           borderColor: leg.role === 'mirror' ? '#e08a2e' : 'rgba(255,255,255,.9)',
@@ -117,7 +133,25 @@ function render() {
   }
   chart.setOption(
     {
-      tooltip: { trigger: 'item', triggerOn: 'mousemove' },
+      tooltip: {
+        trigger: 'item',
+        triggerOn: 'mousemove',
+        formatter: (p: { data: TreeItem }) => {
+          const d = p.data as TreeItem
+          if (d.isTx) {
+            const role = '交易'
+            return [
+              `${role} τ${d.txId}`,
+              `支出 ${(d.e ?? 0).toFixed(2)}　收入 ${(d.i ?? 0).toFixed(2)}`,
+            ].join('<br/>')
+          }
+          return [
+            `${d.name}`,
+            `支出 ${(d.e ?? 0).toFixed(2)}　收入 ${(d.i ?? 0).toFixed(2)}`,
+            `净值 ${((d.i ?? 0) - (d.e ?? 0)).toFixed(2)}`,
+          ].join('<br/>')
+        },
+      },
       series: [
         {
           type: 'tree',

@@ -443,6 +443,21 @@ class LedgerBookListResp(BaseModel):
     books: list[LedgerBookOut] = Field(description="所有账本，按创建时间倒序")
 
 
+class LedgerBookRef(BaseModel):
+    """只带 book_id 的请求体 —— undo / redo / reset 用。
+
+    ⚠️ **所有 POST 端点的参数都走 body**，不用 query。
+       混着来（POST 一个走 body 一个走 query）过一次：
+       前端把 book_id 塞进 body，后端按 query 收 —— 结果 422，
+       按钮点了没反应，而且**两边都不报错**（前端只看到一句「请求失败」）。
+       统一成 body 之后，「参数在哪」只有一个答案。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    book_id: str = Field(description="操作作用在哪本账上。不引入「当前账本」这种隐式状态")
+
+
 class LedgerNodeOut(BaseModel):
     node_id: str = Field(description="节点 id，格式 '{book_id}:n0007' —— 自带归属前缀")
     parent_id: str | None = Field(description="父节点 id；根节点为 null")
