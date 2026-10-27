@@ -1,0 +1,75 @@
+# CI —— 让「机器检查」真的成为机器检查
+#
+# 为什么要有它：
+#   `docs/设计/第二轮/04_骨架与契约.md` 里写着「任何人越界，CI 立刻红」。
+#   那 10 条 grep 护栏 + 81 个用例一直都在，但**没有 CI 就只是文档** ——
+#   队友合 PR 时不会自动跑，全靠人记得手敲 `pytest -q`。
+#
+# 跑什么（不多不少，够挡住真问题就行）：
+#   ① 后端：pytest -q  —— 含 10 条结构性护栏（AST/grep，不是靠纪律）
+#   ② MCP 自检：--selftest 8 步 —— 14 个工具 + 引擎拒绝语义
+#   ③ 前端：vue-tsc --noEmit + vite build —— 类型错误在合入前就红
+#
+# ⚠️ **不跑** `scripts/ledger_golden_real.py`：它要真实账单库和 onboarding CSV，
+#    属于「本地一次性核对」，不进 CI（脚本本身也要求显式开关 LEDGER_GOLDEN_REAL=1）。
+#
+# ⚠️ 所有测试都用 tmp_path + monkeypatch DB_PATH，**不碰真实 db/bills.db**。
+#    所以 CI 上不需要任何私有数据。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一个 PR 的新提交要取消上一次还在跑的 CI（省 Actions 配额）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端 · pytest + 护栏
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 全套测试（81 例 · 含 10 条结构性护栏）
+        run: python -m pytest -q
+
+      - name: MCP 自检（14 工具 · 8 步）
+        run: python -m backend.mcp.server --selftest
+
+  frontend:
+    name: 前端 · vue-tsc + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 装依赖
+        run: npm ci
+
+      - name: 类型检查 + 构建
+        run: npm run build

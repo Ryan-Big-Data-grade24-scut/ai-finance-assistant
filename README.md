@@ -32,9 +32,19 @@ AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工
 .\scripts\check.ps1             # 自检：缺什么、哪个服务没起来
 ```
 
+**一键起停（PR #5 新增，推荐用这个）**：
+
+```powershell
+.\scripts\launch-app.ps1       # 起后端+前端，带健康检查，自动开浏览器
+.\scripts\stop-app.ps1         # 停掉（按 PID，不会误杀别的进程）
+```
+
+> 它俩是**独立进程**（PID 记在 `.runtime/processes.json`），不挂在终端窗口上，
+> 关掉窗口也还活着 —— 所以别用「关终端」当停止方式。
+
 ### MCP 接入（给 AI 客户端用）
 
-`backend/mcp/server.py`（11 个工具，只读 9 + 可写 2）以 stdio 方式运行。自检：
+`backend/mcp/server.py`（14 个工具，只读 11 + 可写 3）以 stdio 方式运行。自检：
 
 ```powershell
 .venv\Scripts\python.exe -m backend.mcp.server --selftest
@@ -68,13 +78,28 @@ Claude Desktop 等客户端的配置（把 `<项目路径>` 换成实际路径�
 
 ---
 
-## 当前进度（2026-10-16）
+## 当前进度（2026-10-28）
 
 | 功能 | 后端 | 前端 |
 |---|---|---|
-| ① 跨平台账单导入 | 🟡 微信 1099 笔 + **支付宝 1804 笔**均已实测通过；其他平台未开始 | ⬜ 只有上传骨架，没接后端 |
+| ① 跨平台账单导入 | 🟡 微信 1099 笔 + **支付宝 1804 笔**均已实测通过；其他平台未开始 | ✅ 拖拽上传 + 导入页（PR #5） |
 | ② 生成 preset 报告 | ✅ 7 个接口全部跑通，数字口径逐条验证过 | ✅ **已接真实接口**（PR #1） |
-| ③ MCP 接入 | ⬜ 未实现，`mcp/server.py` 不存在 | — |
+| ③ MCP 接入 | ✅ **14 个工具**（只读 11 + 可写 3），`--selftest` 8 步全过 | — |
+| ④ 交易明细编辑 / 日历 | ✅ 单条删除（逻辑删除）、月历检索（PR #5） | ✅ 明细页 + 月历（PR #5） |
+| ⑤ 账本引擎（第二轮） | ✅ 骨架完成：账本层 9 个模块 + 8 个端点 + 撤销/重做 + 护栏 | ✅ **星图 `/star`** 的壳（径向树 + 拖拽手势） |
+
+### ④⑤ 第二轮：账本引擎
+
+第四、五行是第二轮的成果，做的是**基座**不是智能：
+
+- **账本层** `backend/ledger/`：代数引擎 + 8 种操作 + 撤销/重做 + 10 条结构性护栏
+- **星图** `/star`：径向树，点节点切 ADD/NET，拖 τ 改归属
+- **真相源**：`docs/设计/第二轮/04_骨架与契约.md` —— 层与唯一入口、层间接口、错误语义、禁止清单
+
+```powershell
+# 跑账本引擎的测试（81 例，含 10 条护栏）
+.venv\Scripts\python.exe -m pytest -q
+```
 
 ### 支付宝导入已验证
 
@@ -96,20 +121,26 @@ Claude Desktop 等客户端的配置（把 `<项目路径>` 换成实际路径�
 
 ---
 
-## 必须先看懂的一件事：三条通道
+## 必须先看懂的一件事：四条通道
 
 **不是「请求先过 schemas.py 再过 overrides.py 才能查库」。**
 `schemas.py` 不碰数据库，它只是 HTTP/MCP 边界的类型校验。
 
-真实结构是**三条独立通道，各有唯一的门**：
+真实结构是**四条独立通道，各有唯一的门**：
 
 | 通道 | 唯一入口 | 能做什么 |
 |---|---|---|
 | 写原始层 | `backend/importer/` | 只能 INSERT，**绝不 UPDATE** |
 | 写修正层 | `backend/overrides.py` | UPSERT + 三道 403 防线 |
 | 读 | `backend/reports/*.py` | 纯 SELECT，查 `v_tx` 视图 |
+| **写账本（第二轮）** | `backend/ledger/service.py` | `apply_op` / `undo` / `redo` / `reset` —— **只写 `ledger_*` 表** |
 
 查询**不经过** `overrides.py` —— 它只管「改」，不管「读」。
+
+> **账本层是第四条平行通道，不插进第一轮链路中间。**
+> 它不 import `reports` / `overrides` / `importer`，不查 `v_tx_counted`，
+> 也不和第一轮的 reports 数字相加（**禁止跨账汇总**）。
+> 这条靠护栏机器检查 —— 越界 CI 直接红。
 
 ### 由此推出的三条硬约束
 
@@ -131,18 +162,20 @@ tx_overrides       所有修正落这里
 ## 目录
 
 ```
-db/schema.sql          3 表 + 2 视图 + 5 索引
+db/schema.sql          13 表 + 2 视图（第一轮 5 表 + 第二轮账本 8 表）
 backend/
   db.py                连接管理 / 事务边界 / 建表
-  schemas.py           13 个接口的契约 + 字段语义 + 样例
+  schemas.py           接口契约 + 字段语义 + 样例
   overrides.py         ★ 写修正的唯一入口
   main.py              FastAPI 入口（零业务逻辑）
-  importer/            账单解析（wechat 已验证 / alipay 待验）
+  importer/            账单解析（wechat 已验证 / alipay 已验证）
   reports/             7 个报告组件 + 待分类清单
-  mcp/                 MCP 服务器（backend.mcp.server，11 个工具）
-frontend/src/views/    3 页骨架（账单 / 导入 / 改单）
-scripts/               setup / start-all / start-*-* / check
-docs/设计/             设计文档
+  ledger/              ★ 第二轮：账本引擎（代数层 9 个模块）
+  mcp/                 MCP 服务器（backend.mcp.server，14 个工具）
+frontend/src/views/    5 页（账单 / 导入 / 改单 / 明细 / 星图）
+scripts/               setup / start-all / start-*-* / check / launch-app / stop-app
+.github/workflows/     CI（pytest + 护栏 + MCP 自检 + vue-tsc）
+docs/设计/             设计文档（第一轮 / 第二轮）
 ```
 
 `db/bills.db` 是各自的本地账本，不入库（gitignored）。
@@ -153,13 +186,17 @@ docs/设计/             设计文档
 
 | 文档 | 什么时候看 |
 |---|---|
+| `docs/README.md` | **先看这个** —— 全部文档的地图 + 现状表 |
 | `docs/设计/系统设计.md` | 长期愿景与问题定义 |
-| `docs/设计/第一轮/00_整体架构.md` | 三条通道为什么这么分 |
+| `docs/设计/第一轮/00_整体架构.md` | 三条通道为什么这么分（第二轮加了第四条） |
 | `01_数据库.md` | 表结构与去重、事务设计 |
 | `02_后端.md` | 三个核心文件各自解决什么 |
 | `03_前端.md` | 骨架结构与分工边界 |
 | `04_MCP.md` | MCP 层的边界与安全 |
 | `1-1_导入.md` / `1-2_生成报告.md` / `1-3_MCP接入.md` | 三个功能各自的目标与进度 |
+| **`docs/设计/第二轮/04_骨架与契约.md`** | **★ 第二轮的真相源** —— 层与唯一入口、层间接口、错误语义、可 grep 的禁止清单、不跑偏检查清单 |
+| `docs/设计/第二轮/记账代数.md` | 账本引擎的数学定义（τ / X / Y / M、+₁ +₂、分裂与镜像） |
+| `docs/设计/第二轮/00_设计思路.md` | 为什么第二轮先做基座不做智能 |
 
 ---
 
@@ -167,7 +204,7 @@ docs/设计/             设计文档
 
 | 事项 | 谁做 |
 |---|---|
-| MCP 真实客户端实测（Claude Desktop 接入） | 你 |
-| 支付宝导入验证 | 需要解压密码 |
+| 星图在大账本（500+ 笔）上的布局 —— 要先定「聚合到 N 层」还是「只画分组」 | 队友（**产品决定，不是调参**） |
+| 第二轮基座 A：AI 粗分类插件（走 `apply_ledger_op` 这一个写通道） | 队友 |
 | 第三方平台适配（美团 / 银行卡 / 电商） | 分到导入功能的人 |
-| `frontend/components/` 9 个组件 | 队友 |
+| MCP 真实客户端实测（Claude Desktop 接入） | 你 |
