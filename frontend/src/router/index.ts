@@ -42,6 +42,18 @@ const router = createRouter({
       name: 'transactions',
       component: () => import('@/views/TransactionsView.vue'),
     },
+    {
+      path: '/star',
+      name: 'star',
+      component: () => import('@/views/StarMap.vue'),
+      // query 参数名必须和后端一致：
+      //   /star?book_id=bk_0001&focus_node_id=bk_0001:n0002
+      //         ↑ 与 GET /api/ledger/tree?book_id=&focus_node_id= 对应
+      props: route => ({
+        bookId: (route.query.book_id as string) ?? '',
+        focusNodeId: (route.query.focus_node_id as string) ?? '',
+      }),
+    },
   ],
 })
 

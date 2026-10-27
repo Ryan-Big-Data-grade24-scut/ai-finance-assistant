@@ -75,6 +75,20 @@ def transaction(conn: sqlite3.Connection | None = None):
             c.close()
 
 
+def health_snapshot(db_path: Path | None = None) -> dict:
+    """存活探针要的那几个数。
+
+    放在这里而不是 main.py —— **main.py 不含任何 SQL**（第一轮 DNA）。
+    """
+    conn = get_conn(db_path)
+    try:
+        total = conn.execute("SELECT COUNT(*) c FROM transactions_raw").fetchone()["c"]
+        batches = conn.execute("SELECT COUNT(*) c FROM import_batches").fetchone()["c"]
+    finally:
+        conn.close()
+    return {"transactions": total, "batches": batches}
+
+
 def show_stats(db_path: Path | None = None) -> None:
     """打印当前库状态，用于验证导入结果。"""
     path = Path(db_path) if db_path else DB_PATH
@@ -128,8 +142,14 @@ def show_stats(db_path: Path | None = None) -> None:
 
 
 if __name__ == "__main__":
+    # Windows 控制台默认 GBK，✓ 编不出来 —— 这里兜底，别让打印把脚本干掉
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     init_db()
-    print(f"✓ 已初始化 {DB_PATH}")
+    print(f"[OK] 已初始化 {DB_PATH}")
     if "--stats" in sys.argv:
         print()
         show_stats()

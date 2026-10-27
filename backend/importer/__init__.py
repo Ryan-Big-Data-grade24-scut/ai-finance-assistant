@@ -161,3 +161,20 @@ def import_file(path: Path, platform_id: str | None = None,
         failed=issues.failed, first_error=issues.first_error,
         date_from=min(dates), date_to=max(dates),
     )
+
+
+def list_batches() -> list[dict]:
+    """导入批次记录（最近的在前）。
+
+    放在这里而不是 main.py —— **main.py 不含任何 SQL**（第一轮 DNA）。
+    """
+    conn = db.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT b.*, p.name AS platform_name FROM import_batches b "
+            "LEFT JOIN platforms p ON p.id = b.platform_id "
+            "ORDER BY b.created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
