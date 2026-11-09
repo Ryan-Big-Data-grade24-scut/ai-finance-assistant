@@ -16,8 +16,11 @@ from __future__ import annotations
 import csv
 import io
 import zipfile
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator
+
+import openpyxl
 
 from .base import ParseIssues, Row, clean, norm_amount, norm_direction, norm_time, should_drop
 
@@ -26,7 +29,7 @@ HEADER_MAP = {
     "收/支": "direction",
     "交易时间": "tx_time",
     "交易创建时间": "tx_time",
-    "付款时间": "tx_time",
+    "付款时间": "payment_time",
     "交易分类": "tx_type",
     "类型": "tx_type",
     "交易对方": "counterparty",
@@ -88,12 +91,129 @@ def is_footer_row(raw_row: list[str]) -> bool:
     return any(compact.startswith(prefix) for prefix in FOOTER_PREFIXES)
 
 
+
+def _xlsx_text(value) -> str:
+    """把 Excel 单元格转换成可安全写入 raw_json 的字符串。"""
+    if value is None:
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d %H:%M:%S") if isinstance(value, datetime) else value.isoformat()
+    return str(value).strip()
+
+
+def find_xlsx_header(ws, max_scan: int = 50) -> tuple[int, list[str]]:
+    """识别支付宝 Excel 的表头，不依赖固定行号或文件名。"""
+    for row_index, row in enumerate(
+        ws.iter_rows(min_row=1, max_row=max_scan, values_only=True), start=1
+    ):
+        header = [clean(value) for value in row]
+        names = set(header)
+        has_amount = bool(names.intersection({"金额（元）", "金额(元)", "金额"}))
+        has_time = bool(names.intersection({"交易创建时间", "交易时间", "付款时间"}))
+        if "交易号" in names and "收/支" in names and has_amount and has_time:
+            return row_index, header
+    raise ValueError("未找到支付宝 Excel 表头：需要包含交易号、收/支、金额和交易时间。")
+
+
+def parse_xlsx(path: Path, issues: ParseIssues | None = None) -> Iterator[Row]:
+    """解析支付宝官方 .xlsx 明细，保留成功退款金额、资金状态等原始列。"""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        selected = None
+        header_row = None
+        header = None
+        last_error = None
+        for ws in wb.worksheets:
+            try:
+                found_row, found_header = find_xlsx_header(ws)
+                selected, header_row, header = ws, found_row, found_header
+                break
+            except ValueError as exc:
+                last_error = exc
+        if selected is None or header_row is None or header is None:
+            raise ValueError(str(last_error or "支付宝 Excel 中没有可识别的交易明细工作表。"))
+
+        col: dict[str, int] = {}
+        for i, name in enumerate(header):
+            key = HEADER_MAP.get(name)
+            # 优先保留“交易创建时间”；付款时间只作为缺少创建时间时的回退列。
+            if key and key not in col:
+                col[key] = i
+
+        missing = {"direction", "amount"} - set(col)
+        if "tx_time" not in col and "payment_time" not in col:
+            missing.add("tx_time")
+        if missing:
+            raise ValueError(f"支付宝 Excel 缺少必需列 {missing}，实际表头：{header}")
+
+        def value_at(raw_row, key: str):
+            idx = col.get(key)
+            return raw_row[idx] if idx is not None and idx < len(raw_row) else None
+
+        for line_number, raw_row in enumerate(
+            selected.iter_rows(min_row=header_row + 1, values_only=True),
+            start=header_row + 1,
+        ):
+            if not raw_row or not any(value is not None for value in raw_row):
+                continue
+
+            raw_first = _xlsx_text(raw_row[0] if raw_row else None)
+            if not raw_first:
+                continue
+            if is_footer_row([raw_first]):
+                break
+
+            status = clean(value_at(raw_row, "status"))
+            if should_drop(status):
+                continue
+
+            time_value = value_at(raw_row, "tx_time")
+            if time_value in (None, ""):
+                time_value = value_at(raw_row, "payment_time")
+            tx_time = norm_time(time_value)
+            amount = norm_amount(value_at(raw_row, "amount"))
+            if tx_time is None or amount is None:
+                if issues is not None:
+                    reason = "交易时间无效" if tx_time is None else "金额无效或不大于零"
+                    issues.add(line_number, reason)
+                continue
+
+            raw = {
+                header[i]: _xlsx_text(raw_row[i] if i < len(raw_row) else None)
+                for i in range(len(header))
+                if header[i]
+            }
+            yield Row(
+                platform_id="alipay",
+                source="支付宝",
+                tx_time=tx_time,
+                direction=norm_direction(value_at(raw_row, "direction")),
+                amount=amount,
+                pay_method=clean(value_at(raw_row, "pay_method")),
+                counterparty=clean(value_at(raw_row, "counterparty")),
+                item=clean(value_at(raw_row, "item")),
+                tx_type=clean(value_at(raw_row, "tx_type")),
+                status=status,
+                tx_no=clean(value_at(raw_row, "tx_no")),
+                merchant_no=clean(value_at(raw_row, "merchant_no")),
+                remark=clean(value_at(raw_row, "remark")),
+                raw=raw,
+            )
+    finally:
+        wb.close()
+
+
 def parse(path: Path, password: str | None = None,
           issues: ParseIssues | None = None) -> Iterator[Row]:
     """解析支付宝 .zip 或 .csv。"""
     path = Path(path)
 
-    # ── 1. 取 CSV 字节内容 ──────────────────────────────────
+    # ── 1. Excel 直接解析；CSV / ZIP 走文本解析 ────────────────
+    if path.suffix.lower() == ".xlsx":
+        yield from parse_xlsx(path, issues=issues)
+        return
+
+    # ── 2. 取 CSV 字节内容 ──────────────────────────────────
     if path.suffix.lower() == ".zip":
         try:
             with zipfile.ZipFile(path) as zf:
@@ -134,7 +254,9 @@ def parse(path: Path, password: str | None = None,
         if key and key not in col:
             col[key] = i
 
-    missing = {"tx_time", "direction", "amount"} - set(col)
+    missing = {"direction", "amount"} - set(col)
+    if "tx_time" not in col and "payment_time" not in col:
+        missing.add("tx_time")
     if missing:
         raise ValueError(f"支付宝账单缺少必需列 {missing}，实际表头：{header}")
 
@@ -152,7 +274,7 @@ def parse(path: Path, password: str | None = None,
         if should_drop(status):
             continue
 
-        tx_time = norm_time(get("tx_time"))
+        tx_time = norm_time(get("tx_time") or get("payment_time"))
         amount = norm_amount(get("amount"))
         if tx_time is None or amount is None:
             if issues is not None:

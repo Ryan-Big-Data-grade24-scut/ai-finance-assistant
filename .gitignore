@@ -5,7 +5,6 @@ db/*.db-shm
 db/*.sqlite
 db/*.sqlite3
 db/backups/
-db/backup/
 
 # ---- 真实账单原始文件：绝不入库 ----
 *.xlsx
@@ -38,6 +37,12 @@ dist/
 !.env.example
 .runtime/
 
+# ---- 本地历史备份（不参与运行；正式历史交给 Git）----
+.engine-backups/
+.star-backups/
+*.backup-*
+*.backup-v*
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
@@ -47,3 +52,7 @@ Thumbs.db
 
 # ---- 私人真实账单：绝不提交到 Git ----
 /private_input/
+
+.ai-secrets/
+*.key
+*.pem

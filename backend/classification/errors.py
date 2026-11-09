@@ -1,0 +1,32 @@
+from __future__ import annotations
+
+
+class ClassificationError(Exception):
+    """可稳定暴露给 MCP/HTTP 的分类工作流错误。"""
+
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+
+
+class Code:
+    INVALID_SUGGESTION = "INVALID_SUGGESTION"
+    DUPLICATE_SUGGESTION = "DUPLICATE_SUGGESTION"
+    TX_NOT_IN_BOOK = "TX_NOT_IN_BOOK"
+    TARGET_NOT_ALLOWED = "TARGET_NOT_ALLOWED"
+    ALREADY_REVIEWED = "ALREADY_REVIEWED"
+    PROPOSAL_NOT_FOUND = "PROPOSAL_NOT_FOUND"
+    PROPOSAL_CLOSED = "PROPOSAL_CLOSED"
+    CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
+    STALE_PROPOSAL = "STALE_PROPOSAL"
+    UNDO_CONFLICT = "UNDO_CONFLICT"
+
+
+    RULE_NOT_FOUND = "RULE_NOT_FOUND"
+    INVALID_RULE = "INVALID_RULE"
+    RULE_CONFLICT = "RULE_CONFLICT"
+    SPECIAL_TX_NOT_CLASSIFIABLE = "SPECIAL_TX_NOT_CLASSIFIABLE"
+    RULE_HINT_CONFLICT = "RULE_HINT_CONFLICT"
+    CLARIFICATION_NOT_PENDING = "CLARIFICATION_NOT_PENDING"

@@ -5,6 +5,9 @@
  * 全局壳子（导航栏）放这里，三个页面共享的部分放这里。
  * 具体业务内容全在 views/ 里。
  */
+import { useRoute } from 'vue-router'
+import FloatingPenguin from '@/components/FloatingPenguin.vue'
+const route = useRoute()
 </script>
 
 <template>
@@ -16,14 +19,17 @@
       </RouterLink>
       <nav class="nav">
         <RouterLink to="/bill" class="nav-item">账单报告</RouterLink>
-        <RouterLink to="/star" class="nav-item">星图账本</RouterLink>
+        <RouterLink to="/star" class="nav-item">✦ 星云账本</RouterLink>
         <RouterLink to="/import" class="nav-item">导入账单</RouterLink>
+        <RouterLink to="/ai/settings" class="nav-item">AI 设置</RouterLink>
+        <RouterLink to="/ai/history" class="nav-item">历史账单学习</RouterLink>
       </nav>
     </header>
 
-    <main class="app-main">
+    <main class="app-main" :class="{ 'app-main--wide': route.name === 'star' }">
       <RouterView />
     </main>
+    <FloatingPenguin />
   </div>
 </template>
 
@@ -75,6 +81,7 @@
 }
 .brand b, .brand small { display: block; }
 .brand small { margin-top: 2px; color: var(--color-muted); font-size: 11px; }
+.app-main.app-main--wide { max-width: 100%; padding: 18px clamp(12px, 2.2vw, 36px) 34px; }
 .app-main {
   max-width: 1128px;
   margin: 0 auto;

@@ -2,7 +2,7 @@
 backend/mcp/server.py —— MCP 入口
 
 原则与 main.py 完全相同：本文件【不含任何业务逻辑、不含任何 SQL】。
-它只做一件事：把 11 个业务函数翻译成 MCP 工具。
+它只做一件事：把现有报表/账本业务函数翻译成 MCP 工具。
 
     AI 客户端 ──MCP──▶ 本文件 ──▶ reports/ · overrides.py · importer/
 
@@ -12,7 +12,7 @@ backend/mcp/server.py —— MCP 入口
 
 启动：
     python -m backend.mcp.server             # stdio，给 Claude Desktop 等客户端用
-    python -m backend.mcp.server --selftest  # 不起服务，自检 11 个工具
+    python -m backend.mcp.server --selftest  # 不起服务，自检全部工具与关键闭环
 
 接入客户端（如 Claude Desktop）的配置示例：
     {
@@ -28,6 +28,7 @@ backend/mcp/server.py —— MCP 入口
 from __future__ import annotations
 
 import sys
+from pydantic import TypeAdapter
 from pathlib import Path
 
 # 直接以脚本方式启动时（如客户端配置的绝对路径），项目根不一定在 sys.path。
@@ -55,6 +56,8 @@ from backend import db, overrides, reports  # noqa: E402
 from backend import schemas as S  # noqa: E402
 from backend.importer import import_file  # noqa: E402
 from backend.ledger import service as ledger_service  # noqa: E402
+from backend.classification import service as classification_service  # noqa: E402
+from backend.classification.models import ClassificationSuggestion  # noqa: E402
 
 mcp = FastMCP(
     "ai-finance-assistant",
@@ -64,16 +67,21 @@ mcp = FastMCP(
         "口径因人而异（转给爸妈的不算、买理财不算、还花呗不算……）："
         "拿不准就先问清用户的口径，再用 set_override 落地成豁免/分类，"
         "不要替用户假设。\n"
-        "原始记录永远不可修改 —— 试图传 amount / tx_time 等原始字段会被直接拒绝。\n"
-        "账本（query_ledger_* / apply_ledger_op）是**另一套口径**，"
-        "和上面的报表数字不是一回事，不要相加也不要互相校验；"
-        "账本里的每个数都由后端算出，你只解读、不心算。"
+        "原始记录永远不可修改 —— 试图传 amount / tx_time 等原始字段会被直接拒绝。"
+        "\n做 AI 分类时必须遵守两阶段流程：先 query_classification_batch，"
+        "再 preview_classifications；把草案、置信度和理由展示给用户，"
+        "只有用户明确同意后才能调用 confirm_classifications。"
+        "needs_clarification 的交易必须先提问，禁止猜测或直接确认。"
+        "对话中断后先 list_classification_proposals 找回 draft，再 get_classification_proposal 恢复。"
+        "用户回答澄清后调用 resolve_classification_clarification 更新原草案；这一步不落账。"
+        "分类批次会排除退款流水、全额退款、明确内部转账和退款证据冲突交易；"
+        "effective_amount 已扣除可核验退款。规则冲突时必须询问用户。"
     ),
 )
 
 
 # ═══════════════════════════════════════════════════════════
-#  只读 9 个 —— 全部转发 reports/ 与 overrides 的读函数
+#  第一轮只读 9 个 —— 全部转发 reports/ 与 overrides 的读函数
 #  docstring 是 AI 看到的说明书：写清「什么时候用 / 别怎么用」，
 #  这是服务端控制 agent loop 调用频率的主要手段。
 # ═══════════════════════════════════════════════════════════
@@ -192,6 +200,7 @@ def import_bill(path: str,
     """
     r = import_file(Path(path), platform_id=platform_id,
                     alipay_password=alipay_password)
+    ledger_service.sync_live_book()
     return S.ImportCommitResp(
         batch_id=r.batch_id, inserted=r.inserted, skipped=r.skipped,
         failed=r.failed, first_error=r.first_error,
@@ -200,96 +209,192 @@ def import_bill(path: str,
 
 
 # ═══════════════════════════════════════════════════════════
-#  账本 3 个 —— 第二轮「账本代数引擎」
-#
-#  ⚠️ 账本的数字和上面 9 个报表工具的数字**不是一回事**：
-#     报表是平台口径的平铺统计，账本是用户自己分的组。两者不相加。
-#
-#  为什么用扁平可选参数而不是判别联合：
-#     MCP 的工具 schema 来自函数签名。判别联合会变成 oneOf，
-#     模型选分支时容易出错。扁平参数 + 一个 op 字符串更稳。
+#  第二轮账本工具。AI 不得直接写 ledger_*，与前端使用同一个 service。
 # ═══════════════════════════════════════════════════════════
 
 @mcp.tool()
-def query_ledger_books() -> list:
-    """账本列表：用户定义的若干「阶段」，每阶段一本独立账，各有自己的树。
-
-    每本账的成员集在建账时按日期区间**冻结**了，互不重叠也不相加。
-    要看某一本的树，用 query_ledger_tree(book_id)。
-    """
-    return [
-        {
-            "book_id": b.book_id,
-            "name": b.name,
-            "date_from": b.date_from,
-            "date_to": b.date_to,
-            "created_at": b.created_at,
-        }
-        for b in ledger_service.list_books()
-    ]
+def query_ledger_books() -> dict:
+    """列出星图账本和 book_id。账本不会自动合并，后续每次请求都必须传 book_id。"""
+    return ledger_service.list_books()
 
 
 @mcp.tool()
 def query_ledger_tree(book_id: str, focus_node_id: str | None = None) -> dict:
-    """账本的整棵树：节点、每个节点的 (支出, 收入)、腿的归属。
-
-    focus_node_id 只影响返回里的 focus_node_ids 提示，不裁剪内容。
-    返回的 tree 就是**权威状态** —— 不要自己维护一份树再和它对比。
-    """
+    """读取账本的唯一权威树及其每笔交易归属、ADD/NET、审计结果。不要自己计算金额。"""
     return ledger_service.get_tree(book_id, focus_node_id)
 
 
 @mcp.tool()
 def apply_ledger_op(
-    book_id: str,
-    op: str,
-    node_id: str | None = None,
+    book_id: str, op: str,
     tx_id: int | None = None,
     to_node_id: str | None = None,
+    parent_id: str | None = None,
+    node_id: str | None = None,
     name: str | None = None,
     op_value: str | None = None,
     tx_ids: list[int] | None = None,
+    expected_seq: int | None = None,
 ) -> dict:
-    """对账本做一次修改（**唯一的写通道**）。
+    """把账本结构操作提交给统一引擎，绝不直接落库。
 
-    op 取值与所需参数：
-
-    - "set_op"          切节点的聚合方式。node_id=目标节点，op_value="ADD"|"NET"
-    - "split"           分裂一笔交易。tx_id=交易 id
-                        ⚠️ 只对「涉及外部额度」的交易有效（亲情卡/他人代付），
-                           别的会被拒绝 —— 那是设计，不是故障
-    - "unsplit"         把分裂的两条腿合回一条。tx_id=交易 id
-    - "create_node"     建分组。parent_id 走 node_id，name=分组名，
-                        op_value=新节点的聚合方式，tx_ids=要挪进去的交易 id 列表
-    - "dissolve_node"   解散分组。node_id=目标节点（成员会回到父节点）
-    - "reassign"        改交易归属。tx_id=交易 id，to_node_id=目标节点
-    - "attach_tx"       把一笔交易纳入本账。tx_id=交易 id（node_id 可选）
-    - "detach_tx"       把一笔交易移出本账。tx_id=交易 id
-
-    怎么用：
-
-    - **别逐笔调用做批量归类。** 想把 20 笔挪进同一个组，用一次
-      create_node 带 tx_ids=[...]，不要循环 20 次 reassign。
-    - **别改金额、时间、方向。** 账本层管不了这些 —— 那些是原始事实。
-    - 返回值里的 tree 就是权威状态，直接用它，不要自己推算数字。
-    - 引擎会拒绝非法组合并给出一句人话理由 —— 把那句话转述给用户，
-      不要自己另编一套解释。
+    reassign: tx_id + to_node_id（AI 粗分类唯一建议使用的写动作）；
+    create_node: parent_id + name + op_value(ADD/NET) + tx_ids；
+    set_op: node_id + op_value；dissolve_node: node_id；
+    attach_tx/detach_tx: tx_id（attach_tx 可额外给 node_id）；
+    split/unsplit: 仅适用于 funding 已显式设为“亲情卡 / 他人代付 / 外部额度”的交易；
+                   退款和明确配对的自有账户内部转账不能分裂。split 会生成镜像腿并计入外部收入节点。
+    建议读取 query_ledger_tree 再提交，传入 expected_seq 防止多窗口冲突。
+    严禁改金额、时间、方向、原始流水。对大量交易不要逐笔无脑循环调用。
     """
-    payload: dict = {"op": op}
-    if node_id is not None:
-        # 建分组时 node_id 表示**父节点**；其它 op 里它就是目标节点
-        payload["parent_id" if op == "create_node" else "node_id"] = node_id
-    if tx_id is not None:
-        payload["tx_id"] = tx_id
-    if to_node_id is not None:
-        payload["to_node_id"] = to_node_id
-    if name is not None:
-        payload["name"] = name
-    if op_value is not None:
-        payload["op_value"] = op_value
-    if tx_ids is not None:
-        payload["tx_ids"] = list(tx_ids)
-    return ledger_service.apply_op(book_id, payload, created_by="mcp")
+    payload = {'op': op}
+    supplied = {'tx_id': tx_id, 'to_node_id': to_node_id, 'parent_id': parent_id,
+                'node_id': node_id, 'name': name, 'op_value': op_value, 'tx_ids': tx_ids}
+    payload.update({key: val for key, val in supplied.items() if val is not None})
+    validated = TypeAdapter(S.LedgerOpIn).validate_python(payload)
+    return ledger_service.apply_op(book_id, validated.model_dump(), expected_seq)
+
+
+# ═══════════════════════════════════════════════════════════
+#  V3.1 用户自己的 AI：模型只提草案，确认后统一走 Ledger 引擎。
+# ═══════════════════════════════════════════════════════════
+
+@mcp.tool()
+def query_classification_status(book_id: str = "star-live") -> dict:
+    """读取 AI 分类进度：待审、已确认、草案和规则数量。
+
+    开始分类任务时先调用一次。它不返回全量交易；接下来使用
+    query_classification_batch，每处理完一批再取下一批。
+    """
+    return classification_service.get_status(book_id)
+
+
+@mcp.tool()
+def query_classification_batch(book_id: str = "star-live", limit: int = 20) -> dict:
+    """取最多 50 笔尚未由用户确认的交易、可选节点及已确认规则提示。
+
+    目标只能从 allowed_nodes 选择。看不准时不要猜：提交
+    needs_clarification=true、target_node_id=null 和一个具体 question。
+    每次确认后已审交易会自动离开队首，因此不需要自行维护分页游标。
+    """
+    return classification_service.get_batch(book_id, limit)
+
+
+@mcp.tool()
+def preview_classifications(
+    book_id: str,
+    suggestions: list[ClassificationSuggestion],
+    expected_seq: int | None = None,
+) -> dict:
+    """保存结构化分类草案并做合法性校验；绝不修改账本。
+
+    每条必须有 confidence 和 reason。明确建议提供 target_node_id；
+    不明确建议必须改为 needs_clarification 并给 question。
+    返回后先向用户展示 ready 和问题，禁止自动调用确认工具。
+    """
+    return classification_service.preview(book_id, suggestions, expected_seq)
+
+
+@mcp.tool()
+def list_classification_proposals(
+    book_id: str = "star-live", status: str | None = "draft", limit: int = 20
+) -> dict:
+    """列出分类草案，适合 AI 对话中断后恢复工作。
+
+    默认只列出 draft；status 可选 draft/applied/rejected/undone/null，
+    最多返回 50 份。先调用本工具找回 proposal_id，再调用 get_classification_proposal。
+    """
+    return classification_service.list_proposals(book_id, status, limit)
+
+
+@mcp.tool()
+def get_classification_proposal(proposal_id: str) -> dict:
+    """重新读取一份草案及状态，适合对话中断后继续确认。
+
+    返回 ready_count、clarification_count、current_seq、stale 和逐笔分类路径。
+    若 stale=true，不得继续确认或澄清，必须重新读取批次生成新草案。
+    """
+    return classification_service.get_proposal(proposal_id)
+
+
+@mcp.tool()
+def resolve_classification_clarification(
+    proposal_id: str,
+    suggestion: ClassificationSuggestion,
+    user_answer: str,
+    expected_seq: int | None = None,
+) -> dict:
+    """用户回答澄清问题后，更新原草案中的这一笔，不创建重复草案，也不落账。
+
+    suggestion 必须给出明确 target_node_id、confidence 和 reason，
+    needs_clarification 保持默认 false。user_answer 必须包含用户刚才的回答。
+    更新后仍须向用户展示结果，并在用户明确批准后调用 confirm_classifications。
+    """
+    return classification_service.resolve_clarification(
+        proposal_id, suggestion, user_answer=user_answer, expected_seq=expected_seq
+    )
+
+
+@mcp.tool()
+def confirm_classifications(
+    proposal_id: str,
+    approved_tx_ids: list[int],
+    expected_seq: int | None = None,
+) -> dict:
+    """仅在用户明确同意后，确认指定交易并原子地写入 Ledger。
+
+    必须显式列出用户批准的 approved_tx_ids；未列出的建议会被拒绝。
+    仍需澄清的交易不能确认。整批只生成一个 Ledger 修订，失败全部回滚。
+    """
+    return classification_service.confirm(proposal_id, approved_tx_ids, expected_seq)
+
+
+@mcp.tool()
+def reject_classifications(proposal_id: str, reason: str) -> dict:
+    """用户不同意草案时关闭它；不会修改账本。"""
+    return classification_service.reject(proposal_id, reason)
+
+
+@mcp.tool()
+def undo_classifications(proposal_id: str, expected_seq: int | None = None) -> dict:
+    """整体撤销一份已确认分类，并停用由它产生的规则。
+
+    为避免覆盖后续人工修改，只有账本仍停在该草案落账后的版本时才允许撤销。
+    """
+    return classification_service.undo(proposal_id, expected_seq)
+
+
+@mcp.tool()
+def list_classification_rules(book_id: str, include_disabled: bool = False) -> dict:
+    """查看用户确认过的分类规则。规则只作为下一批的提示，不会静默改账。"""
+    return classification_service.list_rules(book_id, include_disabled)
+
+
+@mcp.tool()
+def set_classification_rule_enabled(book_id: str, rule_id: str, enabled: bool) -> dict:
+    """启用或停用用户规则；只改变规则状态，不会追溯修改任何交易。"""
+    return classification_service.set_rule_enabled(book_id, rule_id, enabled)
+
+
+@mcp.tool()
+def update_classification_rule(
+    book_id: str,
+    rule_id: str,
+    match_field: str | None = None,
+    pattern: str | None = None,
+    target_node_id: str | None = None,
+) -> dict:
+    """修改规则匹配字段、关键词或目标分类；不会自动重分类历史交易。"""
+    return classification_service.update_rule(
+        book_id, rule_id, match_field=match_field,
+        pattern=pattern, target_node_id=target_node_id,
+    )
+
+
+@mcp.tool()
+def delete_classification_rule(book_id: str, rule_id: str) -> dict:
+    """删除一条用户规则；不删除已经完成的分类审核和账本历史。"""
+    return classification_service.delete_rule(book_id, rule_id)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -302,6 +407,13 @@ EXPECTED_TOOLS = {
     "query_transactions", "get_tx_detail", "list_pending_classification",
     "set_override", "import_bill",
     "query_ledger_books", "query_ledger_tree", "apply_ledger_op",
+    "query_classification_status", "query_classification_batch",
+    "preview_classifications", "list_classification_proposals",
+    "get_classification_proposal", "resolve_classification_clarification",
+    "confirm_classifications", "reject_classifications",
+    "undo_classifications", "list_classification_rules",
+    "set_classification_rule_enabled", "update_classification_rule",
+    "delete_classification_rule",
 }
 
 
@@ -332,7 +444,8 @@ def _blocks_text(res) -> str:
 
 
 async def _selftest() -> int:
-    """四步：注册表 → 防线① → 读闭环 → 写闭环（在一次性临时库上）。"""
+    """注册表、防线、旧修正闭环和 V3.1 AI 两阶段分类闭环。"""
+    import json
     import tempfile
 
     db.init_db()   # 新克隆环境可能还没有 bills.db，先幂等建表
@@ -342,7 +455,7 @@ async def _selftest() -> int:
     if names != EXPECTED_TOOLS:
         print(f"✗ 工具注册表不符：{sorted(names)}")
         return 1
-    print(f"✓ {len(EXPECTED_TOOLS)} 个工具已注册：{sorted(names)}")
+    print(f"✓ {len(names)} 个工具已注册：{sorted(names)}")
 
     so = next(t for t in tools if t.name == "set_override")
     leaked = _walk_schema_props(so.inputSchema) & overrides.FORBIDDEN_FIELDS
@@ -434,48 +547,97 @@ async def _selftest() -> int:
                     return 1
             print("✓ 404 语义：不存在的交易返回「交易不存在: 999」")
 
-            # ── 账本 3 步 ───────────────────────────────────
-            # 建账走 HTTP 层的 service（MCP 工具里没有「建账」——
-            # 建账是用户行为，不是 AI 的活儿）
-            lb = ledger_service.create_book("自检账", "2026-09-01", "2026-09-30")
-            lbid = lb["book"]["book_id"]
-
-            books = await mcp.call_tool("query_ledger_books", {})
-            if lbid not in _blocks_text(books):
-                print(f"✗ query_ledger_books 返回异常：{_blocks_text(books)[:200]}")
-                return 1
-            print("✓ 账本读闭环①：query_ledger_books 正常返回")
-
-            created = await mcp.call_tool(
-                "apply_ledger_op",
-                {"book_id": lbid, "op": "create_node",
-                 "node_id": lb["root_id"], "name": "测试组",
-                 "op_value": "ADD", "tx_ids": [1]},
+            # V3.1：验证外部 AI 只能先建草案，用户确认后才走 Ledger，且可整体撤销。
+            ledger_service.sync_live_book()
+            batch_res = await mcp.call_tool(
+                "query_classification_batch", {"book_id": "star-live", "limit": 5}
             )
-            ctext = _blocks_text(created)
-            if "nodes" not in ctext:
-                print(f"✗ apply_ledger_op 返回异常：{ctext[:300]}")
+            batch = json.loads(_blocks_text(batch_res))
+            if batch.get("pending_total") != 1 or not batch.get("allowed_nodes"):
+                print(f"✗ AI 分类批次异常：{batch}")
                 return 1
-            print("✓ 账本写闭环：apply_ledger_op 建组成功，返回权威树")
+            tx = batch["items"][0]
+            preview_res = await mcp.call_tool(
+                "preview_classifications",
+                {
+                    "book_id": "star-live",
+                    "expected_seq": batch["ledger_seq"],
+                    "suggestions": [{
+                        "tx_id": tx["tx_id"],
+                        "target_node_id": tx["current_node_id"],
+                        "confidence": 0.9,
+                        "reason": "MCP 自检：保留当前分类",
+                    }],
+                },
+            )
+            preview = json.loads(_blocks_text(preview_res))
+            if not preview.get("requires_user_confirmation"):
+                print(f"✗ AI 草案没有进入待确认状态：{preview}")
+                return 1
+            confirm_res = await mcp.call_tool(
+                "confirm_classifications",
+                {
+                    "proposal_id": preview["proposal_id"],
+                    "approved_tx_ids": [tx["tx_id"]],
+                    "expected_seq": batch["ledger_seq"],
+                },
+            )
+            confirmed = json.loads(_blocks_text(confirm_res))
+            if confirmed.get("status") != "applied":
+                print(f"✗ AI 分类确认失败：{confirmed}")
+                return 1
+            await mcp.call_tool(
+                "undo_classifications",
+                {
+                    "proposal_id": preview["proposal_id"],
+                    "expected_seq": confirmed["ledger"]["current_seq"],
+                },
+            )
+            if classification_service.get_status("star-live")["reviewed"] != 0:
+                print("✗ AI 分类撤销后仍残留已确认记录")
+                return 1
+            print("✓ AI 分类闭环：查询 → 草案 → 用户确认 → Ledger 落账 → 整体撤销")
 
-            tree = await mcp.call_tool("query_ledger_tree", {"book_id": lbid})
-            if "root_id" not in _blocks_text(tree):
-                print(f"✗ query_ledger_tree 返回异常：{_blocks_text(tree)[:200]}")
+            # V1.1：对话中断恢复、澄清原草案更新、部分确认信息。
+            resumed = await mcp.call_tool(
+                "list_classification_proposals",
+                {"book_id": "star-live", "status": "undone", "limit": 5},
+            )
+            resumed_data = json.loads(_blocks_text(resumed))
+            if not resumed_data.get("proposals"):
+                print("✗ list_classification_proposals 未能找回已撤销草案")
                 return 1
-            print("✓ 账本读闭环②：query_ledger_tree 返回整棵树")
 
-            try:
-                await mcp.call_tool(
-                    "apply_ledger_op",
-                    {"book_id": lbid, "op": "split", "tx_id": 1},
-                )
-                print("✗ 不该分裂的交易竟然分裂成功 —— 适用域失守")
+            batch2 = classification_service.get_batch("star-live", limit=1)
+            tx2 = batch2["items"][0]
+            target2 = batch2["allowed_nodes"][0]["node_id"]
+            clarify = classification_service.preview(
+                "star-live",
+                [{
+                    "tx_id": tx2["tx_id"], "target_node_id": None,
+                    "confidence": 0.2, "reason": "需要用户澄清。",
+                    "needs_clarification": True,
+                    "question": "这笔交易属于哪个类别？",
+                }],
+                expected_seq=batch2["ledger_seq"],
+            )
+            resolved_res = await mcp.call_tool(
+                "resolve_classification_clarification",
+                {
+                    "proposal_id": clarify["proposal_id"],
+                    "suggestion": {
+                        "tx_id": tx2["tx_id"], "target_node_id": target2,
+                        "confidence": 0.9, "reason": "根据用户回答归类。",
+                    },
+                    "user_answer": "这是用户确认的餐饮消费。",
+                    "expected_seq": batch2["ledger_seq"],
+                },
+            )
+            resolved_data = json.loads(_blocks_text(resolved_res))
+            if resolved_data.get("clarification_count") != 0 or resolved_data.get("ready_count") != 1:
+                print(f"✗ 澄清没有更新原草案：{resolved_data}")
                 return 1
-            except Exception as e:
-                if "外部额度" not in str(e):
-                    print(f"✗ 拒绝理由不对：{e}")
-                    return 1
-            print("✓ 引擎拒绝语义：分裂不适用时拒绝并给出人话理由")
+            print("✓ V1.1：草案可恢复，用户回答可写回原草案，仍未直接落账")
         finally:
             db.DB_PATH = real_path
 

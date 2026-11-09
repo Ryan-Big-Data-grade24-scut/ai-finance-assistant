@@ -32,6 +32,56 @@ def init_db(db_path: Path | None = None) -> None:
     conn = sqlite3.connect(path)
     try:
         conn.executescript(sql)
+        # 幂等增量迁移：为已经存在的 V1.0 配置表补充后续字段。
+        config_columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_provider_config)")}
+        if "allow_external_processing" not in config_columns:
+            conn.execute(
+                "ALTER TABLE ai_provider_config ADD COLUMN allow_external_processing "
+                "INTEGER NOT NULL DEFAULT 0 CHECK (allow_external_processing IN (0,1))"
+            )
+
+        # AI Finance Companion V2：旧版 ai_chat_actions 将 action_type 限定为两种。
+        # 新增批量分类与自然语言手动记账时，需要扩展动作类型。保留旧数据，
+        # 将枚举校验移至 chat_service 的白名单，避免每增加一种提案都重建数据库。
+        action_table = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_chat_actions'"
+        ).fetchone()
+        action_sql = str(action_table[0] or "") if action_table else ""
+        if "CHECK (action_type IN" in action_sql:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("ALTER TABLE ai_chat_actions RENAME TO ai_chat_actions_legacy")
+                conn.execute(
+                    """CREATE TABLE ai_chat_actions (
+                        id TEXT PRIMARY KEY,
+                        conversation_id TEXT NOT NULL REFERENCES ai_chat_conversations(id) ON DELETE CASCADE,
+                        action_type TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending','confirmed','rejected')),
+                        payload_json TEXT NOT NULL,
+                        result_json TEXT,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        decided_at TEXT
+                    )"""
+                )
+                conn.execute(
+                    "INSERT INTO ai_chat_actions "
+                    "(id,conversation_id,action_type,status,payload_json,result_json,created_at,decided_at) "
+                    "SELECT id,conversation_id,action_type,status,payload_json,result_json,created_at,decided_at "
+                    "FROM ai_chat_actions_legacy"
+                )
+                conn.execute("DROP TABLE ai_chat_actions_legacy")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_ai_chat_actions_conversation "
+                    "ON ai_chat_actions(conversation_id,status,created_at)"
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.execute("PRAGMA foreign_keys=ON")
         conn.commit()
     finally:
         conn.close()
@@ -73,20 +123,6 @@ def transaction(conn: sqlite3.Connection | None = None):
     finally:
         if own:
             c.close()
-
-
-def health_snapshot(db_path: Path | None = None) -> dict:
-    """存活探针要的那几个数。
-
-    放在这里而不是 main.py —— **main.py 不含任何 SQL**（第一轮 DNA）。
-    """
-    conn = get_conn(db_path)
-    try:
-        total = conn.execute("SELECT COUNT(*) c FROM transactions_raw").fetchone()["c"]
-        batches = conn.execute("SELECT COUNT(*) c FROM import_batches").fetchone()["c"]
-    finally:
-        conn.close()
-    return {"transactions": total, "batches": batches}
 
 
 def show_stats(db_path: Path | None = None) -> None:
@@ -142,14 +178,8 @@ def show_stats(db_path: Path | None = None) -> None:
 
 
 if __name__ == "__main__":
-    # Windows 控制台默认 GBK，✓ 编不出来 —— 这里兜底，别让打印把脚本干掉
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
     init_db()
-    print(f"[OK] 已初始化 {DB_PATH}")
+    print(f"✓ 已初始化 {DB_PATH}")
     if "--stats" in sys.argv:
         print()
         show_stats()

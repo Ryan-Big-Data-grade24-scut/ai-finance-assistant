@@ -170,7 +170,12 @@ def norm_time(value: Any) -> str | None:
     s = clean(value)
     if not s:
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+    ):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:

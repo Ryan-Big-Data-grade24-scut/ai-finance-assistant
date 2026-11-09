@@ -1,8 +1,39 @@
+# ai-finance-assistant · 星云账本 V3.1
+
+**2026-10-27 新增：可交互星云图与独立账本层。** 浏览器打开 <http://localhost:5173/star>，左侧按「年 → 月 → 日 → 交易」、右侧按「大类 → 小类 → 交易」展开同一批账；支持画布拖动/缩放、搜索交易、在分类侧拖动归位、新建分组、ADD/NET、撤销/重做、账本冻结及审计。新接口与原来的账单报告、账单导入平行运行，不覆盖旧报表口径。
+
+**Windows 快速启动：** 首次使用可直接双击 `一键启动财务助手.cmd`，脚本会在缺少环境时自动执行安装；以后仍用同一个文件启动，使用 `一键停止财务助手.cmd` 关闭后台进程。也可以在 PowerShell 中运行 `.\scripts\setup.ps1` 和 `.\scripts\start-all.ps1`。
+
+> **V3.0 Ledger 引擎完善说明（2026-10-29）**：已实现整数分金额计算、退款零腿/明确引用配对、显式外部额度 split/unsplit、外部收入镜像腿、明确订单号关联且有本人/自有账户标记的转账归零、I1–I6/根净额审计链、撤销/重做及虚构支付宝格式验收数据。部分退款不自动推断为全额退款，会发出警告并要求人工核对。旧 `TxEditView.vue` 单笔修正页面仍需后续单独完善。
+
+> **V3.1 用户自己的 AI（2026-10-29）**：新增模型无关的 AI 分类业务层与 MCP 工具。AI 只能先提交结构化草案；用户明确确认后，建议才会作为一个原子 Ledger 修订落账。支持不确定项提问、规则提示、并发版本保护、审计记录和整批撤销。使用方法见 [docs/使用用户自己的AI.md](docs/使用用户自己的AI.md)。
+
+**AI Intelligence V1.0**：完善微信/支付宝官方 Excel 表头识别；新增支付宝 `.xlsx` 导入；分类批次返回退款抵扣后的 `effective_amount` 和必要平台字段；特殊交易服务端过滤；新增用户规则启用/停用、修改、删除工具。
+
+**AI Workflow V1.1（本轮）**：MCP 工具总数增至 27；新增草案列表与对话中断恢复、原草案多轮澄清、服务端规则冲突硬校验、规则关键词真实性检查、部分确认结果明示，以及 MCP 客户端配置生成和 stdio 连接冒烟测试。详见 [docs/MCP客户端接入与验证.md](docs/MCP客户端接入与验证.md)。
+
+**Penny Agent Runtime（2026-11-05）**：新增结构化规划、工具注册与参数校验、任务/步骤状态持久化、断点恢复、证据校验和前端执行进度展示。简单只读查询仍保留低延迟路径；多目标、上下文相关或涉及修改建议的请求进入 Agent Runtime。详见 [docs/PENNY_AGENT_RUNTIME_UPGRADE.md](docs/PENNY_AGENT_RUNTIME_UPGRADE.md)。
+
+**安全提醒：** `split` 仅对资金来源已配置为「亲情卡 / 他人代付 / 外部额度」的交易开放；只凭金额相同不会自动配对内部转账或退款。验收命令会使用临时数据库，不会修改 `db/bills.db`。
+
+---
+
 # ai-finance-assistant
 
 AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工具。
 
 ---
+
+## 当前 Ledger 引擎验收（V3.0）
+
+项目根目录执行：
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe scripts\verify_ledger_engine.py
+```
+
+虚构支付宝格式测试账单：`sample_data/支付宝格式_引擎验收_虚构数据.csv`。验收脚本会在临时目录建库，导入 13 笔有效交易，验证退款、内部转账、部分退款警告、外部额度分裂、NET、撤销/重做和金额审计。关闭脚本后临时数据库自动删除。
 
 ## 跑起来
 
@@ -32,25 +63,24 @@ AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工
 .\scripts\check.ps1             # 自检：缺什么、哪个服务没起来
 ```
 
-**一键起停（PR #5 新增，推荐用这个）**：
-
-```powershell
-.\scripts\launch-app.ps1       # 起后端+前端，带健康检查，自动开浏览器
-.\scripts\stop-app.ps1         # 停掉（按 PID，不会误杀别的进程）
-```
-
-> 它俩是**独立进程**（PID 记在 `.runtime/processes.json`），不挂在终端窗口上，
-> 关掉窗口也还活着 —— 所以别用「关终端」当停止方式。
-
 ### MCP 接入（给 AI 客户端用）
 
-`backend/mcp/server.py`（14 个工具，只读 11 + 可写 3）以 stdio 方式运行。自检：
+`backend/mcp/server.py` 以 stdio 方式运行，包含报告、导入、账本和 AI 分类工作流工具（当前 27 个）。先执行服务端自检，再执行真实 stdio 客户端握手测试：
 
 ```powershell
 .venv\Scripts\python.exe -m backend.mcp.server --selftest
+.venv\Scripts\python.exe scripts\check_mcp_connection.py
 ```
 
-Claude Desktop 等客户端的配置（把 `<项目路径>` 换成实际路径）：
+用当前虚拟环境生成本机配置：
+
+```powershell
+.venv\Scripts\python.exe scripts\print_mcp_config.py --client claude
+```
+
+详细说明见 [docs/MCP客户端接入与验证.md](docs/MCP客户端接入与验证.md)。
+
+支持本地 stdio MCP 的客户端可直接参考项目根目录的 `mcp-config.example.json`。通用格式如下：
 
 ```json
 {
@@ -64,7 +94,7 @@ Claude Desktop 等客户端的配置（把 `<项目路径>` 换成实际路径�
 }
 ```
 
-设计边界见 `docs/设计/第一轮/04_MCP.md`。红线：MCP 层只转发，`backend/mcp/` 里出现 `conn.execute` / `sqlite3` 直接打回。
+分类工具固定走“查询 → 草案 → 澄清 → 用户确认 → Ledger 落账”流程。草案可跨对话恢复；服务端会强制拦截未澄清的规则冲突。MCP 层只转发；业务逻辑集中在 `backend/classification/`，账本写入仍只能经过 Ledger 引擎。
 
 ### 三个坑（都是实测踩出来的，别改回去）
 
@@ -78,28 +108,13 @@ Claude Desktop 等客户端的配置（把 `<项目路径>` 换成实际路径�
 
 ---
 
-## 当前进度（2026-10-28）
+## 历史进度记录（2026-10-16）
 
 | 功能 | 后端 | 前端 |
 |---|---|---|
-| ① 跨平台账单导入 | 🟡 微信 1099 笔 + **支付宝 1804 笔**均已实测通过；其他平台未开始 | ✅ 拖拽上传 + 导入页（PR #5） |
+| ① 跨平台账单导入 | 🟡 微信 1099 笔 + **支付宝 1804 笔**均已实测通过；其他平台未开始 | ⬜ 只有上传骨架，没接后端 |
 | ② 生成 preset 报告 | ✅ 7 个接口全部跑通，数字口径逐条验证过 | ✅ **已接真实接口**（PR #1） |
-| ③ MCP 接入 | ✅ **14 个工具**（只读 11 + 可写 3），`--selftest` 8 步全过 | — |
-| ④ 交易明细编辑 / 日历 | ✅ 单条删除（逻辑删除）、月历检索（PR #5） | ✅ 明细页 + 月历（PR #5） |
-| ⑤ 账本引擎（第二轮） | ✅ 骨架完成：账本层 9 个模块 + 8 个端点 + 撤销/重做 + 护栏 | ✅ **星图 `/star`** 的壳（径向树 + 拖拽手势） |
-
-### ④⑤ 第二轮：账本引擎
-
-第四、五行是第二轮的成果，做的是**基座**不是智能：
-
-- **账本层** `backend/ledger/`：代数引擎 + 8 种操作 + 撤销/重做 + 10 条结构性护栏
-- **星图** `/star`：径向树，点节点切 ADD/NET，拖 τ 改归属
-- **真相源**：`docs/设计/第二轮/04_骨架与契约.md` —— 层与唯一入口、层间接口、错误语义、禁止清单
-
-```powershell
-# 跑账本引擎的测试（81 例，含 10 条护栏）
-.venv\Scripts\python.exe -m pytest -q
-```
+| ③ MCP 接入 | 当时未实现；当前 V3.1 已实现报告、账本与 AI 分类工具 | — |
 
 ### 支付宝导入已验证
 
@@ -121,26 +136,20 @@ Claude Desktop 等客户端的配置（把 `<项目路径>` 换成实际路径�
 
 ---
 
-## 必须先看懂的一件事：四条通道
+## 必须先看懂的一件事：三条通道
 
 **不是「请求先过 schemas.py 再过 overrides.py 才能查库」。**
 `schemas.py` 不碰数据库，它只是 HTTP/MCP 边界的类型校验。
 
-真实结构是**四条独立通道，各有唯一的门**：
+真实结构是**三条独立通道，各有唯一的门**：
 
 | 通道 | 唯一入口 | 能做什么 |
 |---|---|---|
 | 写原始层 | `backend/importer/` | 只能 INSERT，**绝不 UPDATE** |
 | 写修正层 | `backend/overrides.py` | UPSERT + 三道 403 防线 |
 | 读 | `backend/reports/*.py` | 纯 SELECT，查 `v_tx` 视图 |
-| **写账本（第二轮）** | `backend/ledger/service.py` | `apply_op` / `undo` / `redo` / `reset` —— **只写 `ledger_*` 表** |
 
 查询**不经过** `overrides.py` —— 它只管「改」，不管「读」。
-
-> **账本层是第四条平行通道，不插进第一轮链路中间。**
-> 它不 import `reports` / `overrides` / `importer`，不查 `v_tx_counted`，
-> 也不和第一轮的 reports 数字相加（**禁止跨账汇总**）。
-> 这条靠护栏机器检查 —— 越界 CI 直接红。
 
 ### 由此推出的三条硬约束
 
@@ -162,20 +171,19 @@ tx_overrides       所有修正落这里
 ## 目录
 
 ```
-db/schema.sql          13 表 + 2 视图（第一轮 5 表 + 第二轮账本 8 表）
+db/schema.sql          3 表 + 2 视图 + 5 索引
 backend/
   db.py                连接管理 / 事务边界 / 建表
-  schemas.py           接口契约 + 字段语义 + 样例
+  schemas.py           13 个接口的契约 + 字段语义 + 样例
   overrides.py         ★ 写修正的唯一入口
   main.py              FastAPI 入口（零业务逻辑）
-  importer/            账单解析（wechat 已验证 / alipay 已验证）
+  importer/            账单解析（wechat 已验证 / alipay 待验）
   reports/             7 个报告组件 + 待分类清单
-  ledger/              ★ 第二轮：账本引擎（代数层 9 个模块）
-  mcp/                 MCP 服务器（backend.mcp.server，14 个工具）
-frontend/src/views/    5 页（账单 / 导入 / 改单 / 明细 / 星图）
-scripts/               setup / start-all / start-*-* / check / launch-app / stop-app
-.github/workflows/     CI（pytest + 护栏 + MCP 自检 + vue-tsc）
-docs/设计/             设计文档（第一轮 / 第二轮）
+  mcp/                 MCP 服务器（报告、账本、V3.1 AI 分类工具）
+  classification/      模型无关的分类草案、确认、规则与撤销业务层
+frontend/src/views/    3 页骨架（账单 / 导入 / 改单）
+scripts/               setup / start-all / start-*-* / check
+docs/设计/             设计文档
 ```
 
 `db/bills.db` 是各自的本地账本，不入库（gitignored）。
@@ -186,17 +194,13 @@ docs/设计/             设计文档（第一轮 / 第二轮）
 
 | 文档 | 什么时候看 |
 |---|---|
-| `docs/README.md` | **先看这个** —— 全部文档的地图 + 现状表 |
 | `docs/设计/系统设计.md` | 长期愿景与问题定义 |
-| `docs/设计/第一轮/00_整体架构.md` | 三条通道为什么这么分（第二轮加了第四条） |
+| `docs/设计/第一轮/00_整体架构.md` | 三条通道为什么这么分 |
 | `01_数据库.md` | 表结构与去重、事务设计 |
 | `02_后端.md` | 三个核心文件各自解决什么 |
 | `03_前端.md` | 骨架结构与分工边界 |
 | `04_MCP.md` | MCP 层的边界与安全 |
 | `1-1_导入.md` / `1-2_生成报告.md` / `1-3_MCP接入.md` | 三个功能各自的目标与进度 |
-| **`docs/设计/第二轮/04_骨架与契约.md`** | **★ 第二轮的真相源** —— 层与唯一入口、层间接口、错误语义、可 grep 的禁止清单、不跑偏检查清单 |
-| `docs/设计/第二轮/记账代数.md` | 账本引擎的数学定义（τ / X / Y / M、+₁ +₂、分裂与镜像） |
-| `docs/设计/第二轮/00_设计思路.md` | 为什么第二轮先做基座不做智能 |
 
 ---
 
@@ -204,7 +208,22 @@ docs/设计/             设计文档（第一轮 / 第二轮）
 
 | 事项 | 谁做 |
 |---|---|
-| 星图在大账本（500+ 笔）上的布局 —— 要先定「聚合到 N 层」还是「只画分组」 | 队友（**产品决定，不是调参**） |
-| 第二轮基座 A：AI 粗分类插件（走 `apply_ledger_op` 这一个写通道） | 队友 |
+| MCP 真实客户端实测（选择客户端并连接） | 待本地完成 |
+| 支付宝导入验证 | 需要解压密码 |
 | 第三方平台适配（美团 / 银行卡 / 电商） | 分到导入功能的人 |
-| MCP 真实客户端实测（Claude Desktop 接入） | 你 |
+| `frontend/components/` 9 个组件 | 队友 |
+
+
+## AI / MCP 工作流 V1.1
+
+- `list_classification_proposals`：对话中断后找回未完成草案。
+- `resolve_classification_clarification`：将用户回答写回原草案，不重复创建 proposal，也不直接落账。
+- 服务端强制阻止未澄清的冲突规则建议。
+- `scripts/print_mcp_config.py`：生成当前项目的 MCP 客户端配置。
+- `scripts/check_mcp_connection.py`：使用 MCP Client SDK 验证 stdio 握手、工具发现和只读调用。
+
+详细说明见 `docs/MCP客户端接入与验证.md`。
+
+## AI Finance Web V1.0
+
+网页原生 AI 已加入模型设置和 AI 智能导入入口：配置自己的 API Key 并明确授权必要交易字段处理后，导入账单会先进行整批分类分析，用户可以在导入预览中批准新分类、勾选交易确认，并通过批次对话校准建议。只有命中用户明确启用的规则且开启自动规则授权时才会自动落账。详见 `docs/验收/AI-Finance-Web-V1.0-验收说明.md` 和 `docs/使用/网页AI智能导入.md`。
