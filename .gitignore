@@ -5,6 +5,7 @@ db/*.db-shm
 db/*.sqlite
 db/*.sqlite3
 db/backups/
+db/backup/
 
 # ---- 真实账单原始文件：绝不入库 ----
 *.xlsx
