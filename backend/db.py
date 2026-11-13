@@ -12,26 +12,87 @@ backend/db.py —— 连接管理 / 建表 / 事务
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import sys
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 # ---- 路径：必须绝对，相对路径会在不同工作目录下指向不同数据库 ----
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_DIR = BASE_DIR / "db"
 DB_PATH = DB_DIR / "bills.db"
 SCHEMA_PATH = DB_DIR / "schema.sql"
+SEED_PATH = BASE_DIR / "sample_data" / "star-v4-startup.sqlite3"
+
+_LEGACY_LEDGER_TABLES = (
+    "ledger_books",
+    "ledger_book_tx",
+    "ledger_nodes",
+    "ledger_legs",
+    "ledger_ops",
+    "ledger_book_state",
+    "ledger_snapshots",
+    "ledger_seq",
+)
+
+
+def _archive_legacy_ledger(conn: sqlite3.Connection) -> None:
+    """保存旧表的数据，释放表名供新版 schema 重建。"""
+    for table in _LEGACY_LEDGER_TABLES:
+        conn.execute(f"CREATE TABLE archive_legacy_{table} AS SELECT * FROM {table}")
+    for table in reversed(_LEGACY_LEDGER_TABLES):
+        conn.execute(f"DROP TABLE {table}")
+
+
+def _apply_schema(conn: sqlite3.Connection, sql: str) -> None:
+    # executescript 会隐式提交已有事务。逐条执行让归档和建表一起提交或回滚，
+    # complete_statement 会等到触发器的 END;，也能处理其中的分号。
+    statement = ""
+    for line in sql.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        conn.execute(statement)
+
+
+def _install_seed(path: Path) -> None:
+    """Install the branch snapshot on first run without replacing an existing ledger."""
+    with NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
+        staged = Path(temporary.name)
+        try:
+            with SEED_PATH.open("rb") as seed:
+                shutil.copyfileobj(seed, temporary)
+            temporary.close()
+            try:
+                os.link(staged, path)
+            except FileExistsError:
+                pass
+        finally:
+            temporary.close()
+            staged.unlink(missing_ok=True)
 
 
 def init_db(db_path: Path | None = None) -> None:
-    """执行 schema.sql 建表建索引建视图。幂等，可重复执行。"""
+    """归档旧版账本并初始化当前 schema。幂等，可重复执行。"""
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path == DB_DIR / "bills.db" and not path.exists() and SEED_PATH.is_file():
+        _install_seed(path)
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    conn = sqlite3.connect(path)
-    try:
-        conn.executescript(sql)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        # 外键开关只能在事务外设置。初始化结束后关闭此连接，业务连接会重新开启外键。
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        book_columns = {row[1] for row in conn.execute("PRAGMA table_info(ledger_books)")}
+        legacy_ledger = "book_id" in book_columns and "id" not in book_columns
+        if legacy_ledger:
+            _archive_legacy_ledger(conn)
+        _apply_schema(conn, sql)
         # 幂等增量迁移：为已经存在的 V1.0 配置表补充后续字段。
         config_columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_provider_config)")}
         if "allow_external_processing" not in config_columns:
@@ -48,43 +109,38 @@ def init_db(db_path: Path | None = None) -> None:
         ).fetchone()
         action_sql = str(action_table[0] or "") if action_table else ""
         if "CHECK (action_type IN" in action_sql:
-            conn.execute("PRAGMA foreign_keys=OFF")
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                conn.execute("ALTER TABLE ai_chat_actions RENAME TO ai_chat_actions_legacy")
-                conn.execute(
-                    """CREATE TABLE ai_chat_actions (
-                        id TEXT PRIMARY KEY,
-                        conversation_id TEXT NOT NULL REFERENCES ai_chat_conversations(id) ON DELETE CASCADE,
-                        action_type TEXT NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'pending'
-                            CHECK (status IN ('pending','confirmed','rejected')),
-                        payload_json TEXT NOT NULL,
-                        result_json TEXT,
-                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                        decided_at TEXT
-                    )"""
+            conn.execute("ALTER TABLE ai_chat_actions RENAME TO ai_chat_actions_legacy")
+            conn.execute(
+                """CREATE TABLE ai_chat_actions (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES ai_chat_conversations(id) ON DELETE CASCADE,
+                    action_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','confirmed','rejected')),
+                    payload_json TEXT NOT NULL,
+                    result_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    decided_at TEXT
+                )"""
+            )
+            conn.execute(
+                "INSERT INTO ai_chat_actions "
+                "(id,conversation_id,action_type,status,payload_json,result_json,created_at,decided_at) "
+                "SELECT id,conversation_id,action_type,status,payload_json,result_json,created_at,decided_at "
+                "FROM ai_chat_actions_legacy"
+            )
+            conn.execute("DROP TABLE ai_chat_actions_legacy")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_chat_actions_conversation "
+                "ON ai_chat_actions(conversation_id,status,created_at)"
+            )
+        if legacy_ledger:
+            conn.execute("SELECT * FROM v_tx_counted LIMIT 0")
+            violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+            if violation is not None:
+                raise sqlite3.IntegrityError(
+                    f"旧账本迁移后的外键检查失败：{violation[0]} 引用了 {violation[2]}"
                 )
-                conn.execute(
-                    "INSERT INTO ai_chat_actions "
-                    "(id,conversation_id,action_type,status,payload_json,result_json,created_at,decided_at) "
-                    "SELECT id,conversation_id,action_type,status,payload_json,result_json,created_at,decided_at "
-                    "FROM ai_chat_actions_legacy"
-                )
-                conn.execute("DROP TABLE ai_chat_actions_legacy")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_ai_chat_actions_conversation "
-                    "ON ai_chat_actions(conversation_id,status,created_at)"
-                )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.execute("PRAGMA foreign_keys=ON")
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
@@ -102,6 +158,31 @@ def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
+
+
+def health_snapshot(db_path: Path | None = None) -> dict:
+    """返回健康检查使用的原始流水数与导入批次数。"""
+    with closing(get_conn(db_path)) as conn:
+        total, batches = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM transactions_raw), "
+            "(SELECT COUNT(*) FROM import_batches)"
+        ).fetchone()
+    return {"transactions": total, "batches": batches}
+
+
+def list_import_batches() -> list[dict]:
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            "SELECT b.*, p.name AS platform_name FROM import_batches b "
+            "LEFT JOIN platforms p ON p.id = b.platform_id "
+            "ORDER BY b.created_at DESC"
+        )
+        return [dict(row) for row in rows]
+
+
+def has_transactions() -> bool:
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT 1 FROM transactions_raw LIMIT 1").fetchone() is not None
 
 
 @contextmanager

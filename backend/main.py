@@ -41,6 +41,7 @@ from backend.ai import history_workflow as ai_history          # noqa: E402
 from backend.ai import chat_service as ai_chat                       # noqa: E402
 from backend.ai.providers import test_connection as ai_test_connection  # noqa: E402
 from backend.ai.providers import AIProviderError              # noqa: E402
+from backend.classification import service as classification_service # noqa: E402
 from backend.classification.errors import ClassificationError # noqa: E402
 
 # ── 控制台编码容错（Windows 必做）─────────────────────────────
@@ -77,17 +78,10 @@ def health() -> dict:
     刻意放在 /health 而不是 /api/health —— 它不是业务接口，
     不该出现在 /docs 的业务列表里被当成"第 13 个接口"。
     """
-    conn = db.get_conn()
-    try:
-        total = conn.execute("SELECT COUNT(*) c FROM transactions_raw").fetchone()["c"]
-        batches = conn.execute("SELECT COUNT(*) c FROM import_batches").fetchone()["c"]
-    finally:
-        conn.close()
     return {
         "status": "ok",
         "db": str(db.DB_PATH),
-        "transactions": total,
-        "batches": batches,
+        **db.health_snapshot(),
     }
 
 @app.on_event("startup")
@@ -285,16 +279,7 @@ async def import_commit(
 @app.get("/api/import/history")
 async def import_history():
     """导入批次记录。"""
-    conn = db.get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT b.*, p.name AS platform_name FROM import_batches b "
-            "LEFT JOIN platforms p ON p.id = b.platform_id "
-            "ORDER BY b.created_at DESC"
-        ).fetchall()
-    finally:
-        conn.close()
-    return {"batches": [dict(r) for r in rows]}
+    return {"batches": db.list_import_batches()}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -433,12 +418,7 @@ def commit_ai_history_session(session_id: str, data: AI.AIHistoryCommitIn):
 
 @app.get("/api/ai/classification/proposals")
 def list_ai_classification_proposals(status: str = "draft", limit: int = 20):
-    conn = db.get_conn()
-    try:
-        total = int(conn.execute("SELECT COUNT(*) FROM transactions_raw").fetchone()[0])
-    finally:
-        conn.close()
-    if not total:
+    if not db.has_transactions():
         return {"book_id": ledger_service.LIVE_BOOK_ID, "current_seq": 0,
                 "status_filter": status, "returned": 0, "proposals": []}
     ledger_service.sync_live_book()

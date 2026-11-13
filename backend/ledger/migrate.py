@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import sys
 
 from .service import migrate_ledger_legs
 
 
 def main() -> None:
     result = migrate_ledger_legs()
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(result, ensure_ascii=False, indent=2), file=sys.stderr)
 
 
 if __name__ == "__main__":

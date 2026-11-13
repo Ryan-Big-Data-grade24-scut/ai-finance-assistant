@@ -12,6 +12,8 @@ const emit=defineEmits<{
   (e:'close'):void
   (e:'move-tx'):void
   (e:'change-op'):void
+  (e:'add-group'):void
+  (e:'dissolve-group'):void
   (e:'update:targetNodeId', value:string):void
 }>()
 const fmt=(n:number)=>new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n)
@@ -29,7 +31,7 @@ function getGroupTrail(id:string):string {
         <aside v-if="selected" class="inspector">
           <div class="inspector-top"><span>NODE INSPECTOR <small>节点详情</small></span><button title="收起详情" @click="emit('close')">×</button></div>
           <div class="inspector-content">
-            <div class="inspect-kind">{{ selected.node.kind === 'tx' ? 'TRANSACTION' : selected.node.kind === 'root' ? 'MASTER LEDGER' : selected.node.side === 'time' ? 'TIME CLUSTER' : 'CATEGORY CLUSTER' }}</div>
+            <div class="inspect-kind">{{ selected.node.kind === 'tx' ? 'TRANSACTION' : selected.node.kind === 'root' ? 'TIME RANGE' : 'CATEGORY CLUSTER' }}</div>
             <h3>{{ selected.node.name }}</h3>
             <div v-if="selected.node.tx" class="inspect-transaction">
               <div class="inspect-amount">{{ selected.node.tx.direction === 'expense' ? '−' : '+' }} ¥{{ fmt(selected.node.tx.effective_amount ?? selected.node.tx.amount) }}</div>
@@ -50,7 +52,7 @@ function getGroupTrail(id:string):string {
                 <select id="tx-target" :value="targetNodeId" @change="onSelect($event)"><option v-for="n in nodeSelector" :key="n.id" :value="n.id">{{ n.kind === 'root' ? '未分类（根）' : n.name }}</option></select>
                 <button class="action-btn" :disabled="busy || targetNodeId === selected.node.tx.node_id" @click="emit('move-tx')">确认调整归属 ↗</button>
               </div>
-              <p v-else class="inspect-note">时间是原始事实，不能拖拽修改。到分类视角移动此笔交易。</p>
+
             </div>
             <template v-else>
               <div class="inspect-total">¥ {{ fmt(selected.node.e + selected.node.i) }}</div>
@@ -58,7 +60,12 @@ function getGroupTrail(id:string):string {
               <div v-if="selected.node.op && selected.node.nodeId && selected.node.nodeId !== tree?.root_id" class="op-panel">
                 <span>聚合方式</span><button :class="{net: selected.node.op === 'NET'}" :disabled="busy" @click="emit('change-op')">{{ selected.node.op }} ↔</button>
               </div>
-              <p class="inspect-note">点击一个节点，它会放大并成为画面中心；其他分支暂时隐藏。通过「返回上一级」或顶部路径返回。</p>
+              <div v-if="selected.node.kind === 'group' || selected.node.kind === 'root' || (selected.node.kind === 'placeholder' && !selected.node.peekMore)" class="structure-panel">
+                <button class="action-btn" :disabled="busy" @click="emit('add-group')">＋ 在此创建子分组</button>
+                <button v-if="selected.node.kind === 'group' && selected.node.nodeId && selected.node.nodeId !== tree?.root_id && selected.node.ledgerKind !== 'external_income'"
+                  class="danger-btn" :disabled="busy" @click="emit('dissolve-group')">解散此分组（保留交易）</button>
+              </div>
+              <p class="inspect-note">单击只移动镜头并展开子节点；双击打开详情。解散分组不会删除任何原始账单。</p>
             </template>
           </div>
         </aside>
@@ -71,4 +78,5 @@ function getGroupTrail(id:string):string {
 .reassign-panel,.op-panel{margin-top:18px;display:grid;gap:9px;font-size:11px;color:#aebde1;}.reassign-panel select,.galaxy-modal select,.galaxy-modal input{height:37px;border:1px solid #ffffff30;background:#223250;border-radius:8px;color:#e3edff;max-width:100%;padding:0 9px;outline:0;}.reassign-panel select option{background:#15223a;}.action-btn{padding:10px 12px;border:0;color:#fff;font-weight:650;background:#6777d2;border-radius:8px;}.action-btn:hover{background:#7f8be2;}.op-panel{grid-template-columns:1fr auto;align-items:center;}.op-panel button{padding:6px 12px;border:1px solid #718ac280;background:#263755;color:#b4e4de;border-radius:6px;font-size:11px;}.op-panel button.net{color:#fad38f;border-color:#d0a86b66;}
 @media(max-width:1050px){.inspector{width:260px}}
 @media(max-width:660px){.inspector{max-height:47%;width:calc(100% - 40px);right:20px;bottom:60px}}
+.structure-panel{margin-top:18px;display:grid;gap:8px}.danger-btn{border:1px solid #e9999985;background:#6d343b55;color:#ffd7da;padding:10px;border-radius:8px;font-size:11px;}.danger-btn:hover:not(:disabled){background:#853c4b88}
 </style>
