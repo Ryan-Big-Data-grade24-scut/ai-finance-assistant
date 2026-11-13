@@ -7,13 +7,9 @@ defineProps<{
   graph: {nodes:Point[];edges:Edge[]}
   pan: CameraPan
   zoom: number
-  focusId: string
-  focusPage: number
-  mode: string
   selectedId: string
   hoveredId: string
   dropId: string
-  drillDirection: 'in'|'out'
   dragLocation: {x:number;y:number}|null
 }>()
 const emit=defineEmits<{
@@ -22,6 +18,8 @@ const emit=defineEmits<{
   (e:'canvas-up'):void
   (e:'canvas-wheel', event:WheelEvent):void
   (e:'node-down', event:PointerEvent, point:Point):void
+  (e:'node-click', point:Point):void
+  (e:'node-double', point:Point):void
   (e:'node-enter', id:string):void
   (e:'node-leave', id:string):void
 }>()
@@ -42,7 +40,7 @@ const particles=Array.from({length:68},(_,i)=>({
 }))
 </script>
 <template>
-        <svg ref="svgEl" class="galaxy-svg" viewBox="-960 -540 1920 1080"
+        <svg ref="svgEl" class="galaxy-svg" viewBox="-920 -470 1840 940"
              @pointerdown="emit('canvas-down', $event)" @pointermove="emit('canvas-move', $event)" @pointerup="emit('canvas-up')" @pointercancel="emit('canvas-up')" @wheel.prevent="emit('canvas-wheel', $event)">
           <defs>
             <radialGradient id="coreGlow"><stop offset="0%" stop-color="#66dbff" stop-opacity=".31"/><stop offset="55%" stop-color="#5651ec" stop-opacity=".15"/><stop offset="100%" stop-color="#28296b" stop-opacity="0"/></radialGradient>
@@ -52,7 +50,7 @@ const particles=Array.from({length:68},(_,i)=>({
             <filter id="nodeBloom" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="7"/></filter>
             <pattern id="starField" width="124" height="119" patternUnits="userSpaceOnUse"><circle cx="18" cy="22" r="1.1" fill="#8cadde" opacity=".35"/><circle cx="95" cy="77" r=".75" fill="#fff" opacity=".25"/><circle cx="50" cy="112" r=".7" fill="#bca7ff" opacity=".3"/></pattern>
           </defs>
-          <rect x="-960" y="-540" width="1920" height="1080" fill="url(#starField)" />
+          <rect x="-920" y="-470" width="1840" height="940" fill="url(#starField)" />
           <g ref="sceneEl" :transform="`translate(${pan.x} ${pan.y}) scale(${zoom})`">
             <g class="micro-particles" pointer-events="none" aria-hidden="true">
               <circle v-for="particle in particles" :key="particle.id" :cx="particle.x" :cy="particle.y"
@@ -61,41 +59,43 @@ const particles=Array.from({length:68},(_,i)=>({
             </g>
             <g class="orbit-rings" pointer-events="none"><circle r="235"/><circle r="490"/><circle r="740"/><circle r="1000"/></g>
             <circle r="160" fill="url(#coreGlow)" pointer-events="none"/>
-            <Transition name="drill" mode="out-in"><g :key="`${focusId}:${focusPage}:${mode}`" class="drill-stage">
+            <g class="star-stage">
             <TransitionGroup name="satellite" tag="g" class="edge-layer" pointer-events="none">
-              <path v-for="e in graph.edges" :key="`${e.from.node.id}->${e.to.node.id}`" :d="edgePath(e)" :class="{'satellite-edge': e.to.satellite}" :stroke="e.to.side === 'time' ? 'url(#edgeTime)' : 'url(#edgeCategory)'" fill="none" :stroke-width="e.to.satellite ? 1.4 : 1.55"/>
+              <path v-for="e in graph.edges" :key="`${e.from.node.id}->${e.to.node.id}`" :d="edgePath(e)" :class="{'satellite-edge': e.to.satellite, 'peripheral-edge': e.to.peripheral || e.from.peripheral, 'focus-edge': e.to.focusBranch}" :stroke="e.from.node.kind === 'root' ? 'url(#edgeTime)' : 'url(#edgeCategory)'" fill="none" :stroke-width="e.to.satellite ? 1.4 : 1.55" :style="{ opacity: e.to.peripheral || e.from.peripheral ? 0.18 : e.to.focusBranch ? 0.9 : undefined }"/>
             </TransitionGroup>
             <TransitionGroup name="orbit" tag="g" class="node-layer">
-            <g v-for="p in graph.nodes" :key="p.node.id" :transform="`translate(${p.x} ${p.y})`"
-               :class="['g-node', `kind-${p.node.kind}`, `side-${p.side}`, { 'focus-center': p.depth === 0, 'selected-node': selectedId === p.node.id, 'drop-target': dropId === p.node.nodeId && Boolean(dropId), 'tx-draggable': p.node.kind === 'tx' && p.node.side === 'category' && !p.node.preview, 'preview-node': p.node.preview, 'hovered-node': hoveredId === p.node.id, 'satellite-node': p.satellite, 'satellite-more': p.node.peekMore }]"
+            <g v-for="p in graph.nodes" :key="p.node.id" :transform="`translate(${p.x} ${p.y}) scale(${p.displayScale ?? 1})`"
+               :style="{ opacity: p.displayOpacity ?? 1 }"
+               :class="['g-node', `kind-${p.node.kind}`, `side-${p.side}`, { 'focus-center': p.node.kind === 'root', 'selected-node': selectedId === p.node.id, 'drop-target': dropId === p.node.nodeId && Boolean(dropId), 'tx-draggable': p.node.kind === 'tx', 'hovered-node': hoveredId === p.node.id, 'satellite-node': p.satellite, 'satellite-more': p.node.peekMore, 'peripheral-node': p.peripheral, 'focus-branch-node': p.focusBranch }]"
                @pointerdown="emit('node-down', $event, p)"
+               @click.stop="emit('node-click', p)"
+               @dblclick.stop.prevent="emit('node-double', p)"
                @mouseenter="emit('node-enter', p.node.id)"
                @mouseleave="emit('node-leave', p.node.id)">
               <g class="planet-motion" :style="p.satellite && p.spawnFrom ? {
                 '--origin-x': `${p.spawnFrom.x - p.x}px`, '--origin-y': `${p.spawnFrom.y - p.y}px`
               } : undefined">
-              <circle :r="nodeRadius(p) + (p.depth === 0 ? 35 : 11)" class="node-halo" filter="url(#nodeBloom)"/>
-              <circle v-if="p.depth === 0" r="80" fill="none" stroke="#84a8fb" stroke-opacity=".25" stroke-width="1" stroke-dasharray="4 9" class="root-orbit"/>
+              <circle :r="nodeRadius(p) + (p.node.kind === 'root' ? 35 : 11)" class="node-halo" filter="url(#nodeBloom)"/>
+              <circle v-if="p.node.kind === 'root'" r="80" fill="none" stroke="#84a8fb" stroke-opacity=".25" stroke-width="1" stroke-dasharray="4 9" class="root-orbit"/>
               <circle :r="nodeRadius(p)" class="node-core"/>
               <circle :r="nodeRadius(p) - (p.node.kind === 'tx' ? 3 : 6)" class="node-core-inner"/>
-              <circle v-if="p.depth === 0" r="32" fill="none" stroke="url(#rootGradient)" stroke-width="1.5" stroke-opacity=".7"/>
-              <template v-if="p.depth === 0">
+              <circle v-if="p.node.kind === 'root'" r="32" fill="none" stroke="url(#rootGradient)" stroke-width="1.5" stroke-opacity=".7"/>
+              <template v-if="p.node.kind === 'root'">
                 <text y="-13" class="root-icon">✦</text>
                 <text y="12" class="root-name">{{ nodeTitle(p.node) }}</text>
-                <text y="35" class="root-count">{{ p.node.kind === 'tx' ? `¥${compact(p.node.tx?.effective_amount ?? p.node.tx?.amount ?? 0)}` : `${p.node.count} RECORDS` }}</text>
+                <text y="35" class="root-count">{{ p.node.count }} RECORDS</text>
               </template>
-              <text v-else-if="p.node.kind === 'lens'" y="5" class="lens-icon">{{ p.side === 'time' ? '◷' : '❖' }}</text>
-              <text v-else-if="p.node.kind !== 'tx'" y="5" class="group-icon">{{ p.node.op === 'NET' ? '≋' : p.node.kind === 'period' ? '◦' : '✦' }}</text>
-              <g v-if="p.depth !== 0" :transform="`translate(${p.side === 'time' ? -(nodeRadius(p)+15) : (nodeRadius(p)+15)} 0)`" :text-anchor="p.side === 'time' ? 'end' : 'start'" class="node-label">
+              <text v-else-if="p.node.kind !== 'tx'" y="5" class="group-icon">{{ p.node.peekMore ? '…' : p.node.op === 'NET' ? '≋' : '✦' }}</text>
+              <g v-if="p.node.kind !== 'root'" :transform="`translate(${p.x < 0 ? -(nodeRadius(p)+15) : (nodeRadius(p)+15)} 0)`" :text-anchor="p.x < 0 ? 'end' : 'start'" class="node-label">
                 <text class="label-title" y="-4">{{ nodeTitle(p.node) }}</text>
                 <text class="label-value" y="14">{{ labelValue(p.node) }}</text>
               </g>
-              <circle v-if="p.hasChildren && p.depth >= 1" :cx="p.side === 'time' ? -nodeRadius(p) + 3 : nodeRadius(p)-3" :cy="-nodeRadius(p) + 2" r="9" class="expand-dot"/>
-              <text v-if="p.hasChildren && p.depth >= 1" :x="p.side === 'time' ? -nodeRadius(p)+3 : nodeRadius(p)-3" :y="-nodeRadius(p)+5" class="expand-glyph">+</text>
+              <circle v-if="p.hasChildren && p.depth >= 1" :cx="p.x < 0 ? -nodeRadius(p) + 3 : nodeRadius(p)-3" :cy="-nodeRadius(p) + 2" r="9" class="expand-dot"/>
+              <text v-if="p.hasChildren && p.depth >= 1" :x="p.x < 0 ? -nodeRadius(p)+3 : nodeRadius(p)-3" :y="-nodeRadius(p)+5" class="expand-glyph">+</text>
               </g>
             </g>
             </TransitionGroup>
-            </g></Transition>
+            </g>
             <g v-if="dragLocation" :transform="`translate(${dragLocation.x} ${dragLocation.y})`" pointer-events="none">
               <circle r="26" fill="#fdca82" opacity=".23" filter="url(#nodeBloom)"/>
               <circle r="10" fill="#ffd19b" stroke="#fff" stroke-width="2"/>
@@ -111,7 +111,7 @@ const particles=Array.from({length:68},(_,i)=>({
 .node-halo{fill:#4eadd3;opacity:.26;}.side-category .node-core{fill:#2d2456;stroke:#ad90f7;}.side-category .node-core-inner{fill:#a780ee;}.side-category .node-halo{fill:#a38afc;opacity:.2;}
 .kind-root .node-core{fill:#101d3d;stroke:url(#rootGradient);stroke-width:4;}.kind-root .node-core-inner{fill:#313977;opacity:.4;}.kind-root .node-halo{fill:#767de2;opacity:.39;}
 .kind-lens .node-core{stroke-width:3;}.kind-tx .node-core{fill:#d2a46d;stroke:#ffce95;stroke-width:1;}.kind-tx .node-halo{fill:#edaf78;opacity:.14;}.kind-tx .node-core-inner{fill:#ffdead;opacity:.8;}
-.g-node{cursor:pointer;}.g-node:hover .node-core{stroke:#fff;stroke-width:3;}.g-node.selected-node .node-core{stroke:#eaf7ff;stroke-width:3.3;}.g-node.drop-target .node-core{fill:#317e7e;stroke:#ffe1ac;stroke-width:4;}.g-node.tx-draggable{cursor:grab;}.g-node.tx-draggable:active{cursor:grabbing;}
+.g-node{cursor:pointer;transition:opacity .22s ease;}.g-node:hover .node-core{stroke:#fff;stroke-width:3;}.g-node.selected-node .node-core{stroke:#eaf7ff;stroke-width:3.3;}.g-node.drop-target .node-core{fill:#317e7e;stroke:#ffe1ac;stroke-width:4;}.g-node.tx-draggable{cursor:grab;}.g-node.tx-draggable:active{cursor:grabbing;}
 .root-orbit{transform-origin:0 0;animation:orbit-spin 40s linear infinite;}@keyframes orbit-spin{to{transform:rotate(360deg)}}
 .root-icon,.root-name,.root-count,.lens-icon,.group-icon,.expand-glyph{text-anchor:middle;pointer-events:none;user-select:none;}.root-icon{font-size:27px;fill:#94ddeb;}.root-name{fill:#f1f6ff;font-size:23px;font-weight:740;letter-spacing:7px;}.root-count{fill:#94a4c8;font-size:10px;letter-spacing:2px;}.lens-icon{fill:#c4dcff;font-size:31px;}.group-icon{fill:#d6e9fc;font-size:16px;}
 .node-label{pointer-events:none;user-select:none;paint-order:stroke;stroke:#11182d;stroke-width:3.5px;stroke-linejoin:round;}.label-title{fill:#d9e6fb;font-size:15px;font-weight:650;letter-spacing:.15px;}.label-value{fill:#98a9cb;font-size:12px;font-weight:450;}.kind-tx .label-title{font-size:12px;font-weight:530;}.kind-tx .label-value{font-size:11px;}.kind-lens .label-title{fill:#fff;font-size:18px;font-weight:780;}.expand-dot{fill:#5764a8;stroke:#bec4f9;stroke-width:1;}.expand-glyph{fill:#fff;font-size:14px;}
@@ -149,4 +149,9 @@ const particles=Array.from({length:68},(_,i)=>({
 @keyframes satellite-bloom { from {opacity:0; transform:scale(.64)} to {opacity:1;transform:scale(1)} }
 @media (prefers-reduced-motion:reduce) { .micro-particles circle,.satellite-node .node-core,.satellite-node .planet-motion {animation:none;} .orbit-move,.drill-enter-active,.drill-leave-active,.satellite-enter-active,.satellite-leave-active {transition:none!important;} }
 
+
+.peripheral-node{pointer-events:auto;}.peripheral-node .node-label .label-title,.peripheral-node .node-label .label-value{stroke-width:2.2px;}.peripheral-node .node-halo{opacity:.18;}.peripheral-node .node-core{stroke-opacity:.62;}.focus-branch-node .node-halo{opacity:.78;}.focus-branch-node .label-title{fill:#f6fbff;}.focus-branch-node .label-value{fill:#b9d9f1;}.peripheral-edge{stroke-dasharray:3 10;}.focus-edge{stroke-dasharray:4 6;}
+
+/* Camera-driven peripheral pins update continuously; avoid transition lag. */
+.node-layer .orbit-move { transition: none; }
 </style>

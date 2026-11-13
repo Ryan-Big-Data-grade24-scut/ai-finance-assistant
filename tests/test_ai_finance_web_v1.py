@@ -316,7 +316,9 @@ def test_ai_settings_http_api_masks_secret(monkeypatch, isolated_ai_db):
 
 
 def test_ai_import_low_confidence_stays_pending_until_web_confirmation(monkeypatch, isolated_ai_db):
+    from fastapi.testclient import TestClient
     from backend.classification import service as classification_service
+    from backend.main import app
 
     config = AIConfig("openai_compatible", "https://api.example.com/v1", "mock-model", "secret", False, 0.9, True)
     monkeypatch.setattr(import_workflow, "get_secret_config", lambda: config)
@@ -363,13 +365,19 @@ def test_ai_import_low_confidence_stays_pending_until_web_confirmation(monkeypat
     )
     stale_detail = classification_service.get_proposal(proposal_id)
     assert stale_detail["stale"] is True
-    rebased = classification_service.rebase_if_safe(proposal_id)
-    assert rebased["stale"] is False
-    applied = classification_service.confirm(
-        proposal_id, [detail["suggestions"][0]["tx_id"]], rebased["current_seq"],
-        confirmed_by="web_user_confirmed", decision_note="用户通过网页审核工作区确认",
-    )
-    assert applied["status"] == "applied"
+    with TestClient(app) as client:
+        drafts = client.get("/api/ai/classification/proposals?status=draft")
+        assert drafts.status_code == 200
+        assert drafts.json()["returned"] == 1
+        applied = client.post(
+            f"/api/ai/classification/proposals/{proposal_id}/confirm",
+            json={"approved_tx_ids": [detail["suggestions"][0]["tx_id"]]},
+        )
+        assert applied.status_code == 200, applied.text
+        assert applied.json()["status"] == "applied"
+        report = client.get("/api/report/by-category?type=expense&period=month&value=2026-10")
+        assert report.status_code == 200
+        assert report.json()["majors"][0]["major"] == "餐饮"
     conn = db.get_conn()
     try:
         review = conn.execute("SELECT confirmed_by FROM ai_classification_reviews WHERE proposal_id=?",

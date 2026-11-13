@@ -396,7 +396,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
 
       <template v-else-if="!isIncome">
         <section class="report-card category-overview">
-          <div class="section-heading"><div><span class="eyebrow">按原始分类统计</span><h2>支出分类</h2></div><div class="heading-actions"><span class="data-badge">暂未经过智能重分类</span><div class="chart-switch"><button :class="{ active: categoryView === 'donut' }" @click="categoryView = 'donut'">环形</button><button :class="{ active: categoryView === 'bar' }" @click="categoryView = 'bar'">条形</button></div></div></div>
+          <div class="section-heading"><h2>支出分类</h2><div class="chart-switch"><button :class="{ active: categoryView === 'donut' }" @click="categoryView = 'donut'">环形</button><button :class="{ active: categoryView === 'bar' }" @click="categoryView = 'bar'">条形</button></div></div>
           <p class="insight-copy"><i />{{ deterministicInsight }}</p>
           <div class="category-layout"><div ref="categoryEl" class="category-chart" role="img" :aria-label="`支出分类${categoryView === 'donut' ? '环形图' : '条形图'}`" /><div class="category-legend"><button v-for="item in categories.majors.slice(0, 5)" :key="item.major" :class="{ active: selectedCategory === item.major }" @click="selectCategory(item.major)"><span>{{ categoryIcon(item.major) }} {{ item.major }}</span><b>{{ item.pct.toFixed(1) }}%</b></button></div></div>
         </section>

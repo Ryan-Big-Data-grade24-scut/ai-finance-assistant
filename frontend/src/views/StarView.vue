@@ -2,348 +2,324 @@
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { applyLedgerOp, getLiveLedgerTree, historyLedger } from '@/api/ledger'
 import type { LedgerOperation, LedgerTree, LedgerTx, StarFilters } from '@/api/ledger'
-import { useStarGraph, type ViewMode, type GNode, type Point } from '@/stars/useStarGraph'
-import { useStarInteraction, semanticZoomDepth } from '@/stars/useStarInteraction'
+import { useStarGraph, type Point } from '@/stars/useStarGraph'
+import { useStarInteraction } from '@/stars/useStarInteraction'
 import StarCanvas from '@/components/StarCanvas.vue'
 import StarInspector from '@/components/StarInspector.vue'
 
-const tree = ref<LedgerTree | null>(null)
-const allTransactions = ref<LedgerTx[]>([])
-const periodMode = ref<'all' | 'year' | 'month' | 'day' | 'custom'>('all')
-const periodValue = ref('')
-const startDate = ref('')
-const endDate = ref('')
-const categoryFilter = ref('')
-const refreshing = ref(false)
-let queryVersion = 0
-const loading = ref(true)
-const busy = ref(false)
-const error = ref('')
-const notice = ref('')
-const mode = ref<ViewMode>('both')
-// Zoom into one subtree at a time. This is navigation only: the authoritative ledger is unchanged.
-const focusStack = ref<string[]>(['root'])
-const focusPage = ref(0)
-const drillDirection = ref<'in' | 'out'>('in')
-const selectedId = ref('root')
-const hoveredId = ref('')
-// Wheel magnification is a local, reversible preview; only clicks change focusStack.
-const semanticAnchorId = ref('')
-const zoom = ref(0.82)
-const pan = ref({ x: 0, y: 0 })
-const canvasRef = ref<InstanceType<typeof StarCanvas> | null>(null)
-const inspectorOpen = ref(true)
-const newGroupOpen = ref(false)
-const groupName = ref('')
-const groupParent = ref('')
-const groupOp = ref<'ADD' | 'NET'>('ADD')
-const targetNodeId = ref('')
-const search = ref('')
-const searchOpen = ref(false)
-const fmt = (n: number) => new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n)
-const compact = (n: number) => n >= 10000 ? `${(n / 10000).toFixed(1)}万` : n >= 1000 ? Math.round(n).toLocaleString('zh-CN') : Number(n.toFixed(2)).toLocaleString('zh-CN')
-const reportPeriod = computed(() => {
-  const f = activeFilters.value
-  if (!f.date_from && !f.date_to) return '全部已导入交易'
-  return `${f.date_from || '最早'} — ${f.date_to || '最新'}`
+const tree=ref<LedgerTree|null>(null)
+const allTransactions=ref<LedgerTx[]>([])
+const periodMode=ref<'all'|'year'|'month'|'day'|'custom'>('all')
+const periodValue=ref(''),startDate=ref(''),endDate=ref(''),categoryFilter=ref('')
+const refreshing=ref(false),loading=ref(true),busy=ref(false)
+const error=ref(''),notice=ref('')
+let queryVersion=0
+const selectedId=ref('root'),cameraFocusId=ref('root'),hoveredId=ref('')
+const expandedIds=ref<string[]>([])
+const visibleLimits=ref<Record<string,number>>({})
+const zoom=ref(.84),pan=ref({x:0,y:0})
+const canvasRef=ref<InstanceType<typeof StarCanvas>|null>(null)
+const inspectorOpen=ref(false)
+const newGroupOpen=ref(false),groupName=ref(''),groupParent=ref(''),groupOp=ref<'ADD'|'NET'>('ADD')
+const targetNodeId=ref('')
+const search=ref(''),searchOpen=ref(false)
+const fmt=(n:number)=>new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n)
+const reportPeriod=computed(()=>{
+  const f=activeFilters.value
+  return !f.date_from&&!f.date_to?'全部已导入交易':`${f.date_from||'最早'} — ${f.date_to||'最新'}`
 })
-const availableYears = computed(() => [...new Set(allTransactions.value.map(t => t.date.slice(0, 4)))].sort().reverse())
-const availableMonths = computed(() => [...new Set(allTransactions.value.map(t => t.date.slice(0, 7)))].sort().reverse())
-const availableDays = computed(() => [...new Set(allTransactions.value.map(t => t.date))].sort().reverse())
-const periodOptions = computed(() => periodMode.value === 'year' ? availableYears.value : periodMode.value === 'month' ? availableMonths.value : availableDays.value)
-const activeFilters = computed<StarFilters>(() => {
-  let date_from = '', date_to = ''
-  if (periodMode.value === 'year' && periodValue.value) {
-    date_from = `${periodValue.value}-01-01`; date_to = `${periodValue.value}-12-31`
-  } else if (periodMode.value === 'month' && periodValue.value) {
-    const [y, m] = periodValue.value.split('-').map(Number)
-    date_from = `${periodValue.value}-01`
-    date_to = `${periodValue.value}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`
-  } else if (periodMode.value === 'day' && periodValue.value) {
-    date_from = periodValue.value; date_to = periodValue.value
-  } else if (periodMode.value === 'custom') {
-    date_from = startDate.value; date_to = endDate.value
-  }
-  return { date_from: date_from || undefined, date_to: date_to || undefined,
-           category_node_id: categoryFilter.value || undefined }
+const periodRootLabel=computed(()=>{
+  if(periodMode.value==='year')return `${periodValue.value||'所选'}年`
+  if(periodMode.value==='month')return periodValue.value?`${periodValue.value.replace('-','年')}月`:'所选月份'
+  if(periodMode.value==='day')return periodValue.value||'所选日期'
+  if(periodMode.value==='custom')return '自定义区间'
+  return '全部时间'
 })
-const selectedCountHint = computed(() => `显示 ${tree.value?.count ?? 0} / ${tree.value?.total_count ?? 0} 笔`)
-
-const graphKit = useStarGraph({
-  tree, mode, focusStack, focusPage, semanticAnchorId,
-  revealLevel: computed(() => semanticAnchorId.value ? semanticZoomDepth(zoom.value) : 0),
+const availableYears=computed(()=>[...new Set(allTransactions.value.map(t=>t.date.slice(0,4)))].sort().reverse())
+const availableMonths=computed(()=>[...new Set(allTransactions.value.map(t=>t.date.slice(0,7)))].sort().reverse())
+const availableDays=computed(()=>[...new Set(allTransactions.value.map(t=>t.date))].sort().reverse())
+const periodOptions=computed(()=>periodMode.value==='year'?availableYears.value:periodMode.value==='month'?availableMonths.value:availableDays.value)
+const activeFilters=computed<StarFilters>(()=>{
+  let date_from='',date_to=''
+  if(periodMode.value==='year'&&periodValue.value){date_from=`${periodValue.value}-01-01`;date_to=`${periodValue.value}-12-31`}
+  else if(periodMode.value==='month'&&periodValue.value){
+    const [y,m]=periodValue.value.split('-').map(Number)
+    date_from=`${periodValue.value}-01`
+    date_to=`${periodValue.value}-${String(new Date(y,m,0).getDate()).padStart(2,'0')}`
+  }else if(periodMode.value==='day'&&periodValue.value){date_from=periodValue.value;date_to=periodValue.value}
+  else if(periodMode.value==='custom'){date_from=startDate.value;date_to=endDate.value}
+  return {date_from:date_from||undefined,date_to:date_to||undefined,category_node_id:categoryFilter.value||undefined}
 })
-const { groups, hierarchy, focusId, focusNode, breadcrumbs,
-  focusTotalPages, graph, graphById } = graphKit
-const selected = computed(() => graphById.value.get(selectedId.value) ?? graphById.value.get(focusId.value))
-const matchingTx = computed(() => {
-  const q = search.value.trim().toLowerCase()
-  return q && tree.value ? tree.value.transactions.filter(t => `${t.item} ${t.counterparty} ${t.amount} ${t.effective_amount ?? t.amount} ${t.date}`.toLowerCase().includes(q)).slice(0, 15) : []
-})
-const nodeSelector = computed(() => tree.value?.nodes ?? [])
-
-function enterFocus(id: string) {
-  if (!hierarchy.value.nodes.has(id)) return
-  if (id === focusId.value) return
-  // Navigating an existing ancestor through the breadcrumb should go backwards, not add a cycle.
-  const existing = focusStack.value.indexOf(id)
-  if (existing >= 0) { goToCrumb(existing); return }
-  // Root preview can show grandchildren, so reconstruct the full ancestry instead of skipping levels.
-  const path: string[] = []
-  let cursor: string | undefined = id
-  while (cursor) { path.unshift(cursor); cursor = hierarchy.value.parents.get(cursor) }
-  focusStack.value = path[0] === 'root' ? path : ['root', ...path]
-  focusPage.value = 0
-  selectedId.value = id
-  interaction.resetLocal()
-  drillDirection.value = 'in'
-  pan.value = { x: 0, y: 0 }; zoom.value = 0.91
-  inspectorOpen.value = true
-  const tx = hierarchy.value.nodes.get(id)?.tx
-  if (tx) targetNodeId.value = tx.node_id
-}
-function goToCrumb(index: number) {
-  if (index < 0 || index >= focusStack.value.length) return
-  focusStack.value = focusStack.value.slice(0, index + 1)
-  focusPage.value = 0
-  selectedId.value = focusId.value
-  interaction.resetLocal()
-  drillDirection.value = 'out'
-  pan.value = { x: 0, y: 0 }; zoom.value = 0.82
-}
-function goBack() { if (focusStack.value.length > 1) goToCrumb(focusStack.value.length - 2) }
-function switchMode(value: ViewMode) { mode.value = value; focus() }
-function stepPage(delta: number) {
-  focusPage.value = Math.max(0, Math.min(focusTotalPages.value - 1, focusPage.value + delta))
-  drillDirection.value = delta < 0 ? 'out' : 'in'
-  semanticAnchorId.value = ''
-}
-
-function dateRangeFromTimeId(id: string): { from: string; to: string } | null {
-  const raw = id.startsWith('time:') ? id.slice(5) : ''
-  if (/^\d{4}$/.test(raw)) return { from: `${raw}-01-01`, to: `${raw}-12-31` }
-  if (/^\d{4}-\d{2}$/.test(raw)) {
-    const [year, month] = raw.split('-').map(Number)
-    return { from: `${raw}-01`, to: `${raw}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}` }
-  }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return { from: raw, to: raw }
-  return null
-}
-let pendingPreviewFocusId = ''
-function applyCompanionSelection(node: GNode) {
-  if (!node.preview || !tree.value) return
-  const filtersBefore = JSON.stringify(activeFilters.value)
-  const targetFocus = node.side === 'category'
-    ? (node.nodeId && node.nodeId !== tree.value.root_id ? `cat:${node.nodeId}` : 'cat:lens')
-    : (node.sourceId?.startsWith('time:') && node.sourceId !== 'time:lens:subset' ? node.sourceId : 'time:lens')
-  if (node.kind === 'lens') {
-    // The opposite galaxy's hub can also be clicked to become the center.
-    pendingPreviewFocusId = targetFocus
-    if (node.side === 'category') {
-      const range = focusNode.value.side === 'time' ? dateRangeFromTimeId(focusNode.value.id) : null
-      if (range) {
-        periodMode.value = 'custom'; periodValue.value = ''
-        startDate.value = range.from; endDate.value = range.to
-      }
-    } else if (focusNode.value.side === 'category') {
-      if (focusNode.value.nodeId && focusNode.value.nodeId !== tree.value.root_id) categoryFilter.value = focusNode.value.nodeId
+const selectedCountHint=computed(()=>`显示 ${tree.value?.count??0} / ${tree.value?.total_count??0} 笔`)
+const {groups,hierarchy,graph,graphById}=useStarGraph({tree,periodLabel:periodRootLabel,categoryFilter,expandedIds,visibleLimits})
+// Peripheral context: keep the time center and other primary categories visible
+// at the canvas rim, even when a specific cluster is magnified.
+const renderGraph=computed(()=>{
+  if(cameraFocusId.value==='root')return graph.value
+  const focus=graphById.value.get(cameraFocusId.value)
+  if(!focus)return graph.value
+  const isInFocusedBranch=(id:string)=>{
+    if(id===focus.node.id)return true
+    let cursor=id
+    while(hierarchy.value.parents.has(cursor)){
+      const parent=hierarchy.value.parents.get(cursor)!
+      if(parent===focus.node.id)return true
+      cursor=parent
     }
-    if (JSON.stringify(activeFilters.value) === filtersBefore) void loadLive(false)
+    return false
+  }
+  const moved=new Map<string,Point>()
+  for(const point of graph.value.nodes){
+    let x=point.x,y=point.y
+    let peripheral=false,focusBranch=false,displayOpacity=1,displayScale=1
+    if(point.node.id!==focus.node.id){
+      if(isInFocusedBranch(point.node.id)){
+        focusBranch=true
+      }else{
+        peripheral=true
+        const baseAngle=Math.atan2(point.y-focus.y,point.x-focus.x)||Math.atan2(point.y,point.x)||-Math.PI/2
+        const edgeX=point.depth===0?560:620
+        const edgeY=point.depth===0?235:285
+        x=focus.x+Math.cos(baseAngle)*edgeX
+        y=focus.y+Math.sin(baseAngle)*edgeY
+        displayOpacity=point.depth===0?.16:.28
+        displayScale=point.depth===0?.68:.82
+      }
+    }
+    moved.set(point.node.id,{...point,x,y,worldX:point.x,worldY:point.y,peripheral,focusBranch,displayOpacity,displayScale})
+  }
+  return {nodes:[...moved.values()],edges:graph.value.edges.map(edge=>({
+    from:moved.get(edge.from.node.id)!,to:moved.get(edge.to.node.id)!,
+  }))}
+})
+const selected=computed(()=>graphById.value.get(selectedId.value)??graphById.value.get('root'))
+const nodeSelector=computed(()=>tree.value?.nodes??[])
+const matchingTx=computed(()=>{
+  const q=search.value.trim().toLowerCase()
+  return q&&tree.value?tree.value.transactions.filter(t=>`${t.item} ${t.counterparty} ${t.amount} ${t.effective_amount??t.amount} ${t.date}`.toLowerCase().includes(q)).slice(0,15):[]
+})
+let cameraFrame=0
+function stopCamera(){if(cameraFrame){window.cancelAnimationFrame(cameraFrame);cameraFrame=0}}
+function animateCamera(x:number,y:number,scale:number){
+  stopCamera()
+  const fromPan={...pan.value},fromZoom=zoom.value,start=performance.now(),duration=430
+  const step=(now:number)=>{
+    const t=Math.min(1,(now-start)/duration),ease=1-Math.pow(1-t,3)
+    pan.value={x:fromPan.x+(x-fromPan.x)*ease,y:fromPan.y+(y-fromPan.y)*ease}
+    zoom.value=fromZoom+(scale-fromZoom)*ease
+    cameraFrame=t<1?window.requestAnimationFrame(step):0
+  }
+  cameraFrame=window.requestAnimationFrame(step)
+}
+function focus(){
+  stopCamera()
+  expandedIds.value=[];visibleLimits.value={}
+  selectedId.value='root';cameraFocusId.value='root';inspectorOpen.value=false
+  pan.value={x:0,y:0};zoom.value=.84
+  interaction.resetLocal()
+}
+function expandAll(){
+  expandedIds.value=hierarchy.value.nodes.get('root')?.children.map(n=>n.id)??[]
+  notice.value='已展开首层分类，单击任一星体可进一步居中查看。'
+}
+function collapseAll(){focus()}
+function branchPath(nodeId:string){
+  const path:string[]=[]
+  let cursor=nodeId
+  while(hierarchy.value.parents.has(cursor)){
+    const parent=hierarchy.value.parents.get(cursor)!
+    if(parent!=='root')path.unshift(parent)
+    cursor=parent
+  }
+  return path
+}
+// 再次单击当前焦点时只退回直接父节点，而不是重置到时间根节点。
+// 交易节点虽然没有子节点，也同样支持“单击进入 / 再单击返回”。
+function returnToParent(point:Point){
+  const parentId=hierarchy.value.parents.get(point.node.id)??'root'
+  const parent=graphById.value.get(parentId)
+  inspectorOpen.value=false
+  if(parentId==='root'||!parent){
+    expandedIds.value=[]
+    visibleLimits.value={}
+    selectedId.value='root'
+    cameraFocusId.value='root'
+    animateCamera(0,0,.84)
     return
   }
-  if (node.side === 'category') {
-    // Selecting a category in a time-focused preview switches to that category
-    // while retaining the current time scope as ordinary UI filters.
-    if (node.kind !== 'group' || !node.nodeId || node.nodeId === tree.value.root_id) return
-    const range = focusNode.value.side === 'time' ? dateRangeFromTimeId(focusNode.value.id) : null
-    if (range) {
-      periodMode.value = 'custom'; periodValue.value = ''
-      startDate.value = range.from; endDate.value = range.to
-    }
-    pendingPreviewFocusId = targetFocus
-    categoryFilter.value = node.nodeId
-    if (JSON.stringify(activeFilters.value) === filtersBefore) void loadLive(false)
+  selectedId.value=parentId
+  cameraFocusId.value=parentId
+  // 父节点仍需保持展开，才能看到刚才返回的子分类或交易。
+  expandedIds.value=[...branchPath(parentId),parentId]
+  const scale=1.16
+  animateCamera(-parent.x*scale,-parent.y*scale,scale)
+}
+function focusPoint(point:Point, allowReturn=true){
+  if(point.node.peekMore){
+    const parent=point.node.peekParentId
+    if(parent)visibleLimits.value={...visibleLimits.value,[parent]:(visibleLimits.value[parent]??16)+16}
     return
   }
-  if (node.side === 'time') {
-    const range = dateRangeFromTimeId(node.sourceId ?? node.id)
-    if (!range) return
-    // Selecting time from a category-focused preview preserves that category scope.
-    if (focusNode.value.side === 'category') {
-      if (focusNode.value.kind === 'group' && focusNode.value.nodeId && focusNode.value.nodeId !== tree.value.root_id) {
-        categoryFilter.value = focusNode.value.nodeId
-      } else if (focusNode.value.kind !== 'lens') {
-        return
-      }
-    }
-    pendingPreviewFocusId = targetFocus
-    periodMode.value = 'custom'; periodValue.value = ''
-    startDate.value = range.from; endDate.value = range.to
-    if (JSON.stringify(activeFilters.value) === filtersBefore) void loadLive(false)
+  if(point.node.id==='root'){focus();return}
+  if(allowReturn && point.node.id===cameraFocusId.value){
+    returnToParent(point)
+    return
   }
+  selectedId.value=point.node.id
+  cameraFocusId.value=point.node.id
+  inspectorOpen.value=false
+  const path=branchPath(point.node.id)
+  expandedIds.value=point.hasChildren?[...path,point.node.id]:path
+  const scale=point.node.kind==='tx'?Math.max(1.12,zoom.value):1.16
+  animateCamera(-(point.worldX??point.x)*scale,-(point.worldY??point.y)*scale,scale)
+  if(point.node.tx)targetNodeId.value=point.node.tx.node_id
 }
-function openParents() {
-  groupParent.value = selected.value?.node.nodeId || tree.value?.root_id || ''
-  groupOp.value = 'ADD'; groupName.value = ''; newGroupOpen.value = true
+let clickTimer:ReturnType<typeof setTimeout>|null=null
+function clearClickTimer(){if(clickTimer!==null){clearTimeout(clickTimer);clickTimer=null}}
+function onNodeClick(point:Point){
+  if(interaction.shouldIgnoreClick())return
+  clearClickTimer()
+  clickTimer=setTimeout(()=>{clickTimer=null;focusPoint(point)},270)
 }
-async function saveGroup() {
-  if (!tree.value || !groupName.value.trim()) return
-  const name = groupName.value.trim()
-  await runOp({ op: 'create_node', name, parent_id: groupParent.value, op_value: groupOp.value })
-  newGroupOpen.value = false
+function onNodeDouble(point:Point){
+  clearClickTimer()
+  if(interaction.shouldIgnoreClick())return
+  if(point.node.peekMore){focusPoint(point);return}
+  selectedId.value=point.node.id
+  targetNodeId.value=point.node.tx?.node_id||point.node.nodeId||tree.value?.root_id||''
+  inspectorOpen.value=true
 }
-function acceptTree(value: LedgerTree) {
-  tree.value = value
-  if (pendingPreviewFocusId) {
-    const target = pendingPreviewFocusId
-    pendingPreviewFocusId = ''
-    // Wait for the new, filtered hierarchy to be rebuilt before centering.
-    void nextTick(() => {
-      if (hierarchy.value.nodes.has(target)) enterFocus(target)
-    })
-  }
+function openParents(nodeId?:string){
+  const node=nodeId?hierarchy.value.nodes.get(nodeId):selected.value?.node
+  groupParent.value=(node?.kind==='group'&&node.nodeId)?node.nodeId:(node?.kind==='placeholder'&&node.nodeId)?node.nodeId:tree.value?.root_id||''
+  groupOp.value='ADD';groupName.value='';newGroupOpen.value=true
 }
-async function runOp(op: LedgerOperation) {
-  if (!tree.value || busy.value) return
-  busy.value = true; error.value = ''; notice.value = ''
-  try {
-    const updated = await applyLedgerOp(tree.value.book.id, op, tree.value.seq)
-    acceptTree(updated)
+async function saveGroup(){
+  if(!tree.value||!groupName.value.trim())return
+  await runOp({op:'create_node',name:groupName.value.trim(),parent_id:groupParent.value,op_value:groupOp.value})
+  if(!error.value)newGroupOpen.value=false
+}
+async function dissolveSelected(){
+  const n=selected.value?.node
+  if(!tree.value||n?.kind!=='group'||!n.nodeId||n.nodeId===tree.value.root_id||n.ledgerKind==='external_income')return
+  if(!window.confirm(`确定解散「${n.name}」分组吗？子分组和交易将回到其上级分类，原始账单不会被删除。此操作可撤销。`))return
+  const nodeId=n.nodeId
+  await runOp({op:'dissolve_node',node_id:nodeId})
+  if(!error.value){focus();if(categoryFilter.value===nodeId)categoryFilter.value=''}
+}
+function acceptTree(value:LedgerTree){
+  tree.value=value
+  void nextTick(()=>{if(!hierarchy.value.nodes.has(selectedId.value)){selectedId.value='root';inspectorOpen.value=false}})
+}
+async function runOp(op:LedgerOperation){
+  if(!tree.value||busy.value)return
+  busy.value=true;error.value='';notice.value=''
+  try{
+    acceptTree(await applyLedgerOp(tree.value.book.id,op,tree.value.seq))
     await loadLive(false)
-    notice.value = '修改已保存 · 账本审计通过'
-  } catch (e) { error.value = e instanceof Error ? e.message : '操作失败' }
-  finally { busy.value = false }
+    notice.value='修改已保存 · 账本审计通过'
+  }catch(e){error.value=e instanceof Error?e.message:'操作失败'}
+  finally{busy.value=false}
 }
-async function runHistory(action: 'undo' | 'redo' | 'reset') {
-  if (!tree.value || busy.value) return
-  if (action === 'reset' && !window.confirm('确定回到 M₀ 吗？全部分类节点会被清除，但你可以撤销这一步。')) return
-  busy.value = true; error.value = ''; notice.value = ''
-  try {
-    acceptTree(await historyLedger(tree.value.book.id, action, tree.value.seq))
-    await loadLive(false)
-    focus()
-    notice.value = action === 'undo' ? '已撤销上一步' : action === 'redo' ? '已恢复下一步' : '已回到 M₀，可撤销'
-  } catch (e) { error.value = e instanceof Error ? e.message : '操作失败' }
-  finally { busy.value = false }
+async function runHistory(action:'undo'|'redo'|'reset'){
+  if(!tree.value||busy.value)return
+  if(action==='reset'&&!window.confirm('确定回到 M₀ 吗？全部分类节点会被清除，但你可以撤销这一步。'))return
+  busy.value=true;error.value='';notice.value=''
+  try{
+    acceptTree(await historyLedger(tree.value.book.id,action,tree.value.seq))
+    await loadLive(false);focus()
+    notice.value=action==='undo'?'已撤销上一步':action==='redo'?'已恢复下一步':'已回到 M₀，可撤销'
+  }catch(e){error.value=e instanceof Error?e.message:'操作失败'}
+  finally{busy.value=false}
 }
-async function loadLive(initial = false) {
-  const requestId = ++queryVersion
-  if (initial) loading.value = true
-  else refreshing.value = true
-  error.value = ''
-  try {
-    // Full data is fetched only when first opening or clicking refresh, to populate
-    // all available year/month/day choices even while a filter is active.
-    if (initial || !allTransactions.value.length) {
-      const full = await getLiveLedgerTree()
-      if (requestId !== queryVersion) return
-      allTransactions.value = full.transactions
-      if (!periodValue.value && periodMode.value !== 'all') periodValue.value = full.transactions[full.transactions.length - 1]?.date ?? ''
-      if (!activeFilters.value.date_from && !activeFilters.value.date_to && !activeFilters.value.category_node_id) {
-        acceptTree(full)
-        return
-      }
+async function loadLive(initial=false){
+  const requestId=++queryVersion
+  if(initial)loading.value=true;else refreshing.value=true
+  error.value=''
+  try{
+    if(initial||!allTransactions.value.length){
+      const full=await getLiveLedgerTree()
+      if(requestId!==queryVersion)return
+      allTransactions.value=full.transactions
+      if(!activeFilters.value.date_from&&!activeFilters.value.date_to&&!activeFilters.value.category_node_id){acceptTree(full);return}
     }
-    const value = await getLiveLedgerTree(activeFilters.value)
-    if (requestId !== queryVersion) return
+    const value=await getLiveLedgerTree(activeFilters.value)
+    if(requestId!==queryVersion)return
     acceptTree(value)
-  } catch (e) {
-    if (requestId === queryVersion) error.value = e instanceof Error ? e.message : '星图读取失败'
-  } finally {
-    if (requestId === queryVersion) { loading.value = false; refreshing.value = false }
-  }
+  }catch(e){if(requestId===queryVersion)error.value=e instanceof Error?e.message:'星图读取失败'}
+  finally{if(requestId===queryVersion){loading.value=false;refreshing.value=false}}
 }
-function reloadLive() { void loadLive(true) }
-const selectedYear = computed({
-  get: () => periodValue.value.slice(0, 4) || availableYears.value[0] || '',
-  set: (year: string) => {
-    if (periodMode.value === 'year') periodValue.value = year
-    else if (periodMode.value === 'month') periodValue.value = availableMonths.value.find(x => x.startsWith(`${year}-`)) ?? ''
-    else periodValue.value = availableDays.value.find(x => x.startsWith(`${year}-`)) ?? ''
-  },
+function reloadLive(){void loadLive(true)}
+const selectedYear=computed({
+  get:()=>periodValue.value.slice(0,4)||availableYears.value[0]||'',
+  set:(year:string)=>{periodValue.value=periodMode.value==='year'?year:periodMode.value==='month'?(availableMonths.value.find(x=>x.startsWith(`${year}-`))??''):(availableDays.value.find(x=>x.startsWith(`${year}-`))??'')}
 })
-const selectedMonth = computed({
-  get: () => periodValue.value.slice(0, 7),
-  set: (month: string) => {
-    periodValue.value = periodMode.value === 'day' ? (availableDays.value.find(x => x.startsWith(`${month}-`)) ?? '') : month
-  },
+const selectedMonth=computed({
+  get:()=>periodValue.value.slice(0,7),
+  set:(month:string)=>{periodValue.value=periodMode.value==='day'?(availableDays.value.find(x=>x.startsWith(`${month}-`))??''):month}
 })
-const selectedDay = computed({ get: () => periodValue.value, set: (day: string) => { periodValue.value = day } })
-const monthsInYear = computed(() => availableMonths.value.filter(x => x.startsWith(`${selectedYear.value}-`)))
-const daysInMonth = computed(() => availableDays.value.filter(x => x.startsWith(`${selectedMonth.value}-`)))
-function changePeriodMode(value: typeof periodMode.value) {
-  periodMode.value = value
-  periodValue.value = periodOptions.value[0] || ''
+const selectedDay=computed({get:()=>periodValue.value,set:(day:string)=>{periodValue.value=day}})
+const monthsInYear=computed(()=>availableMonths.value.filter(x=>x.startsWith(`${selectedYear.value}-`)))
+const daysInMonth=computed(()=>availableDays.value.filter(x=>x.startsWith(`${selectedMonth.value}-`)))
+function changePeriodMode(value:typeof periodMode.value){periodMode.value=value;periodValue.value=periodOptions.value[0]||''}
+function stepPeriod(older:boolean){
+  const idx=periodOptions.value.indexOf(periodValue.value),next=idx+(older?1:-1)
+  if(next>=0&&next<periodOptions.value.length)periodValue.value=periodOptions.value[next]
 }
-function stepPeriod(older: boolean) {
-  const idx = periodOptions.value.indexOf(periodValue.value)
-  const next = idx + (older ? 1 : -1)
-  if (next >= 0 && next < periodOptions.value.length) periodValue.value = periodOptions.value[next]
+function resetFilters(){periodMode.value='all';periodValue.value='';startDate.value='';endDate.value='';categoryFilter.value='';focus()}
+function getGroupTrail(nodeId:string){
+  if(!tree.value)return '暂无分类'
+  const byId=new Map(tree.value.nodes.map(n=>[n.id,n]))
+  const names:string[]=[];let node=byId.get(nodeId)
+  while(node){if(node.kind!=='root')names.unshift(node.name);node=node.parent_id?byId.get(node.parent_id):undefined}
+  return names.join(' / ')||'未分类'
 }
-function resetFilters() {
-  periodMode.value = 'all'; periodValue.value = ''; startDate.value = ''; endDate.value = ''
-  categoryFilter.value = ''
-  focus()
-}
-function onPageFocus() { if (document.visibilityState === 'visible') reloadLive() }
-// A filtered data set has its own root; never carry a stale node id across result sets.
-watch(activeFilters, () => { focus(); void loadLive() })
-function focus() {
-  focusStack.value = ['root']; focusPage.value = 0; selectedId.value = 'root'; interaction.resetLocal()
-  pan.value = { x: 0, y: 0 }; zoom.value = 0.82; drillDirection.value = 'out'
-}
-function expandAll() { if (focusNode.value.children.length) notice.value = '请把鼠标放在节点上，滚轮放大即可渐显下一层；点击则居中聚焦。' }
-function collapseAll() { focus() }
-function focusTx(tx: LedgerTx) {
-  // Search works from anywhere, regardless of current time/category focus.
-  if (mode.value === 'time') mode.value = 'both'
-  const id = `category:tx:${tx.id}`
-  const ancestors: string[] = []
-  let cursor = id
-  while (hierarchy.value.nodes.has(cursor)) {
-    ancestors.unshift(cursor)
-    const parent = hierarchy.value.parents.get(cursor)
-    if (!parent) break
-    cursor = parent
-  }
-  if (ancestors[0] === 'root') {
-    semanticAnchorId.value = ''
-    focusStack.value = ancestors; focusPage.value = 0
-    selectedId.value = id; targetNodeId.value = tx.node_id
-    drillDirection.value = 'in'
-    pan.value = { x: 0, y: 0 }; zoom.value = 0.91
-    inspectorOpen.value = true
-  }
-  searchOpen.value = false
-}
-const interaction = useStarInteraction({
-  zoom, pan, hoveredId, semanticAnchorId, graph, graphById,
-  getCanvas: () => ({ svg: canvasRef.value?.getSvg() ?? null, scene: canvasRef.value?.getScene() ?? null }),
-  enterFocus, focusTx, applyCompanionSelection, runOp,
+const interaction=useStarInteraction({
+  zoom,pan,hoveredId,graph:renderGraph,
+  getCanvas:()=>({svg:canvasRef.value?.getSvg()??null,scene:canvasRef.value?.getScene()??null}),
+  focusPoint,runOp,
 })
-const {dragLocation,dropId,dropPanel,onCanvasDown,startNode,onMove,onPointerUp,onWheel,zoomBy} = interaction
-async function moveSelectedTx() {
-  if (selected.value?.node.tx && targetNodeId.value) {
-    await runOp({ op: 'reassign', tx_id: selected.value.node.tx.id, to_node_id: targetNodeId.value })
+const {dragLocation,dropId,dropPanel,onMove,onPointerUp}=interaction
+function onCanvasDown(event:PointerEvent){stopCamera();interaction.onCanvasDown(event)}
+function startNode(event:PointerEvent,point:Point){stopCamera();interaction.startNode(event,point)}
+function onWheel(event:WheelEvent){stopCamera();interaction.onWheel(event)}
+function zoomBy(step:number){stopCamera();interaction.zoomBy(step)}
+async function focusTx(tx:LedgerTx){
+  const id=`category:tx:${tx.id}`
+  const parents:string[]=[];let cursor=id
+  while(hierarchy.value.parents.has(cursor)){
+    const parent=hierarchy.value.parents.get(cursor)!
+    if(parent!=='root')parents.unshift(parent)
+    cursor=parent
   }
+  expandedIds.value=[...new Set([...expandedIds.value,...parents])]
+  // 搜索不是分页：在同一世界中展开该交易的父分类，再移动镜头。
+  for(let i=0;i<parents.length;i++){
+    const parent=parents[i],child=parents[i+1]??id
+    const node=hierarchy.value.nodes.get(parent)
+    const index=node?.children.findIndex(item=>item.id===child)??-1
+    if(index>=16)visibleLimits.value={...visibleLimits.value,[parent]:index+1}
+  }
+  await nextTick()
+  const point=graphById.value.get(id)
+  if(point){focusPoint(point,false);targetNodeId.value=tx.node_id;inspectorOpen.value=true}
+  else notice.value='该交易仍在当前筛选范围内，但可见节点过多，请缩小时间或分类范围。'
+  searchOpen.value=false
 }
-async function changeSelectedOp() {
-  const n = selected.value?.node
-  if (n?.nodeId && n.kind === 'group' && n.nodeId !== tree.value?.root_id)
-    await runOp({ op: 'set_op', node_id: n.nodeId, op_value: n.op === 'NET' ? 'ADD' : 'NET' })
+async function moveSelectedTx(){
+  if(selected.value?.node.tx&&targetNodeId.value)
+    await runOp({op:'reassign',tx_id:selected.value.node.tx.id,to_node_id:targetNodeId.value})
 }
-function getGroupTrail(nodeId: string) {
-  if (!tree.value) return '暂无分类'
-  const byId = new Map(tree.value.nodes.map(n => [n.id, n]))
-  const names: string[] = []
-  let n = byId.get(nodeId)
-  while (n) { if (n.kind !== 'root') names.unshift(n.name); n = n.parent_id ? byId.get(n.parent_id) : undefined }
-  return names.join(' / ') || '未分类'
+async function changeSelectedOp(){
+  const n=selected.value?.node
+  if(n?.nodeId&&n.kind==='group'&&n.nodeId!==tree.value?.root_id)
+    await runOp({op:'set_op',node_id:n.nodeId,op_value:n.op==='NET'?'ADD':'NET'})
 }
-onMounted(() => { void loadLive(true); window.addEventListener('focus', onPageFocus); document.addEventListener('visibilitychange', onPageFocus) })
-onBeforeUnmount(() => { window.removeEventListener('focus', onPageFocus); document.removeEventListener('visibilitychange', onPageFocus) })
+function onPageFocus(){if(document.visibilityState==='visible')reloadLive()}
+watch(activeFilters,()=>{focus();void loadLive()})
+onMounted(()=>{void loadLive(true);window.addEventListener('focus',onPageFocus);document.addEventListener('visibilitychange',onPageFocus)})
+onBeforeUnmount(()=>{stopCamera();clearClickTimer();window.removeEventListener('focus',onPageFocus);document.removeEventListener('visibilitychange',onPageFocus)})
 </script>
-
 <template>
   <div class="nebula-page">
     <div class="nebula-heading">
@@ -355,7 +331,7 @@ onBeforeUnmount(() => { window.removeEventListener('focus', onPageFocus); docume
       <div class="heading-actions">
         <span class="live-indicator"><span class="pulse-dot"></span> 自动同步已导入账单</span>
         <button class="btn-muted" :disabled="loading || refreshing" @click="reloadLive">⟳ {{ refreshing ? '同步中' : '刷新账单' }}</button>
-        <button class="btn-primary" :disabled="!tree" @click="openParents">＋ 添加分组</button>
+        <button class="btn-primary" :disabled="!tree" @click="openParents()">＋ 添加分组</button>
       </div>
     </div>
 
@@ -387,49 +363,31 @@ onBeforeUnmount(() => { window.removeEventListener('focus', onPageFocus); docume
       <div class="filter-field filter-category"><label for="star-category-filter">分类范围</label>
         <select id="star-category-filter" v-model="categoryFilter"><option value="">全部分类</option><option v-for="n in groups" :key="n.id" :value="n.id">{{ getGroupTrail(n.id) }}</option></select>
       </div>
-      <span class="filter-hint">逐级点击节点可深入到日、分类及每笔交易</span>
+      <span class="filter-hint">时间范围通过上方筛选切换；单击聚焦，双击管理节点</span>
       <button class="filter-reset" @click="resetFilters">重置筛选</button>
       <div class="filter-summary">{{ selectedCountHint }}</div>
     </section>
 
     <section class="galaxy-shell">
       <div class="galaxy-toolbar">
-        <div class="tabs" role="group" aria-label="选择星图视角">
-          <button :class="{active: mode === 'both'}" @click="switchMode('both')">双星视角</button>
-          <button :class="{active: mode === 'time'}" @click="switchMode('time')">时间星系</button>
-          <button :class="{active: mode === 'category'}" @click="switchMode('category')">分类星系</button>
-        </div>
+        <div class="star-map-heading">✧ 时间区间 <span>→</span> 分类星图 <small>单击聚焦 / 再单击返回上级 · 双击详情</small></div>
         <div class="galaxy-tools">
           <span class="time-range">{{ reportPeriod }}</span>
           <span class="tool-separator"></span>
           <button title="撤销" :disabled="!tree?.can_undo || busy" @click="runHistory('undo')">↶</button>
           <button title="重做" :disabled="!tree?.can_redo || busy" @click="runHistory('redo')">↷</button>
-          <button title="全屏展开所有可见分组" @click="expandAll">⊞</button>
-          <button title="恢复初始层级" @click="collapseAll">▣</button>
-          <button title="将根节点移回中心" @click="focus">◎</button>
+          <button title="展开首层分类" @click="expandAll">⊞</button>
+          <button title="收起局部星图" @click="collapseAll">▣</button>
+          <button title="回到时间区间中心" @click="focus">◎</button>
         </div>
       </div>
-      <div class="pathbar">
-        <button class="path-back" :disabled="focusStack.length <= 1" @click="goBack">← 返回上一级</button>
-        <div class="path-crumbs" aria-label="当前位置">
-          <template v-for="(crumb, idx) in breadcrumbs" :key="crumb.id">
-            <span v-if="idx" class="crumb-divider">/</span>
-            <button :class="{current: idx === breadcrumbs.length-1}" @click="goToCrumb(idx)">{{ crumb.label }}</button>
-          </template>
-        </div>
-        <div v-if="focusTotalPages > 1" class="focus-pages">
-          <button :disabled="focusPage === 0" @click="stepPage(-1)">‹</button>
-          <span>{{ focusPage + 1 }} / {{ focusTotalPages }} 页 · 共 {{ focusNode.children.length }} 个子项</span>
-          <button :disabled="focusPage + 1 >= focusTotalPages" @click="stepPage(1)">›</button>
-        </div>
-        <span v-else class="path-depth">{{ focusNode.children.length ? `${focusNode.children.length} 个下级节点` : '交易详情' }}</span>
-      </div>
-      <div class="universe" :class="drillDirection === 'out' ? 'zoom-out' : 'zoom-in'">
+      <div class="star-status"><span>当前范围：{{ reportPeriod }}</span><span>镜头位置：{{ selected?.node.name || periodRootLabel }}</span><span>切换层级请使用上方时间／分类筛选</span></div>
+      <div class="universe">
         <div class="nebula-aurora nebula-aurora-left"></div>
         <div class="nebula-aurora nebula-aurora-right"></div>
-        <div class="orbit-label orbit-left" v-if="mode !== 'category'"><span>01</span> CHRONOLOGY <small>时间分支</small></div>
-        <div class="orbit-label orbit-right" v-if="mode !== 'time'"><span>02</span> TAXONOMY <small>分类分支</small></div>
-        <div class="canvas-hint">✧ 滚轮放大：在星体附近渐显子星图 · 点击子星体：居中进入 · 滚轮缩小：局部星图消失 · 拖拽可调整分类</div>
+
+
+        <div class="canvas-hint">✧ 滚轮缩放 · 单击聚焦 / 再单击返回上一级 · 双击打开详情与编辑 · 拖拽交易可调整分类</div>
         <div v-if="!loading && tree && tree.count === 0" class="empty-ledger">
           <h3>{{ tree.total_count ? '当前筛选没有匹配的交易' : '当前数据库还没有可显示的账单' }}</h3>
           <p>{{ tree.total_count ? '试着切换“全部时间 / 全部分类”。' : '请先去“导入账单”上传流水，导入成功后回到这里即可自动显示。' }}</p>
@@ -437,11 +395,11 @@ onBeforeUnmount(() => { window.removeEventListener('focus', onPageFocus); docume
           <small v-if="!tree.total_count">数据库：{{ tree.database_path }}</small>
         </div>
         <div v-if="loading" class="universe-loading"><span class="loader-ring"></span>正在绘制你的财务宇宙…</div>
-        <StarCanvas v-else ref="canvasRef" :graph="graph" :zoom="zoom" :pan="pan" :focus-id="focusId"
-          :focus-page="focusPage" :mode="mode" :selected-id="selectedId" :hovered-id="hoveredId"
-          :drop-id="dropId" :drill-direction="drillDirection" :drag-location="dragLocation"
+        <StarCanvas v-else ref="canvasRef" :graph="renderGraph" :zoom="zoom" :pan="pan"
+          :selected-id="selectedId" :hovered-id="hoveredId" :drop-id="dropId" :drag-location="dragLocation"
           @canvas-down="onCanvasDown" @canvas-move="onMove" @canvas-up="onPointerUp" @canvas-wheel="onWheel"
-          @node-down="startNode" @node-enter="hoveredId = $event" @node-leave="hoveredId = hoveredId === $event ? '' : hoveredId"/>
+          @node-down="startNode" @node-click="onNodeClick" @node-double="onNodeDouble"
+          @node-enter="hoveredId = $event" @node-leave="hoveredId = hoveredId === $event ? '' : hoveredId"/>
         <div v-if="dragLocation" ref="dropPanel" class="drag-targets">
           <strong>拖到目标分类后松开</strong>
           <button v-for="node in nodeSelector" :key="node.id" :data-target="node.id"
@@ -455,12 +413,12 @@ onBeforeUnmount(() => { window.removeEventListener('focus', onPageFocus); docume
           <span>{{ Math.round(zoom * 100) }}%</span>
           <button @click="zoomBy(-0.17)" title="缩小">－</button>
         </div>
-        <div class="legend"><span><i class="legend-time"></i> 时间</span><span><i class="legend-category"></i> 分类</span><span><i class="legend-tx"></i> 交易</span><span class="legend-fine">两种投影 · 不重复记账</span></div>
+        <div class="legend"><span><i class="legend-time"></i> 时间区间中心</span><span><i class="legend-category"></i> 分类</span><span><i class="legend-tx"></i> 交易</span></div>
 
         <StarInspector v-if="inspectorOpen && selected" :selected="selected" :node-selector="nodeSelector"
           :tree="tree" :target-node-id="targetNodeId" :busy="busy" @close="inspectorOpen = false"
-          @update:target-node-id="targetNodeId = $event" @move-tx="moveSelectedTx" @change-op="changeSelectedOp" />
-        <button v-else-if="!inspectorOpen" class="reopen-inspector" @click="inspectorOpen = true">☷ 节点详情</button>
+          @update:target-node-id="targetNodeId = $event" @move-tx="moveSelectedTx" @change-op="changeSelectedOp"
+          @add-group="openParents(selected?.node.id)" @dissolve-group="dissolveSelected" />
       </div>
       <footer class="galaxy-footer"><div><span class="audit-mark">✓</span> 代数账本 · {{ tree?.invariants_ok ? '结构审计通过' : '待校验' }} <span class="sep">/</span> 修改只写入独立账本层</div><div>Revision {{ tree?.seq ?? '—' }} <span class="sep">·</span> <button @click="runHistory('reset')">回到 M₀</button></div></footer>
     </section>
@@ -471,7 +429,7 @@ onBeforeUnmount(() => { window.removeEventListener('focus', onPageFocus); docume
       <div class="foot-tip"><span>ⓘ</span> 星图自动包含所有可见的已导入账单；时间/分类选择只筛选展示。人工拖拽仅调整独立星图账本，不修改原始流水或第一轮报表。退款按已确认累计金额抵扣，外部额度分裂按剩余金额计算。</div>
     </div>
 
-    <div v-if="newGroupOpen" class="modal-backdrop" @click.self="newGroupOpen = false"><form class="galaxy-modal" @submit.prevent="saveGroup"><span class="modal-eyebrow">STRUCTURE EDITOR</span><h2>创建星系分组</h2><p>新建分组后，可以将交易拖到这里。所有变更均可撤销。</p><label>分组名称</label><input v-model="groupName" required maxlength="50" placeholder="例如：餐饮 / 咖啡 / 旅行" autofocus/><label>上级分组</label><select v-model="groupParent"><option v-if="tree" :value="tree.root_id">根节点 · 全部账目</option><option v-for="n in groups" :key="n.id" :value="n.id">{{ n.name }}</option></select><label>聚合方式</label><select v-model="groupOp"><option value="ADD">ADD · 直接相加</option><option value="NET">NET · 正负净额</option></select><div class="modal-actions"><button type="button" @click="newGroupOpen = false">取消</button><button type="submit" :disabled="busy">创建分组</button></div></form></div>
+    <div v-if="newGroupOpen" class="modal-backdrop" @click.self="newGroupOpen = false"><form class="galaxy-modal" @submit.prevent="saveGroup"><span class="modal-eyebrow">STRUCTURE EDITOR</span><h2>创建星系分组</h2><p>新建分组后，可以将交易拖到这里。所有变更均可撤销。</p><label>分组名称</label><input v-model="groupName" required maxlength="50" placeholder="例如：餐饮 / 咖啡 / 旅行" autofocus/><label>上级分组</label><select v-model="groupParent"><option v-if="tree" :value="tree.root_id">时间区间 · 顶层分类</option><option v-for="n in groups" :key="n.id" :value="n.id">{{ n.name }}</option></select><label>聚合方式</label><select v-model="groupOp"><option value="ADD">ADD · 直接相加</option><option value="NET">NET · 正负净额</option></select><div class="modal-actions"><button type="button" @click="newGroupOpen = false">取消</button><button type="submit" :disabled="busy">创建分组</button></div></form></div>
   </div>
 </template>
 
@@ -553,7 +511,7 @@ button:disabled { cursor:not-allowed; opacity:.3; }
 
 /* V2.2 · immersive progressive drill-down. Canvas is deliberately ~10% shorter. */
 .nebula-page { max-width: 1660px; }
-.universe { height: clamp(610px, 61vw, 785px); min-height: 610px; }
+.universe { height: clamp(680px, 66vw, 845px); min-height: 680px; }
 .pathbar { position:relative; z-index:4; display:flex; align-items:center; gap:14px; min-height:53px; padding:9px 20px; border-bottom:1px solid #ffffff19; background:#101a31; color:#ccd9f8; }
 .path-back {flex-shrink:0; border:1px solid #869ee05c; background:#283a62; border-radius:9px; color:#ecf2ff; padding:8px 14px; font-size:12px; font-weight:650; }
 .path-back:hover:not(:disabled) {background:#455b90;}
@@ -585,8 +543,8 @@ button:disabled { cursor:not-allowed; opacity:.3; }
 .zoom-out .drill-enter-from {transform:scale(1.14);}
 .zoom-out .drill-leave-to {transform:scale(.8);}
 .focus-center .root-name {font-size:13px;}
-@media(max-width:1050px) {.universe {height:680px;min-height:600px;} .pathbar{gap:8px;padding:8px 10px;} .path-back{padding:7px 9px;} }
-@media(max-width:660px) {.universe {height:610px;min-height:540px;} .date-segments button{padding:7px 9px;} .path-depth{display:none;} .focus-pages span{font-size:10px;} }
+@media(max-width:1050px) {.universe {height:730px;min-height:640px;} .pathbar{gap:8px;padding:8px 10px;} .path-back{padding:7px 9px;} }
+@media(max-width:660px) {.universe {height:640px;min-height:560px;} .date-segments button{padding:7px 9px;} .path-depth{display:none;} .focus-pages span{font-size:10px;} }
 @media(prefers-reduced-motion:reduce){.drill-enter-active,.drill-leave-active{transition:none;}}
 
 .drag-targets {position:absolute;z-index:8;right:24px;top:90px;display:flex;flex-direction:column;gap:6px;width:205px;max-height:55%;overflow-y:auto;padding:13px;background:#101d3bee;border:1px solid #8eacff75;border-radius:13px;box-shadow:0 16px 45px #0008;}
@@ -620,4 +578,15 @@ button:disabled { cursor:not-allowed; opacity:.3; }
 @media (prefers-reduced-motion: reduce) {
   .satellite-enter-active, .satellite-leave-active { transition: none; }
 }
+
+/* V3 · 固定世界坐标：画布比原版短，页面更容易滚动。 */
+.nebula-page { max-width: 1480px; }
+.universe { height: clamp(560px, 58vw, 720px); min-height: 560px; }
+.star-map-heading {color:#e4edff;font-size:13px;font-weight:680;display:flex;align-items:center;gap:9px;white-space:nowrap;}
+.star-map-heading span {color:#82d9e5;font-size:16px;}
+.star-map-heading small {font-size:10px;font-weight:400;color:#91a4ca;margin-left:14px;}
+.star-status {min-height:34px;display:flex;align-items:center;gap:20px;padding:8px 20px;background:#101a31;color:#92a8cf;font-size:10px;border-bottom:1px solid #ffffff19;}
+.star-status span:last-child {margin-left:auto;color:#7390b6;}
+@media (max-width:1050px) { .universe {height:540px;min-height:500px;} .star-map-heading small{display:none;} }
+@media (max-width:660px) { .universe {height:470px;min-height:430px;} .star-status span:last-child{display:none;} .star-map-heading{font-size:11px;} }
 </style>
