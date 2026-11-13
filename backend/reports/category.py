@@ -1,7 +1,7 @@
 """backend/reports/category.py —— 组件 4：分类环形图 + 二级列表
 
-大类来源优先级：manual_category > tx_type > '其他'（已固化在 v_tx 视图）
-小类来自 manual_subcat —— 只有人工填过才有值。
+大类来源优先级：人工明确覆盖 > Live Ledger 当前分类 > 平台原始分类（由 v_tx 视图统一提供）。
+小类优先读取人工覆盖；没有人工覆盖时读取 Live Ledger 当前分类。
 
 pct 的分母是【周期总额】，不是各大类之和，
 所以各大类 pct 加起来可能小于 100，差额是未分类的部分。

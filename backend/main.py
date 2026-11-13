@@ -5,11 +5,10 @@ backend/main.py —— FastAPI 入口
 它只做四件事：注册路由 / 启动建表 / 统一错误响应 / CORS。
 看到 if/else 里的业务判断，说明逻辑漏进来了，该挪到 reports/ 或 overrides/。
 
-路由分四类：
+路由分三类：
     /api/import/*   导入      → importer/
     /api/report/*   只读查询   → reports/
     /api/tx/*       写修正    → overrides.py（唯一入口）
-    /api/ledger/*   账本      → ledger/service.py（唯一写入口 /api/ledger/op）
 
 启动后打开 http://localhost:8000/docs
     所有 11 个接口 + 字段说明 + 可直接 Try it out
@@ -20,7 +19,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -30,12 +29,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend import db, overrides, reports                    # noqa: E402
 from backend import overrides as overrides_mod                # noqa: E402
 from backend.importer import ImportResult, parse_file, import_file  # noqa: E402
-from backend import importer as importer_mod                   # noqa: E402
 from backend.importer.base import ParseIssues  # noqa: E402
 from backend.overrides import ForbiddenFieldError, TxNotFound  # noqa: E402
 from backend import schemas as S                              # noqa: E402
-from backend.ledger import service as ledger_service          # noqa: E402
-from backend.ledger.errors import LedgerError                # noqa: E402
+from backend.ledger import service as ledger_service           # noqa: E402
+from backend.ledger.errors import LedgerError                 # noqa: E402
+from backend.ai import config as ai_config                    # noqa: E402
+from backend.ai import schemas as AI                           # noqa: E402
+from backend.ai import import_workflow as ai_import            # noqa: E402
+from backend.ai import history_workflow as ai_history          # noqa: E402
+from backend.ai import chat_service as ai_chat                       # noqa: E402
+from backend.ai.providers import test_connection as ai_test_connection  # noqa: E402
+from backend.ai.providers import AIProviderError              # noqa: E402
+from backend.classification import service as classification_service # noqa: E402
+from backend.classification.errors import ClassificationError # noqa: E402
 
 # ── 控制台编码容错（Windows 必做）─────────────────────────────
 # Windows 控制台默认 GBK。启动期只要有一个 print 碰到 GBK 编不出的字符
@@ -71,32 +78,20 @@ def health() -> dict:
     刻意放在 /health 而不是 /api/health —— 它不是业务接口，
     不该出现在 /docs 的业务列表里被当成"第 13 个接口"。
     """
-    snap = db.health_snapshot()
     return {
         "status": "ok",
         "db": str(db.DB_PATH),
-        "transactions": snap["transactions"],
-        "batches": snap["batches"],
+        **db.health_snapshot(),
     }
-
-
-# ── 账本（第二轮）───────────────────────────────────────────
-#  唯一写路径：POST /api/ledger/op
-#  每个请求都显式带 book_id —— 不引入「当前账本」这个隐式状态
-#  （MCP 没有会话，HTTP 多标签页会互相踩）。
-
-@app.exception_handler(LedgerError)
-async def _ledger_error(_req, exc: LedgerError):
-    """引擎拒绝了一次操作。响应体 {code, message, detail}。
-
-    message 是**人话** —— 前端直接弹给用户，MCP 直接念给模型听。
-    """
-    from fastapi.responses import JSONResponse
-    return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
 
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    # 报告视图依赖 Live Ledger 的分类和有效金额投影；启动时确保投影已同步。
+    ledger_service.sync_live_book()
+    # 单进程服务重启后，将遗留的 planning/running 任务标记为可恢复状态。
+    # 任务恢复时仍会重新校验 Ledger 快照，不会盲目复用旧财务结果。
+    ai_chat.TASK_STORE.mark_interrupted_tasks()
     # 用 [OK] 而不是 ✓：Windows 控制台默认 GBK，✓ 编不出来。
     print(f"[OK] 数据库已就绪: {db.DB_PATH}")
 
@@ -132,6 +127,65 @@ async def _validation(_req, exc: RequestValidationError):
 def _json_error(code: int, msg: str):
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=code, content={"detail": msg})
+
+
+@app.exception_handler(LedgerError)
+async def _ledger_error(_req, exc: LedgerError):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=exc.status, content={
+        'code': exc.code, 'message': exc.message, 'detail': {},
+    })
+
+
+# ═══════════════════════════════════════════════════════════
+#  第二轮 · 星图账本（所有写入统一转发 ledger.service）
+# ═══════════════════════════════════════════════════════════
+
+@app.get('/api/ledger/live')
+def ledger_live(date_from: str | None = None, date_to: str | None = None,
+                category_node_id: str | None = None):
+    """Auto-sync imported bills; date/category are view filters, not book boundaries."""
+    return ledger_service.get_live_tree(date_from, date_to, category_node_id)
+
+
+@app.get('/api/ledger/books')
+def ledger_books():
+    return ledger_service.list_books()
+
+
+@app.post('/api/ledger/books')
+def ledger_create(data: S.LedgerBookIn):
+    return ledger_service.create_book(data.name, data.date_from, data.date_to)
+
+
+@app.get('/api/ledger/tree')
+def ledger_tree(book_id: str, focus_node_id: str | None = None):
+    return ledger_service.get_tree(book_id, focus_node_id)
+
+
+@app.get('/api/ledger/status')
+def ledger_status(book_id: str):
+    return ledger_service.get_status(book_id)
+
+
+@app.post('/api/ledger/op')
+def ledger_op(data: S.LedgerApplyIn):
+    return ledger_service.apply_op(data.book_id, data.op.model_dump(), data.expected_seq)
+
+
+@app.post('/api/ledger/undo')
+def ledger_undo(data: S.LedgerBookIdIn):
+    return ledger_service.undo(data.book_id, data.expected_seq)
+
+
+@app.post('/api/ledger/redo')
+def ledger_redo(data: S.LedgerBookIdIn):
+    return ledger_service.redo(data.book_id, data.expected_seq)
+
+
+@app.post('/api/ledger/reset')
+def ledger_reset(data: S.LedgerBookIdIn):
+    return ledger_service.reset_to_m0(data.book_id, data.expected_seq)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -212,6 +266,7 @@ async def import_commit(
         tmp = await _stage_upload(file, Path(temp_dir))
         try:
             r: ImportResult = import_file(tmp, alipay_password=alipay_password)
+            ledger_service.sync_live_book()
             return S.ImportCommitResp(
                 batch_id=r.batch_id, inserted=r.inserted, skipped=r.skipped,
                 failed=r.failed, first_error=r.first_error,
@@ -224,7 +279,277 @@ async def import_commit(
 @app.get("/api/import/history")
 async def import_history():
     """导入批次记录。"""
-    return {"batches": importer_mod.list_batches()}
+    return {"batches": db.list_import_batches()}
+
+
+# ═══════════════════════════════════════════════════════════
+#  网页原生 AI：模型设置、智能导入、对话校准
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/api/ai/settings")
+def get_ai_settings():
+    return ai_config.get_public_config()
+
+
+@app.put("/api/ai/settings")
+def put_ai_settings(data: AI.AISettingsIn):
+    try:
+        return ai_config.save_config(
+            provider=data.provider, base_url=data.base_url, model=data.model,
+            api_key=data.api_key, clear_api_key=data.clear_api_key,
+            auto_apply_rules=data.auto_apply_rules,
+            allow_external_processing=data.allow_external_processing,
+            confidence_threshold=data.confidence_threshold,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/ai/settings/test")
+async def test_ai_settings():
+    config = ai_config.get_secret_config()
+    if config is None:
+        raise HTTPException(409, "请先保存 API Key。")
+    try:
+        return await ai_test_connection(config)
+    except AIProviderError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.delete("/api/ai/settings/key")
+def delete_ai_key():
+    current = ai_config.get_public_config()
+    return ai_config.save_config(
+        provider=current["provider"], base_url=current["base_url"],
+        model=current["model"], api_key=None, clear_api_key=True,
+        auto_apply_rules=current["auto_apply_rules"],
+        allow_external_processing=False,
+        confidence_threshold=current["confidence_threshold"],
+    )
+
+
+@app.post("/api/ai/import/analyze")
+async def ai_import_analyze(
+    file: UploadFile = File(...),
+    alipay_password: str | None = Form(None),
+):
+    with TemporaryDirectory(prefix="finance_ai_import_") as temp_dir:
+        tmp = await _stage_upload(file, Path(temp_dir))
+        try:
+            filename = Path((file.filename or tmp.name).replace("\\", "/")).name
+            return await ai_import.create_session(tmp, filename, alipay_password)
+        except ai_import.AIImportError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/ai/import/{session_id}")
+def get_ai_import_session(session_id: str):
+    try:
+        return ai_import.get_session(session_id)
+    except ai_import.AIImportError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.post("/api/ai/import/{session_id}/calibrate")
+async def calibrate_ai_import(session_id: str, data: AI.AIImportCalibrateIn):
+    try:
+        return await ai_import.calibrate_session(session_id, data.message)
+    except ai_import.AIImportError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.post("/api/ai/import/{session_id}/commit")
+def commit_ai_import(session_id: str, data: AI.AIImportCommitIn):
+    try:
+        return ai_import.commit_session(
+            session_id,
+            approved_category_paths=data.approved_category_paths,
+            approved_row_indices=data.approved_row_indices,
+            remember_rule_row_indices=data.remember_rule_row_indices,
+        )
+    except (ai_import.AIImportError, ClassificationError, LedgerError) as exc:
+        status = getattr(exc, "status_code", getattr(exc, "status", 400))
+        raise HTTPException(status, str(exc)) from exc
+
+
+@app.get("/api/ai/history/status")
+def get_ai_history_status():
+    try:
+        return ai_history.get_status()
+    except (ai_history.AIHistoryError, ClassificationError, LedgerError) as exc:
+        status = getattr(exc, "status_code", getattr(exc, "status", 400))
+        raise HTTPException(status, str(exc)) from exc
+
+
+@app.post("/api/ai/history/analyze")
+def start_ai_history_analysis(background_tasks: BackgroundTasks):
+    try:
+        result = ai_history.start_analysis()
+        if result.get("status") == "queued":
+            background_tasks.add_task(ai_history.run_analysis, result["session_id"])
+        return result
+    except ai_history.AIHistoryError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.get("/api/ai/history/{session_id}")
+def get_ai_history_session(session_id: str):
+    try:
+        return ai_history.get_session(session_id)
+    except ai_history.AIHistoryError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.post("/api/ai/history/{session_id}/commit")
+def commit_ai_history_session(session_id: str, data: AI.AIHistoryCommitIn):
+    try:
+        return ai_history.commit_session(
+            session_id,
+            approved_category_paths=data.approved_category_paths,
+            approved_tx_ids=data.approved_tx_ids,
+            remember_rule_tx_ids=data.remember_rule_tx_ids,
+        )
+    except (ai_history.AIHistoryError, ClassificationError, LedgerError) as exc:
+        status = getattr(exc, "status_code", getattr(exc, "status", 400))
+        raise HTTPException(status, str(exc)) from exc
+
+
+@app.get("/api/ai/classification/proposals")
+def list_ai_classification_proposals(status: str = "draft", limit: int = 20):
+    if not db.has_transactions():
+        return {"book_id": ledger_service.LIVE_BOOK_ID, "current_seq": 0,
+                "status_filter": status, "returned": 0, "proposals": []}
+    ledger_service.sync_live_book()
+    try:
+        return classification_service.list_proposals(ledger_service.LIVE_BOOK_ID, status, limit)
+    except ClassificationError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.get("/api/ai/classification/proposals/{proposal_id}")
+def get_ai_classification_proposal(proposal_id: str):
+    try:
+        return classification_service.get_proposal(proposal_id)
+    except ClassificationError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.post("/api/ai/classification/proposals/{proposal_id}/confirm")
+def confirm_ai_classification_proposal(proposal_id: str, data: AI.AIProposalConfirmIn):
+    try:
+        current = classification_service.get_proposal(proposal_id)
+        if current.get("stale"):
+            current = classification_service.rebase_if_safe(proposal_id)
+        return classification_service.confirm(
+            proposal_id, data.approved_tx_ids, current["current_seq"],
+            confirmed_by="web_user_confirmed", decision_note="用户通过网页审核工作区确认",
+        )
+    except ClassificationError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.post("/api/ai/classification/proposals/{proposal_id}/resolve")
+def resolve_ai_classification_proposal(proposal_id: str, data: AI.AIProposalResolveIn):
+    suggestion = {
+        "tx_id": data.tx_id, "target_node_id": data.target_node_id,
+        "confidence": data.confidence, "reason": data.reason,
+        "needs_clarification": False, "question": None,
+        "remember_rule": data.remember_rule,
+        "rule_field": data.rule_field, "rule_pattern": data.rule_pattern,
+    }
+    try:
+        current = classification_service.get_proposal(proposal_id)
+        if current.get("stale"):
+            current = classification_service.rebase_if_safe(proposal_id)
+        return classification_service.resolve_clarification(
+            proposal_id, suggestion, user_answer=data.user_answer, expected_seq=current["current_seq"],
+        )
+    except ClassificationError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.post("/api/ai/classification/proposals/{proposal_id}/reject")
+def reject_ai_classification_proposal(proposal_id: str, data: AI.AIProposalRejectIn):
+    try:
+        return classification_service.reject(proposal_id, data.reason)
+    except ClassificationError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.post("/api/ai/classification/proposals/{proposal_id}/undo")
+def undo_ai_classification_proposal(proposal_id: str, data: AI.AIProposalUndoIn):
+    try:
+        return classification_service.undo(proposal_id, data.expected_seq)
+    except ClassificationError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  AI Finance Companion：全局悬浮小帝企鹅对话
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/api/ai/chat/conversations")
+def list_ai_chat_conversations(limit: int = 30):
+    return ai_chat.list_conversations(limit)
+
+
+@app.post("/api/ai/chat/conversations")
+def create_ai_chat_conversation(data: ai_chat.ChatConversationCreateIn):
+    return ai_chat.create_conversation(data.title)
+
+
+@app.get("/api/ai/chat/conversations/{conversation_id}")
+def get_ai_chat_conversation(conversation_id: str):
+    try:
+        return ai_chat.get_conversation(conversation_id)
+    except ai_chat.AIChatError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.delete("/api/ai/chat/conversations/{conversation_id}")
+def delete_ai_chat_conversation(conversation_id: str):
+    try:
+        return ai_chat.delete_conversation(conversation_id)
+    except ai_chat.AIChatError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.get("/api/ai/chat/conversations/{conversation_id}/agent-tasks/latest")
+def get_latest_ai_agent_task(conversation_id: str):
+    try:
+        return {"agent_task": ai_chat.get_latest_agent_task(conversation_id)}
+    except ai_chat.AIChatError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.post("/api/ai/chat/conversations/{conversation_id}/messages")
+async def send_ai_chat_message(conversation_id: str, data: ai_chat.ChatMessageIn):
+    try:
+        return await ai_chat.send_message(conversation_id, data.content, data.context)
+    except (ai_chat.AIChatError, AIProviderError) as exc:
+        status = getattr(exc, "status_code", 502)
+        raise HTTPException(status, str(exc)) from exc
+
+
+@app.post("/api/ai/chat/conversations/{conversation_id}/actions/{action_id}/confirm")
+def confirm_ai_chat_action(conversation_id: str, action_id: str):
+    try:
+        return ai_chat.confirm_action(conversation_id, action_id)
+    except (ai_chat.AIChatError, ClassificationError, LedgerError, ValueError) as exc:
+        status = getattr(exc, "status_code", getattr(exc, "status", 400))
+        raise HTTPException(status, str(exc)) from exc
+
+
+@app.post("/api/ai/chat/conversations/{conversation_id}/actions/{action_id}/reject")
+def reject_ai_chat_action(conversation_id: str, action_id: str):
+    try:
+        return ai_chat.reject_action(conversation_id, action_id)
+    except ai_chat.AIChatError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
 
 
 # ═══════════════════════════════════════════════════════════
@@ -304,77 +629,3 @@ async def tx_clear_override(tx_id: int):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
-
-
-# ═══════════════════════════════════════════════════════════
-#  账本（第二轮 · 账本代数引擎）
-#
-#  口径提醒：账本的数字和 /api/report/* 的数字**不是一回事**。
-#  reports 是平台口径的平铺统计，账本是用户自己分的组。两者不相加。
-#
-#  写路径只有一个：POST /api/ledger/op
-#  每次都带 book_id —— 不引入「当前账本」这种隐式状态。
-# ═══════════════════════════════════════════════════════════
-
-@app.get("/api/ledger/books", response_model=S.LedgerBookListResp, tags=["ledger"])
-def ledger_books():
-    """账本列表。用户定义的若干「阶段」，每阶段一本独立账。"""
-    books = ledger_service.list_books()
-    out = []
-    for b in books:
-        st = ledger_service.get_status(b.book_id)
-        out.append(S.LedgerBookOut(
-            book_id=b.book_id,
-            name=b.name,
-            date_from=b.date_from,
-            date_to=b.date_to,
-            member_count=st["total_tx"],
-            created_at=b.created_at,
-        ))
-    return S.LedgerBookListResp(books=out)
-
-
-@app.post("/api/ledger/books", response_model=S.LedgerTreeResp, tags=["ledger"])
-def ledger_create_book(body: S.LedgerBookCreate):
-    """建一本账：按区间冻结成员集，生成 M₀（根 + 全部腿的一层平铺树）。"""
-    return ledger_service.create_book(
-        body.name, body.date_from, body.date_to,
-        created_by="ui", note=body.note,
-    )
-
-
-@app.get("/api/ledger/tree", response_model=S.LedgerTreeResp, tags=["ledger"])
-def ledger_tree(book_id: str, focus_node_id: str | None = None):
-    """整棵树 + 每个节点的聚合值。focus_node_id 只是焦点提示，不裁剪内容。"""
-    return ledger_service.get_tree(book_id, focus_node_id)
-
-
-@app.get("/api/ledger/status", response_model=S.LedgerStatusResp, tags=["ledger"])
-def ledger_status(book_id: str):
-    """客观状态：多少笔已归位、多少笔待归、不变量是否通过、能不能撤销。"""
-    return ledger_service.get_status(book_id)
-
-
-@app.post("/api/ledger/op", response_model=S.LedgerOpResp, tags=["ledger"])
-def ledger_op(body: S.LedgerOpRequest):
-    """**唯一写入口**。body.op 是判别联合，按 op 字段选分支。"""
-    op = body.op.model_dump()
-    return ledger_service.apply_op(body.book_id, op, created_by=body.updated_by)
-
-
-@app.post("/api/ledger/undo", response_model=S.LedgerOpResp, tags=["ledger"])
-def ledger_undo(body: S.LedgerBookRef):
-    """撤销一步。靠操作日志里的逆操作，不是靠算术。"""
-    return ledger_service.undo(body.book_id)
-
-
-@app.post("/api/ledger/redo", response_model=S.LedgerOpResp, tags=["ledger"])
-def ledger_redo(body: S.LedgerBookRef):
-    """重做一步。"""
-    return ledger_service.redo(body.book_id)
-
-
-@app.post("/api/ledger/reset", response_model=S.LedgerOpResp, tags=["ledger"])
-def ledger_reset(body: S.LedgerBookRef):
-    """回到 M₀ —— 树全 collapse 成「根 + 全部腿」。"""
-    return ledger_service.reset_to_m0(body.book_id)

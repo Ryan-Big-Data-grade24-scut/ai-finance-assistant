@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ai-finance-assistant": {
+      "command": "<项目绝对路径>\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "backend.mcp.server"],
+      "cwd": "<项目绝对路径>"
+    }
+  }
+}
