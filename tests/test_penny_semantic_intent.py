@@ -56,7 +56,8 @@ def test_trend_tool_receives_both_server_resolved_months(monkeypatch):
 def test_category_list_question_uses_monthly_category_breakdown(monkeypatch):
     calls = []
 
-    def fake_breakdown(args):
+    def fake_breakdown(args, *, limit):
+        assert limit == -1
         calls.append(args)
         return {
             "month": args["month"],

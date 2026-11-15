@@ -116,6 +116,17 @@ export async function sendAIChatMessage(
   })
 }
 
+export async function getAIChatSuggestions(
+  id: string, context: Record<string, unknown>, signal: AbortSignal,
+): Promise<{ questions: string[] }> {
+  return request(`/api/ai/chat/conversations/${encodeURIComponent(id)}/suggestions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ context }),
+    signal,
+  })
+}
+
 export async function confirmAIChatAction(conversationId: string, actionId: string): Promise<{ status: string; message: string }> {
   return request(
     `/api/ai/chat/conversations/${encodeURIComponent(conversationId)}/actions/${encodeURIComponent(actionId)}/confirm`,

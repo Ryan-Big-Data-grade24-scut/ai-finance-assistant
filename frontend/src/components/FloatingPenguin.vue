@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import PennyPenguin from '@/components/PennyPenguin.vue'
 import { renderMarkdown } from '@/utils/markdown'
 import {
   confirmAIChatAction,
   createAIChatConversation,
   deleteAIChatConversation,
   getAIChatConversation,
+  getAIChatSuggestions,
   getLatestAIChatAgentTask,
   listAIChatConversations,
   rejectAIChatAction,
@@ -33,14 +35,21 @@ const agentTask = ref<AIChatAgentTask | null>(null)
 const draft = ref('')
 const errorMessage = ref('')
 const scrollArea = ref<HTMLElement | null>(null)
+const portrait = ref('')
+const suggestedQuestions = ref<string[]>([])
+const suggestionsExpanded = ref(false)
+const suggestionsLoading = ref(false)
+const defaultQuestions = ['最近有账单的月份收入和支出各是多少？', '我的支出主要分在哪些类别？', '还有哪些历史交易需要确认 AI 分类？']
 
 const PET_WIDTH = 76
 const PET_HEIGHT = 88
 const PANEL_WIDTH = 410
 const PANEL_HEIGHT = 620
+const compactPanel = ref(window.innerWidth <= 560)
 const position = ref({ left: 0, top: 0 })
 const isDragging = ref(false)
 const panelPosition = ref({ left: 0, top: 0 })
+const panelSize = ref({ width: PANEL_WIDTH, height: PANEL_HEIGHT })
 const isPanelDragging = ref(false)
 const isSpeaking = ref(false)
 let dragOrigin = { x: 0, y: 0, left: 0, top: 0 }
@@ -52,6 +61,7 @@ let speakingTimer: number | undefined
 let panelPositionRestored = false
 
 const conversationOptions = computed(() => conversations.value.slice(0, 30))
+const awaitingClarification = computed(() => agentTask.value?.status === 'waiting_for_user')
 
 interface BulkActionSample {
   tx_id: number
@@ -80,12 +90,59 @@ function clampPosition(left: number, top: number) {
 }
 
 function clampPanelPosition(left: number, top: number) {
-  const width = Math.min(PANEL_WIDTH, window.innerWidth - 24)
-  const height = Math.min(PANEL_HEIGHT, window.innerHeight - 24)
+  const { width, height } = panelSize.value
   return {
     left: Math.min(Math.max(12, left), Math.max(12, window.innerWidth - width - 12)),
     top: Math.min(Math.max(12, top), Math.max(12, window.innerHeight - height - 12)),
   }
+}
+
+function clampPanelSize(width: number, height: number) {
+  const maxWidth = Math.max(0, window.innerWidth - 24)
+  const maxHeight = Math.max(0, window.innerHeight - 24)
+  return {
+    width: Math.min(Math.max(350, width), maxWidth),
+    height: Math.min(Math.max(380, height), maxHeight),
+  }
+}
+
+function resizePanel(width: number, height: number) {
+  panelSize.value = clampPanelSize(width, height)
+  panelPosition.value = clampPanelPosition(panelPosition.value.left, panelPosition.value.top)
+}
+
+function startPanelResize(event: PointerEvent) {
+  if (event.button !== 0) return
+  const handle = event.currentTarget as HTMLElement
+  const { width, height } = panelSize.value
+  const { left, top } = panelPosition.value
+  const startX = event.clientX
+  const startY = event.clientY
+  handle.setPointerCapture(event.pointerId)
+  const move = (next: PointerEvent) => {
+    panelSize.value = clampPanelSize(width + next.clientX - startX, height + next.clientY - startY)
+    panelPosition.value = clampPanelPosition(left, top)
+  }
+  handle.addEventListener('pointermove', move)
+  handle.addEventListener('lostpointercapture', () => {
+    handle.removeEventListener('pointermove', move)
+    savePanelPosition()
+  }, { once: true })
+  event.preventDefault()
+}
+
+function resizePanelWithKeys(event: KeyboardEvent) {
+  const { width, height } = panelSize.value
+  const amount = event.shiftKey ? 80 : 24
+  switch (event.key) {
+    case 'ArrowRight': resizePanel(width + amount, height); break
+    case 'ArrowLeft': resizePanel(width - amount, height); break
+    case 'ArrowDown': resizePanel(width, height + amount); break
+    case 'ArrowUp': resizePanel(width, height - amount); break
+    default: return
+  }
+  event.preventDefault()
+  savePanelPosition()
 }
 
 function savePosition() {
@@ -112,18 +169,21 @@ function restorePosition() {
 }
 
 function restorePanelPosition() {
-  let restored: { left?: number; top?: number } | null = null
+  let restored: { left?: number; top?: number; width?: number; height?: number } | null = null
   try {
     const raw = localStorage.getItem('ai-finance-penny-chat-position')
     if (raw) restored = JSON.parse(raw)
   } catch {
     restored = null
   }
+  panelSize.value = clampPanelSize(
+    Number.isFinite(restored?.width) ? Number(restored?.width) : PANEL_WIDTH,
+    Number.isFinite(restored?.height) ? Number(restored?.height) : PANEL_HEIGHT,
+  )
   if (restored && Number.isFinite(restored.left) && Number.isFinite(restored.top)) {
     panelPosition.value = clampPanelPosition(Number(restored.left), Number(restored.top))
   } else {
-    const width = Math.min(PANEL_WIDTH, window.innerWidth - 24)
-    const height = Math.min(PANEL_HEIGHT, window.innerHeight - 24)
+    const { width, height } = panelSize.value
     panelPosition.value = clampPanelPosition(window.innerWidth - width - 24, window.innerHeight - height - 112)
   }
   panelPositionRestored = true
@@ -131,7 +191,9 @@ function restorePanelPosition() {
 
 function savePanelPosition() {
   try {
-    localStorage.setItem('ai-finance-penny-chat-position', JSON.stringify(panelPosition.value))
+    if (window.innerWidth > 560) {
+      localStorage.setItem('ai-finance-penny-chat-position', JSON.stringify({ ...panelPosition.value, ...panelSize.value }))
+    }
   } catch {
     // Chat remains draggable for the current session if browser storage is unavailable.
   }
@@ -216,11 +278,11 @@ function onPointerUp() {
 }
 
 function onWindowResize() {
+  compactPanel.value = window.innerWidth <= 560
   position.value = clampPosition(position.value.left, position.value.top)
   savePosition()
   if (panelPositionRestored) {
-    panelPosition.value = clampPanelPosition(panelPosition.value.left, panelPosition.value.top)
-    savePanelPosition()
+    restorePanelPosition()
   }
 }
 
@@ -317,6 +379,12 @@ async function deleteCurrentConversation() {
   }
 }
 
+function onComposerEnter(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  void sendMessage()
+}
+
 function onConversationSelect(event: Event) {
   const id = (event.target as HTMLSelectElement).value
   if (id) void loadConversation(id)
@@ -350,17 +418,41 @@ function pageContext() {
   }
 }
 
-async function sendMessage() {
-  const content = draft.value.trim()
-  if (!content || isSending.value) return
-  await ensureConversation()
-  if (!conversationId.value) return
+watch(
+  [isOpen, suggestionsExpanded, conversationId, () => route.fullPath, isLoading, isSending, () => messages.value.length],
+  ([open, expanded, id, , loading, sending], _, onCleanup) => {
+    if (!open || !expanded || !id || loading || sending) return
+    const request = new AbortController()
+    suggestionsLoading.value = true
+    onCleanup(() => { request.abort(); suggestionsLoading.value = false })
+    suggestedQuestions.value = []
+    void getAIChatSuggestions(id, pageContext(), request.signal).then(result => {
+      if (!request.signal.aborted) suggestedQuestions.value = result.questions
+    }).catch(() => {}).finally(() => {
+      if (!request.signal.aborted) suggestionsLoading.value = false
+    })
+  },
+)
+
+async function sendMessage(question?: string) {
+  const content = (question ?? draft.value).trim()
+  if (!content || isSending.value || isLoading.value) return
+  isSending.value = true
+  try {
+    await ensureConversation()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '读取对话失败。'
+  }
+  if (!conversationId.value) {
+    isSending.value = false
+    return
+  }
 
   const activeConversationId = conversationId.value
   const previousAgentTask = agentTask.value
-  draft.value = ''
+  if (question === undefined) draft.value = ''
+  suggestionsExpanded.value = false
   errorMessage.value = ''
-  isSending.value = true
   agentTask.value = null
   messages.value.push({ role: 'user', content })
   await nextTick()
@@ -403,12 +495,13 @@ async function sendMessage() {
   try {
     const pendingRequest = sendAIChatMessage(activeConversationId, content, pageContext())
     pollHandle = window.setInterval(() => { void pollTask() }, 850)
-    await pollTask()
     const result = await pendingRequest
     messages.value = result.messages
     actions.value = result.actions
     agentTask.value = result.agent_task ?? null
-    await refreshConversationList()
+    const index = conversations.value.findIndex(item => item.id === activeConversationId)
+    if (index >= 0) conversations.value.splice(index, 1)
+    conversations.value.unshift(result.conversation)
     triggerSpeaking()
     await nextTick()
     scrollToBottom()
@@ -543,10 +636,6 @@ function agentEvidenceScope(scope: AIChatAgentEvidence['scope']) {
   return Object.entries(scope || {}).map(([key, value]) => `${labels[key] || key}：${String(value)}`).join(' · ')
 }
 
-function useQuickPrompt(value: string) {
-  draft.value = value
-}
-
 onMounted(() => {
   restorePosition()
   restorePanelPosition()
@@ -572,13 +661,14 @@ onBeforeUnmount(() => {
         v-if="isOpen"
         class="penguin-chat-panel"
         :class="{ 'penguin-chat-panel--dragging': isPanelDragging }"
-        :style="{ left: `${panelPosition.left}px`, top: `${panelPosition.top}px` }"
+        :style="compactPanel ? undefined : { left: `${panelPosition.left}px`, top: `${panelPosition.top}px`, width: `${panelSize.width}px`, height: `${panelSize.height}px` }"
         aria-label="Penny AI Finance 对话"
       >
         <header class="chat-header" @pointerdown="onPanelHeaderPointerDown">
           <div class="chat-identity">
             <span class="chat-avatar">
-              <svg viewBox="0 0 64 64" aria-hidden="true">
+              <img v-if="portrait" :src="portrait" alt="" />
+              <svg v-else viewBox="0 0 64 64" aria-hidden="true">
                 <ellipse cx="32" cy="36" rx="21" ry="25" fill="#172A3B"/>
                 <ellipse cx="32" cy="42" rx="13" ry="17" fill="#F8FBFF"/>
                 <circle cx="32" cy="19" r="15" fill="#172A3B"/>
@@ -600,7 +690,7 @@ onBeforeUnmount(() => {
             <span class="online-dot" title="助手已就绪"></span>
           </div>
           <div class="chat-header-actions">
-            <button class="icon-button" type="button" title="新建对话" aria-label="新建对话" @pointerdown.stop @click="createNewConversation">
+            <button class="icon-button" type="button" title="新建对话" aria-label="新建对话" :disabled="isSending || isLoading" @pointerdown.stop @click="createNewConversation">
               <span>＋</span>
             </button>
             <button
@@ -623,7 +713,7 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="chat-toolbar">
-          <select :value="conversationId || ''" aria-label="选择历史对话" @change="onConversationSelect">
+          <select :value="conversationId || ''" :disabled="isSending || isLoading" aria-label="选择历史对话" @change="onConversationSelect">
             <option v-for="item in conversationOptions" :key="item.id" :value="item.id">
               {{ item.title || '新对话' }}
             </option>
@@ -635,7 +725,8 @@ onBeforeUnmount(() => {
         <div ref="scrollArea" class="chat-messages">
           <div v-if="messages.length === 0" class="welcome-state">
             <div class="welcome-penguin">
-              <svg viewBox="0 0 100 116" aria-hidden="true">
+              <img v-if="portrait" :src="portrait" alt="" />
+              <svg v-else viewBox="0 0 100 116" aria-hidden="true">
                 <ellipse cx="50" cy="70" rx="35" ry="42" fill="#172A3B"/>
                 <ellipse cx="50" cy="80" rx="22" ry="28" fill="#F8FBFF"/>
                 <circle cx="50" cy="29" r="25" fill="#172A3B"/>
@@ -650,18 +741,13 @@ onBeforeUnmount(() => {
             </div>
             <h3>你好，我是 Penny</h3>
             <p>我可以查询你的账单、分析消费，也能在你确认后帮你调整分类和保存规则。</p>
-            <div class="quick-prompts">
-              <button type="button" @click="useQuickPrompt('帮我分析最近一个月的收入和支出。')">分析最近一个月</button>
-              <button type="button" @click="useQuickPrompt('我最近消费最多的商户有哪些？')">消费最多的商户</button>
-              <button type="button" @click="useQuickPrompt('检查最近一个月的异常消费和疑似重复交易。')">检查异常消费</button>
-              <button type="button" @click="useQuickPrompt('查看 AI 历史账单学习的结果。')">查看历史学习结果</button>
-            </div>
           </div>
 
           <template v-for="(message, index) in messages" :key="message.id || `${message.role}-${index}`">
             <div class="message-row" :class="`message-row--${message.role}`">
               <div v-if="message.role === 'assistant'" class="message-penguin">
-                <svg viewBox="0 0 64 64" aria-hidden="true">
+                <img v-if="portrait" :src="portrait" alt="" />
+                <svg v-else viewBox="0 0 64 64" aria-hidden="true">
                   <ellipse cx="32" cy="36" rx="21" ry="25" fill="#172A3B"/>
                   <ellipse cx="32" cy="42" rx="13" ry="17" fill="#F8FBFF"/>
                   <circle cx="32" cy="19" r="15" fill="#172A3B"/>
@@ -761,17 +847,33 @@ onBeforeUnmount(() => {
             v-model="draft"
             rows="2"
             maxlength="4000"
-            placeholder="问问你的财务助手…"
+            :placeholder="awaitingClarification ? '直接回复要补充的条件…' : '问问你的财务助手…'"
             :disabled="isSending"
-            @keydown.enter.exact.prevent="sendMessage"
+            @keydown.enter.exact="onComposerEnter"
           ></textarea>
           <div class="composer-bottom">
-            <span>Enter 发送 · Shift + Enter 换行</span>
-            <button type="button" :disabled="!draft.trim() || isSending" @click="sendMessage">
+            <small v-if="awaitingClarification" class="clarification-status" role="status">Penny 等你补充后继续</small>
+            <div v-else class="suggestion-menu" @keydown.esc.stop="suggestionsExpanded = false">
+              <button class="suggestion-toggle" type="button" :aria-expanded="suggestionsExpanded"
+                      aria-controls="penny-suggestions" :disabled="isSending || isLoading"
+                      @click="suggestionsExpanded = !suggestionsExpanded">✦ 推荐问题</button>
+              <div v-if="suggestionsExpanded" id="penny-suggestions" class="quick-prompts" aria-label="推荐问题">
+                <span v-if="suggestionsLoading" class="suggestion-status" role="status">正在准备推荐问题…</span>
+                <template v-else>
+                  <button v-for="question in (suggestedQuestions.length ? suggestedQuestions : defaultQuestions)"
+                          :key="question" type="button" :disabled="isLoading" @click="sendMessage(question)">
+                    {{ question }}
+                  </button>
+                </template>
+              </div>
+            </div>
+            <button class="composer-send" type="button" :disabled="!draft.trim() || isSending || isLoading" @click="sendMessage()">
               {{ isSending ? '思考中…' : '发送 ↑' }}
             </button>
           </div>
         </footer>
+        <button class="panel-resize" type="button" aria-label="调整对话框大小，可拖动或按方向键"
+                title="拖动调整大小" @pointerdown="startPanelResize" @keydown="resizePanelWithKeys"></button>
       </section>
     </Transition>
 
@@ -786,36 +888,38 @@ onBeforeUnmount(() => {
       @click="openChat"
     >
       <span class="launcher-glow"></span>
-      <svg class="launcher-penguin" viewBox="0 0 100 116" aria-hidden="true">
-        <defs>
-          <linearGradient id="penguin-body" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#304A61"/>
-            <stop offset="1" stop-color="#101F2D"/>
-          </linearGradient>
-          <linearGradient id="penguin-gold" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#FFD17B"/>
-            <stop offset="1" stop-color="#E58A2D"/>
-          </linearGradient>
-        </defs>
-        <ellipse cx="50" cy="72" rx="35" ry="41" fill="url(#penguin-body)"/>
-        <ellipse cx="50" cy="81" rx="22" ry="27" fill="#F8FBFF"/>
-        <circle cx="50" cy="30" r="25" fill="url(#penguin-body)"/>
-        <path d="M30 28 Q33 8 49 9 Q65 10 70 28 Q62 22 56 27 Q50 34 44 27 Q37 23 30 28Z" fill="#24394D"/>
-        <ellipse cx="34" cy="34" rx="8" ry="13" fill="#FFF9EF"/>
-        <ellipse cx="66" cy="34" rx="8" ry="13" fill="#FFF9EF"/>
-        <g class="penguin-eyes">
-          <circle cx="42" cy="30" r="3.2" fill="#13202C"/>
-          <circle cx="58" cy="30" r="3.2" fill="#13202C"/>
-          <circle cx="43" cy="29" r="1" fill="#FFFFFF"/>
-          <circle cx="59" cy="29" r="1" fill="#FFFFFF"/>
-        </g>
-        <path class="penguin-beak" d="M43 40 L57 40 L50 51 Z" fill="url(#penguin-gold)"/>
-        <path class="penguin-flipper penguin-flipper--left" d="M18 55 Q2 67 16 85 Q22 87 27 77" fill="#1B3043"/>
-        <path class="penguin-flipper penguin-flipper--right" d="M82 55 Q98 67 84 85 Q78 87 73 77" fill="#1B3043"/>
-        <path d="M26 107 Q38 100 48 108 L48 113 L23 113 Z" fill="#E99435"/>
-        <path d="M52 108 Q64 100 77 107 L77 113 L52 113 Z" fill="#E99435"/>
-        <path d="M31 66 Q50 54 69 66" fill="none" stroke="#FFFFFF" stroke-opacity=".18" stroke-width="2"/>
-      </svg>
+      <PennyPenguin class="launcher-penguin" :thinking="isSending" :speaking="isSpeaking" @portrait="portrait = $event">
+        <svg class="launcher-penguin" viewBox="0 0 100 116" aria-hidden="true">
+          <defs>
+            <linearGradient id="penguin-body" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#304A61"/>
+              <stop offset="1" stop-color="#101F2D"/>
+            </linearGradient>
+            <linearGradient id="penguin-gold" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#FFD17B"/>
+              <stop offset="1" stop-color="#E58A2D"/>
+            </linearGradient>
+          </defs>
+          <ellipse cx="50" cy="72" rx="35" ry="41" fill="url(#penguin-body)"/>
+          <ellipse cx="50" cy="81" rx="22" ry="27" fill="#F8FBFF"/>
+          <circle cx="50" cy="30" r="25" fill="url(#penguin-body)"/>
+          <path d="M30 28 Q33 8 49 9 Q65 10 70 28 Q62 22 56 27 Q50 34 44 27 Q37 23 30 28Z" fill="#24394D"/>
+          <ellipse cx="34" cy="34" rx="8" ry="13" fill="#FFF9EF"/>
+          <ellipse cx="66" cy="34" rx="8" ry="13" fill="#FFF9EF"/>
+          <g class="penguin-eyes">
+            <circle cx="42" cy="30" r="3.2" fill="#13202C"/>
+            <circle cx="58" cy="30" r="3.2" fill="#13202C"/>
+            <circle cx="43" cy="29" r="1" fill="#FFFFFF"/>
+            <circle cx="59" cy="29" r="1" fill="#FFFFFF"/>
+          </g>
+          <path class="penguin-beak" d="M43 40 L57 40 L50 51 Z" fill="url(#penguin-gold)"/>
+          <path class="penguin-flipper penguin-flipper--left" d="M18 55 Q2 67 16 85 Q22 87 27 77" fill="#1B3043"/>
+          <path class="penguin-flipper penguin-flipper--right" d="M82 55 Q98 67 84 85 Q78 87 73 77" fill="#1B3043"/>
+          <path d="M26 107 Q38 100 48 108 L48 113 L23 113 Z" fill="#E99435"/>
+          <path d="M52 108 Q64 100 77 107 L77 113 L52 113 Z" fill="#E99435"/>
+          <path d="M31 66 Q50 54 69 66" fill="none" stroke="#FFFFFF" stroke-opacity=".18" stroke-width="2"/>
+        </svg>
+      </PennyPenguin>
       <span v-if="!isOpen" class="launcher-label">Penny · 和我聊聊</span>
       <span v-if="isSending" class="launcher-thinking-dot"></span>
       <span v-else class="launcher-status-dot"></span>
@@ -839,8 +943,9 @@ onBeforeUnmount(() => {
   transition: filter .18s ease, transform .18s ease;
 }
 .penguin-launcher:hover { filter: drop-shadow(0 12px 18px rgba(22, 43, 64, .28)); transform: translateY(-3px); }
+.penguin-companion--open .penguin-launcher { z-index: 10018; }
 .penguin-launcher--dragging { cursor: grabbing; transition: none; transform: scale(1.06); }
-.launcher-penguin { position: relative; z-index: 1; width: 100%; height: 100%; overflow: visible; animation: penguin-float 3.6s ease-in-out infinite; }
+.launcher-penguin { position: relative; z-index: 1; width: 100%; height: 100%; overflow: visible; }
 .penguin-eyes { transform-box: fill-box; transform-origin: center; animation: penguin-blink 5.8s infinite; }
 .penguin-beak, .penguin-flipper { transform-box: fill-box; transform-origin: center top; }
 .launcher-glow {
@@ -860,7 +965,6 @@ onBeforeUnmount(() => {
   border: 2px solid #fff; border-radius: 50%; background: #27B27B;
 }
 .launcher-thinking-dot { background: #438FE2; animation: pulse 1s infinite; }
-.penguin-launcher--thinking .launcher-penguin { animation: penguin-think 1.1s ease-in-out infinite; }
 .penguin-launcher--thinking .penguin-flipper--left { animation: flipper-think .55s ease-in-out infinite alternate; }
 .penguin-launcher--thinking .penguin-flipper--right { animation: flipper-think .55s ease-in-out infinite alternate-reverse; }
 .penguin-launcher--speaking .penguin-beak { animation: beak-talk .22s ease-in-out 5 alternate; }
@@ -882,7 +986,7 @@ onBeforeUnmount(() => {
 .penguin-chat-panel--dragging .chat-header { cursor: grabbing; }
 .chat-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .chat-avatar { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 14px; background: #DCEBFA; }
-.chat-avatar svg { width: 36px; height: 36px; }
+.chat-avatar svg, .chat-avatar img { width: 36px; height: 36px; }
 .chat-title { display: flex; flex-direction: column; gap: 2px; }
 .chat-title strong { font-size: 14px; color: #1D344A; }
 .chat-title small { font-size: 10px; color: #7790A8; letter-spacing: .4px; }
@@ -903,19 +1007,26 @@ onBeforeUnmount(() => {
 .chat-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 13px; scroll-behavior: smooth; }
 .welcome-state { display: flex; flex-direction: column; align-items: center; padding: 20px 7px 10px; text-align: center; }
 .welcome-penguin { width: 88px; height: 102px; margin-bottom: 10px; filter: drop-shadow(0 8px 10px rgba(23,42,59,.13)); }
-.welcome-penguin svg { width: 100%; height: 100%; }
+.welcome-penguin svg, .welcome-penguin img { width: 100%; height: 100%; }
 .welcome-state h3 { margin: 2px 0 7px; color: #263F56; font-size: 16px; }
 .welcome-state p { max-width: 300px; margin: 0; color: #7B91A7; font-size: 12px; line-height: 1.7; }
-.quick-prompts { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin-top: 18px; }
+.suggestion-menu { position: relative; }
+.suggestion-toggle { border: 1px solid #D5E5ED; border-radius: 8px; padding: 6px 9px; background: #F4FAFB; color: #35576A; font: inherit; font-size: 11px; cursor: pointer; }
+.suggestion-toggle:hover:not(:disabled), .suggestion-toggle[aria-expanded="true"] { background: #E7F5F6; }
+.suggestion-toggle:disabled { opacity: .55; cursor: default; }
+.quick-prompts { position: absolute; z-index: 2; left: 0; bottom: calc(100% + 8px); display: grid; gap: 5px; padding: 7px; width: min(300px, calc(100vw - 52px)); background: #fff; border: 1px solid #D5E5ED; border-radius: 12px; box-shadow: 0 7px 24px #1a334d26; }
 .quick-prompts button {
-  border: 1px solid #DCE7F1; border-radius: 999px; padding: 7px 10px;
-  background: #fff; color: #55718D; cursor: pointer; font-size: 11px;
+  border: 1px solid #D5E5ED; border-radius: 8px; padding: 5px 9px;
+  background: #F4FAFB; color: #35576A; cursor: pointer; text-align: left; font: inherit; font-size: 11px; line-height: 1.35;
 }
-.quick-prompts button:hover { border-color: #9BBFE1; color: #2D6EA8; }
+.quick-prompts button:hover:not(:disabled) { border-color: #78B8C3; background: #E7F5F6; }
+.quick-prompts button:disabled { opacity: .6; cursor: default; }
+.suggestion-status { padding: 7px 9px; color: #55718D; font-size: 11px; }
+.chat-avatar img, .welcome-penguin img, .message-penguin img { object-fit: contain; }
 .message-row { display: flex; align-items: flex-end; gap: 7px; margin: 12px 0; }
 .message-row--user { justify-content: flex-end; }
 .message-penguin { display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; border-radius: 10px; background: #E0ECF8; }
-.message-penguin svg { width: 25px; height: 25px; }
+.message-penguin svg, .message-penguin img { width: 25px; height: 25px; }
 .message-bubble { max-width: 84%; border-radius: 14px 14px 14px 4px; padding: 10px 12px; background: #fff; border: 1px solid #E7EDF3; box-shadow: 0 2px 5px rgba(25,52,78,.035); }
 .message-row--user .message-bubble { border: 0; border-radius: 14px 14px 4px 14px; background: #397BB8; color: #fff; }
 .message-content { overflow-wrap: anywhere; font-size: 12px; line-height: 1.7; }
@@ -997,12 +1108,13 @@ onBeforeUnmount(() => {
 .chat-composer textarea { display: block; width: 100%; min-height: 52px; max-height: 110px; resize: vertical; border: 0; outline: 0; background: transparent; color: #273D52; font: inherit; font-size: 12px; line-height: 1.6; }
 .chat-composer textarea::placeholder { color: #A1B0BE; }
 .composer-bottom { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #A0AFBE; font-size: 9px; }
-.composer-bottom button { border: 0; border-radius: 9px; padding: 8px 15px; background: #367BB7; color: #fff; font-size: 11px; font-weight: 650; cursor: pointer; }
-.composer-bottom button:disabled { background: #B8C9D8; cursor: not-allowed; }
+.clarification-status { color: #426D82; font-size: 11px; }
+.composer-send { border: 0; border-radius: 9px; padding: 8px 15px; margin-right: 12px; background: #367BB7; color: #fff; font-size: 11px; font-weight: 650; cursor: pointer; }
+.composer-send:disabled { background: #B8C9D8; cursor: not-allowed; }
+.panel-resize { position: absolute; right: 2px; bottom: 2px; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; cursor: nwse-resize; touch-action: none; }
+.panel-resize::after { content: ''; position: absolute; width: 8px; height: 8px; right: 5px; bottom: 5px; border-right: 2px solid #7694AB; border-bottom: 2px solid #7694AB; border-radius: 1px; }
 .chat-pop-enter-active, .chat-pop-leave-active { transition: opacity .16s ease, transform .16s ease; }
 .chat-pop-enter-from, .chat-pop-leave-to { opacity: 0; transform: translateY(12px) scale(.98); }
-@keyframes penguin-float { 0%,100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-5px) rotate(1deg); } }
-@keyframes penguin-think { 0%,100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg) translateY(-3px); } }
 @keyframes penguin-blink { 0%, 43%, 47%, 76%, 80%, 100% { transform: scaleY(1); } 45%, 78% { transform: scaleY(.12); } }
 @keyframes flipper-think { from { transform: rotate(-5deg); } to { transform: rotate(9deg); } }
 @keyframes beak-talk { from { transform: scaleY(1); } to { transform: scaleY(.72) translateY(2px); } }
@@ -1010,7 +1122,9 @@ onBeforeUnmount(() => {
 @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(67,143,226,.3); } 50% { box-shadow: 0 0 0 6px rgba(67,143,226,0); } }
 @keyframes typing { 0%,60%,100% { opacity: .35; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
 @media (max-width: 560px) {
-  .penguin-chat-panel { width: calc(100vw - 16px); height: calc(100vh - 16px); border-radius: 17px; }
+  .penguin-chat-panel { left: 12px; top: 12px; width: calc(100vw - 24px); height: calc(100dvh - 24px); border-radius: 17px; }
+  .panel-resize { display: none; }
+  .composer-send { margin-right: 0; }
   .penguin-companion--open .penguin-launcher { display: none; }
   .chat-messages { padding: 12px 10px; }
   .penguin-launcher { width: 68px; height: 80px; }

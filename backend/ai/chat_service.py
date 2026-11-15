@@ -31,6 +31,7 @@ from .agent.tool_registry import ToolRegistry
 LIVE_BOOK_ID = ledger_service.LIVE_BOOK_ID
 MAX_HISTORY_MESSAGES = 24
 MAX_TOOL_ROUNDS = 5
+TOOL_ROUND_LIMIT_ANSWER = "我已经查询到部分信息，但本轮工具调用次数达到上限。你可以把问题拆成更具体的一步再问我。"
 MAX_BULK_RECLASSIFY = 50
 ALLOWED_CHAT_ACTIONS = {
     "create_category_rule",
@@ -54,6 +55,11 @@ class ChatConversationCreateIn(BaseModel):
 class ChatMessageIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(min_length=1, max_length=4000)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatSuggestionsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     context: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -162,6 +168,26 @@ def _latest_month(conn) -> str | None:
     return str(row["month"]) if row and row["month"] else None
 
 
+async def get_suggested_questions(conversation_id: str, context: dict | None = None) -> dict:
+    from .chat_suggestions import suggest_questions
+
+    safe_context = _safe_context(context)
+    conn = db.get_conn()
+    try:
+        if not conn.execute("SELECT 1 FROM ai_chat_conversations WHERE id=?", (conversation_id,)).fetchone():
+            raise AIChatError("没有找到这段对话。", 404)
+        recent = [row["content"] for row in conn.execute(
+            "SELECT content FROM ai_chat_messages WHERE conversation_id=? AND role='user' ORDER BY id DESC LIMIT 3",
+            (conversation_id,),
+        )]
+        period = safe_context.get("date") or safe_context.get("period") or ""
+        explicit_month = re.match(r"^(20\d{2}-(?:0[1-9]|1[0-2]))(?:$|-\d{2}$)", period)
+        month = explicit_month[1] if explicit_month else _latest_month(conn)
+    finally:
+        conn.close()
+    return await suggest_questions(safe_context, month, recent)
+
+
 def _tool_financial_overview(args: dict) -> dict:
     conn = db.get_conn()
     try:
@@ -195,23 +221,25 @@ def _tool_financial_overview(args: dict) -> dict:
         conn.close()
 
 
-def _tool_category_breakdown(args: dict) -> dict:
+def _tool_category_breakdown(args: dict, *, excluded_month: str | None = None, limit: int = 30) -> dict:
     direction = str(args.get("direction") or "支出")
     if direction not in {"支出", "收入"}:
         raise AIChatError("direction 只能是支出或收入。")
     conn = db.get_conn()
     try:
-        month = str(args.get("month") or _latest_month(conn) or "")
+        month = str(excluded_month or args.get("month") or _latest_month(conn) or date.today().strftime("%Y-%m"))
         if not re.fullmatch(r"\d{4}-\d{2}", month):
             raise AIChatError("月份格式应为 YYYY-MM。")
+        month_filter = "month<>?" if excluded_month else "month=?"
         rows = conn.execute(
             "SELECT COALESCE(category,'其他') AS category,COALESCE(subcat,'') AS subcat,"
             "ROUND(SUM(amount),2) AS amount,COUNT(*) AS count "
-            "FROM v_tx_counted WHERE month=? AND direction=? "
-            "GROUP BY category,subcat ORDER BY amount DESC LIMIT 30",
-            (month, direction),
+            f"FROM v_tx_counted WHERE {month_filter} AND direction=? "
+            "GROUP BY category,subcat ORDER BY amount DESC LIMIT ?",
+            (month, direction, limit),
         ).fetchall()
-        return {"has_data": bool(rows), "month": month, "direction": direction, "categories": [dict(row) for row in rows]}
+        return {"has_data": bool(rows), "month": month, "direction": direction,
+                "categories": [dict(row) for row in rows], **({"excluded_month": month} if excluded_month else {})}
     finally:
         conn.close()
 
@@ -1349,6 +1377,8 @@ def _infer_month_direction(message: str) -> str:
 def _is_month_total_question(message: str) -> bool:
     """Recognize simple monthly totals that should be answered deterministically."""
     text = str(message or "")
+    if any(token in text for token in ("分类", "类别", "除了", "排除", "不含", "不算")):
+        return False
     if any(token in text for token in (
         "修改", "调整", "重新分类", "新增", "添加", "补记", "记一笔",
         "删除", "撤销", "确认应用", "保存规则", "记住规则",
@@ -1442,7 +1472,7 @@ def _is_category_breakdown_question(message: str) -> bool:
     has_list_intent = any(token in text for token in (
         "有哪些", "都有哪些", "哪些类别", "哪些分类", "什么类别", "分类构成", "类别构成",
         "分类分布", "类别分布", "分类占比", "各类支出", "各类别支出", "集中在哪些类别",
-        "几种", "多少种", "几类", "多少类",
+        "几种", "多少种", "几类", "多少类", "主要是", "主要分在", "占多少",
     ))
     return has_category and has_list_intent and not _is_trend_question(text)
 
@@ -1570,6 +1600,47 @@ def _resolve_comparison_months(
 
 
 
+_LATEST_BILLING_MONTH = ("最近有账单的月份", "最近有流水的月份", "最近有数据的月份")
+_MONTH_EXCLUSION = re.compile(r"^(?:除了|排除|不含|不算)\s*([^，,]+?月)(?:份)?(?:以外|之外)?\s*[，,]?\s*(.+)$")
+_MONTH_EXCLUSION_FOLLOWUP = re.compile(
+    r"^(?:除了|排除|不含|不算)\s*(?:这(?:一|个)?月|该月|那(?:一|个)?月|上面那个(?:月|月份))"
+    r"(?:份|以外|之外)?[。？?！!，,\s]*$"
+)
+
+
+def _category_month_exclusion_answer(month: str, direction: str) -> str:
+    directions = ("支出", "收入") if direction == "全部" else (direction,)
+    return "\n\n".join(
+        _format_category_breakdown_answer(_tool_category_breakdown(
+            {"direction": item}, excluded_month=month, limit=-1,
+        )) for item in directions
+    )
+
+
+def _resolve_category_exclusion_followup(history: list[dict[str, Any]]) -> str | None:
+    # Read the scope shown in the immediately preceding category result. The prior
+    # user's wording may not name a month, and the current page can have changed.
+    if len(history) >= 2 and history[-2]["role"] == "user" and history[-1]["role"] == "assistant":
+        previous_question = history[-2]["content"]
+        if _is_category_breakdown_question(previous_question) and not _MONTH_EXCLUSION.match(previous_question):
+            answer = history[-1]["content"]
+            displayed = re.match(r"^### (20\d{2}-(?:0[1-9]|1[0-2])) (支出|收入)分类概览(?:\r?\n|$)", answer)
+            if displayed:
+                month, direction = displayed.groups()
+                if direction == "支出" and f"\n### {month} 收入分类概览\n" in answer:
+                    direction = "全部"
+                return _category_month_exclusion_answer(month, direction)
+    return None
+
+
+def _latest_billing_month() -> str:
+    conn = db.get_conn()
+    try:
+        return _latest_month(conn) or date.today().strftime("%Y-%m")
+    finally:
+        conn.close()
+
+
 def _resolve_history_month(
     history: list[dict[str, Any]], current_message: str, context: dict[str, str]
 ) -> str | None:
@@ -1579,7 +1650,7 @@ def _resolve_history_month(
         return None
     if any(token in text for token in ("本月", "这个月", "当月", "上月", "上个月", "下月", "下个月")):
         return None
-    if not (_is_category_detail_question(text) or any(
+    if not (_is_category_detail_question(text) or _is_category_breakdown_question(text) or any(
         token in text for token in ("那", "这个", "刚才", "前面", "它", "呢")
     )):
         return None
@@ -1590,9 +1661,13 @@ def _resolve_history_month(
             continue
         previous = str(item.get("content") or "")
         user_turns += 1
+        if _MONTH_EXCLUSION.match(previous):
+            break
         month = _resolve_month_for_message(previous, context)
         if month:
             return month
+        if any(phrase in previous for phrase in _LATEST_BILLING_MONTH):
+            return _latest_billing_month()
         if user_turns >= 4:
             break
     return None
@@ -1606,6 +1681,8 @@ def _resolve_message_month(
     explicit = _resolve_month_for_message(message, context)
     if explicit:
         return explicit
+    if any(phrase in message for phrase in _LATEST_BILLING_MONTH):
+        return _latest_billing_month()
     if any(token in message for token in (
         "今年", "去年", "明年", "全年", "年度", "季度",
         "最近三个月", "近三个月", "过去三个月", "最近几个月", "近几个月",
@@ -1684,31 +1761,33 @@ def _format_category_breakdown_answer(snapshot: dict[str, Any]) -> str:
     month = str(snapshot.get("month") or "")
     direction = str(snapshot.get("direction") or "支出")
     categories = snapshot.get("categories") or []
-    lines = [f"### {month} {direction}分类概览"]
+    scope = f"账本已有月份（不含 {month}）" if snapshot.get("excluded_month") else month
+    lines = [f"### {scope} {direction}分类概览"]
     if not categories:
-        lines.append(f"当前账本在 {month} 没有可统计的{direction}分类记录。")
+        lines.append(f"当前账本在此范围内没有可统计的{direction}分类记录。")
         return "\n".join(lines)
     top_level_categories = list(dict.fromkeys(
         str(item.get("category") or "其他") for item in categories
     ))
     lines.extend([
         "",
-        f"- **共 {len(top_level_categories)} 个支出大类**：{'、'.join(top_level_categories)}",
+        f"- **共 {len(top_level_categories)} 个{direction}大类**：{'、'.join(top_level_categories)}",
         "",
-        "| 分类 | 金额 | 笔数 |",
-        "|---|---:|---:|",
+        "| 分类 | 金额 | 笔数 | 占比 |",
+        "|---|---:|---:|---:|",
     ])
-    total = 0.0
-    count = 0
-    for item in categories:
+    total = sum(float(item.get("amount") or 0) for item in categories)
+    count = sum(int(item.get("count") or 0) for item in categories)
+    for item in categories[:30]:
         category = str(item.get("category") or "其他")
         subcat = str(item.get("subcat") or "")
         label = f"{category} / {subcat}" if subcat else category
         amount = float(item.get("amount") or 0)
         n = int(item.get("count") or 0)
-        total += amount
-        count += n
-        lines.append(f"| {label} | ¥{amount:.2f} | {n} |")
+        share = amount / total * 100 if total else 0
+        lines.append(f"| {label} | ¥{amount:.2f} | {n} | {share:.1f}% |")
+    if len(categories) > 30:
+        lines.extend(["", "表格显示金额最高的 30 个分类，合计和占比按全部分类计算。"])
     lines.extend([
         "",
         f"- **合计：¥{total:.2f}，共 {count} 笔**",
@@ -2074,7 +2153,7 @@ def _route_category_breakdown_question(
     """Serve explicit category-list questions from the local monthly category aggregate."""
     if not _is_category_breakdown_question(message):
         return None
-    if (
+    if not context.get("_resolved_month") and (
         _has_period_wide_scope(message, context)
         and not _resolve_month_for_message(message, context)
         and not any(token in message for token in (
@@ -2086,15 +2165,15 @@ def _route_category_breakdown_question(
     has_income = any(token in message for token in ("收入", "进账", "入账"))
     has_expense = any(token in message for token in ("支出", "消费", "花费", "开销"))
     if has_income and has_expense:
-        expense = _tool_category_breakdown({"month": month, "direction": "支出"})
-        income = _tool_category_breakdown({"month": month, "direction": "收入"})
+        expense = _tool_category_breakdown({"month": month, "direction": "支出"}, limit=-1)
+        income = _tool_category_breakdown({"month": month, "direction": "收入"}, limit=-1)
         return (
             _format_category_breakdown_answer(expense)
             + "\n\n"
             + _format_category_breakdown_answer(income)
         )
     direction = "收入" if has_income else "支出"
-    snapshot = _tool_category_breakdown({"month": month, "direction": direction})
+    snapshot = _tool_category_breakdown({"month": month, "direction": direction}, limit=-1)
     return _format_category_breakdown_answer(snapshot)
 
 
@@ -2960,7 +3039,7 @@ def _is_transaction_detail_question(message: str) -> bool:
 
 def _is_pending_classification_question(message: str) -> bool:
     text = str(message or "")
-    return any(token in text for token in (
+    return ("需要确认" in text and "分类" in text) or any(token in text for token in (
         "待分类", "未分类", "尚未确认", "历史分类", "历史学习建议",
         "分类建议", "逐笔提问", "还有哪些未处理",
     ))
@@ -3492,7 +3571,7 @@ async def _run_openai_chat(config, messages: list[dict], conversation_id: str, s
         expected_tools = _expected_evidence_tool_names(user_message)
         if not expected_tools.intersection(successful_tool_names):
             return _unverified_financial_fallback(), created_actions
-    return "我已经查询到部分信息，但本轮工具调用次数达到上限。你可以把问题拆成更具体的一步再问我。", created_actions
+    return TOOL_ROUND_LIMIT_ANSWER, created_actions
 
 
 async def _run_anthropic_chat(config, messages: list[dict], conversation_id: str, system: str,
@@ -3594,7 +3673,7 @@ async def _run_anthropic_chat(config, messages: list[dict], conversation_id: str
         expected_tools = _expected_evidence_tool_names(user_message)
         if not expected_tools.intersection(successful_tool_names):
             return _unverified_financial_fallback(), created_actions
-    return "我已经查询到部分信息，但本轮工具调用次数达到上限。你可以把问题拆成更具体的一步再问我。", created_actions
+    return TOOL_ROUND_LIMIT_ANSWER, created_actions
 
 
 _AGENT_RUNTIME: AgentRuntime | None = None
@@ -3782,6 +3861,72 @@ def _conversation_result(conversation_id: str, answer: str) -> dict:
 
 
 
+def _local_chat_reply(conversation_id: str, message: str, answer: str) -> dict:
+    _store_user_message(conversation_id, message)
+    _store_assistant_message(conversation_id, answer)
+    return _conversation_result(conversation_id, answer)
+
+
+def _wait_for_chat_detail(conversation_id: str, goal: str, question: str, **context: Any) -> None:
+    task = TASK_STORE.create_or_resume(conversation_id, goal, context)
+    TASK_STORE.update_task(
+        task["id"], status="waiting_for_user", phase="waiting_for_user", goal=goal[:500],
+        clarification_question=question, progress_message="等你补充后继续。",
+    )
+
+
+_MONTH_ONLY_REPLY = re.compile(
+    r"(?:(?:就看|就|看)\s*)?(?:(?:20\d{2}\s*[-/.]\s*(?:1[0-2]|0?[1-9]))|"
+    r"(?:(?:20\d{2}\s*年|今年|去年|明年)?\s*"
+    r"(?:1[0-2]|0?[1-9]|十二|十一|十|[一二三四五六七八九])\s*月(?:份)?)|"
+    r"本月|这个月|上个月|上月|下个月|下月)[。！？?\s]*"
+)
+
+
+def _resume_local_clarification(
+    conversation_id: str, task: dict, message: str, page_context: dict[str, str],
+) -> dict | None:
+    state = json.loads(task.get("context_json") or "{}")
+    clarification = state.get("local_clarification")
+    if clarification not in {"exclude_month", "exclude_direction", "category_month"}:
+        return None
+    if message.strip("。？！!? ") in {"不清楚", "不知道", "没想好", "不确定", "随便", "你决定"}:
+        return _local_chat_reply(conversation_id, message, task["clarification_question"])
+
+    if clarification == "exclude_direction":
+        directions = {"支出": "支出", "支出分类": "支出", "收入": "收入", "收入分类": "收入",
+                      "收支": "全部", "收支分类": "全部", "都看": "全部", "两者都看": "全部"}
+        direction = directions.get(re.sub(r"^(?:看|只看|查)", "", message).strip("。？！!? "))
+        if not direction:
+            if _MONTH_ONLY_REPLY.fullmatch(message):
+                month = _resolve_month_for_message(message, page_context)
+                if month:
+                    _wait_for_chat_detail(conversation_id, task["goal"], task["clarification_question"],
+                                          local_clarification="exclude_direction", excluded_month=month)
+                    return _local_chat_reply(conversation_id, message, task["clarification_question"])
+            return None
+        answer = _category_month_exclusion_answer(state["excluded_month"], direction)
+    else:
+        if not _MONTH_ONLY_REPLY.fullmatch(message):
+            if re.fullmatch(r"\s*(?:20\d{2}\s*年\s*)?\d{1,2}\s*月(?:份)?[。！？?\s]*", message):
+                return _local_chat_reply(conversation_id, message, "请给我一个有效月份，例如「10月」或「2026年10月」。")
+            return None
+        month = _resolve_month_for_message(message, page_context)
+        if not month:
+            return None
+        if clarification == "exclude_month":
+            question = "排除这个月后，你想看支出分类、收入分类，还是两者都看？"
+            _wait_for_chat_detail(conversation_id, task["goal"], question,
+                                  local_clarification="exclude_direction", excluded_month=month)
+            return _local_chat_reply(conversation_id, message, question)
+        answer = _route_category_breakdown_question(task["goal"], {**page_context, "_resolved_month": month})
+        if answer is None:
+            return None
+    TASK_STORE.update_task(task["id"], status="completed", phase="completed",
+                           clarification_question=None, progress_message="已按补充条件完成查询。")
+    return _local_chat_reply(conversation_id, message, answer)
+
+
 def _should_use_agent_after_fast_paths(message: str, already_selected: bool = False) -> bool:
     """Keep explicit mutations in the Agent while preserving simple one-step reads.
 
@@ -3803,6 +3948,47 @@ async def send_message(conversation_id: str, content: str, context: dict | None 
     safe_context = _safe_context(context)
     # Read prior turns before routing so short follow-ups can inherit the active month.
     prior = get_conversation(conversation_id)["messages"]
+    latest = TASK_STORE.latest(conversation_id)
+    waiting = latest if latest and latest["status"] == "waiting_for_user" else None
+    selected_goal = False
+    if waiting:
+        if message.rstrip("。！？!? ") in {"算了", "取消", "不查了", "先不查了", "换个问题"}:
+            TASK_STORE.update_task(waiting["id"], status="completed", phase="completed",
+                                   clarification_question=None, progress_message="已结束本次查询。")
+            return _local_chat_reply(conversation_id, message, "好，这个问题先到这里。你想查什么，可以直接问我。")
+        resumed = _resume_local_clarification(conversation_id, waiting, message, safe_context)
+        if resumed is not None:
+            return resumed
+        selected_goal = json.loads(waiting.get("context_json") or "{}").get("local_clarification") == "choose_goal"
+    elif not prior and re.fullmatch(
+        r"(?:帮我|给我|请)?\s*(?:分析|看看|总结|查查)(?:一下|下)?[。！？?\s]*", message,
+    ):
+        question = "你想先看哪一项？例如「10月收支」「餐饮支出」或「有没有疑似重复扣款」。"
+        _wait_for_chat_detail(conversation_id, message, question,
+                              page_context=safe_context, local_clarification="choose_goal")
+        return _local_chat_reply(conversation_id, message, question)
+    is_write_request = _is_mutating_financial_request(message)
+    local_answer = None
+    if (not is_write_request and _is_pending_classification_question(message)
+            and not _is_trend_question(message) and not any(word in message for word in ("为什么", "原因", "如何", "怎么"))):
+        local_answer = _format_pending_history_answer(_tool_pending_history_classifications({}))
+    # An excluded month must never become the month being queried.
+    exclusion = _MONTH_EXCLUSION.match(message)
+    if _MONTH_EXCLUSION_FOLLOWUP.fullmatch(message):
+        local_answer = _resolve_category_exclusion_followup(prior)
+        if local_answer is None:
+            question = "你想排除哪个月份？直接告诉我月份就行，例如「11月」。"
+            _wait_for_chat_detail(conversation_id, message, question, local_clarification="exclude_month")
+            return _local_chat_reply(conversation_id, message, question)
+    elif not is_write_request and exclusion and _is_category_breakdown_question(exclusion[2]):
+        excluded = _resolve_month_for_message(exclusion[1], safe_context)
+        if excluded:
+            local_answer = _category_month_exclusion_answer(excluded, _infer_month_direction(exclusion[2]))
+    if local_answer is not None:
+        if waiting:
+            TASK_STORE.update_task(waiting["id"], status="completed", phase="completed", clarification_question=None)
+        return _local_chat_reply(conversation_id, message, local_answer)
+
     resolved_date = _resolve_date_for_message(message, safe_context)
     period_wide = _has_period_wide_scope(message, safe_context)
     is_trend = _is_trend_question(message)
@@ -3811,6 +3997,10 @@ async def send_message(conversation_id: str, content: str, context: dict | None 
         resolved_month, resolved_compare_month = _resolve_comparison_months(message, safe_context)
     else:
         resolved_month = _resolve_message_month(message, safe_context, prior)
+        if (not period_wide and not resolved_date and not safe_context.get("period")
+                and _is_category_breakdown_question(message)
+                and not _resolve_history_month(prior, message, safe_context)):
+            resolved_month = _latest_billing_month()
         resolved_compare_month = None
 
     tool_context: dict[str, str] = dict(safe_context)
@@ -3867,7 +4057,39 @@ async def send_message(conversation_id: str, content: str, context: dict | None 
         for filter_key in ("category", "subcat", "pay_method"):
             tool_context[f"_resolved_{filter_key}"] = safe_context.get(filter_key) or "__all__"
 
-    use_agent_runtime = _should_use_agent_runtime(message, prior, conversation_id)
+    if selected_goal and not is_write_request and _resolve_month_for_message(message, safe_context):
+        local_answer = (_route_category_breakdown_question(message, tool_context)
+                        or _route_month_total_question(message, tool_context))
+        if local_answer is not None:
+            TASK_STORE.update_task(waiting["id"], status="completed", phase="completed", clarification_question=None)
+            return _local_chat_reply(conversation_id, message, local_answer)
+    use_agent_runtime = bool(waiting) or _should_use_agent_runtime(message, prior, conversation_id)
+    if (not waiting and not is_write_request and _is_category_breakdown_question(message)
+            and tool_context.get("_unresolved_period_scope") == "true"):
+        question = "分类概览可以按月查看。你想先看哪个月份？例如「10月」。"
+        _wait_for_chat_detail(conversation_id, message, question, local_clarification="category_month")
+        return _local_chat_reply(conversation_id, message, question)
+    if waiting and not _resolve_month_for_message(message, safe_context):
+        # Do not apply a calendar/page fallback over the paused query's scope.
+        saved_scope = json.loads(waiting.get("context_json") or "{}").get("page_context") or {}
+        saved_month = saved_scope.get("_resolved_month")
+        if saved_month and not period_wide and not is_trend:
+            tool_context["_resolved_month"] = saved_month
+        else:
+            tool_context.pop("_resolved_month", None)
+    # Narrow follow-ups after a scoped query need only a local category total.
+    # Keep richer follow-ups (明细、为什么、对比) on their existing routes.
+    short_category = re.fullmatch(r"(?:(?:那如果只看|如果只看|只看|那么|那)\s*([\u4e00-\u9fff]{2,12}?)(?:呢)?|([\u4e00-\u9fff]{2,12}?)呢)[？?]?", message)
+    if short_category and resolved_month and not is_write_request and not waiting:
+        historical = _resolve_history_month(prior, message, safe_context)
+        subject = short_category[1] or short_category[2]
+        keyword = _match_category_keyword(subject) if historical else None
+        if keyword and subject in keyword:
+            snapshot = _query_category_transactions(message, tool_context, keyword)
+            answer = _format_category_summary_answer(snapshot)
+            _store_user_message(conversation_id, message)
+            _store_assistant_message(conversation_id, answer)
+            return _conversation_result(conversation_id, answer)
     if not use_agent_runtime:
         # Broad recent-habit analysis uses a rolling window anchored to the latest
         # transaction date in the ledger, not the current calendar month or page date.
@@ -3966,6 +4188,7 @@ async def send_message(conversation_id: str, content: str, context: dict | None 
             + resolved_date
             + "。如果工具被调用，必须使用此日期；不能使用模型记忆中的其他日期。"
         )
+    created_actions = []
     try:
         if use_agent_runtime:
             answer, _actions = await _get_agent_runtime().run(
@@ -3974,15 +4197,17 @@ async def send_message(conversation_id: str, content: str, context: dict | None 
                 user_message=message,
                 history=messages,
                 context=tool_context,
-                requires_evidence=_is_financial_fact_question(message),
+                requires_evidence=_is_financial_fact_question(message) or bool(
+                    waiting and _is_financial_fact_question(waiting["goal"])
+                ),
                 allow_proposals=_is_mutating_financial_request(message),
             )
         elif config.provider == "anthropic":
-            answer, _actions = await _run_anthropic_chat(
+            answer, created_actions = await _run_anthropic_chat(
                 config, messages, conversation_id, system, tool_context
             )
         else:
-            answer, _actions = await _run_openai_chat(
+            answer, created_actions = await _run_openai_chat(
                 config, messages, conversation_id, system, tool_context
             )
     except AIProviderError:
@@ -3992,6 +4217,9 @@ async def send_message(conversation_id: str, content: str, context: dict | None 
     except httpx.HTTPError as exc:
         raise AIProviderError("无法连接模型服务，请检查 Base URL 和网络。") from exc
 
+    if answer == TOOL_ROUND_LIMIT_ANSWER and not created_actions:
+        answer = "我还没确定你想看的结果。你想看金额汇总、分类分布，还是逐笔交易？"
+        _wait_for_chat_detail(conversation_id, message, answer, page_context=tool_context, local_clarification=None)
     _store_assistant_message(conversation_id, answer)
     return _conversation_result(conversation_id, answer)
 

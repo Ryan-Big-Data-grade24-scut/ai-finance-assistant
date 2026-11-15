@@ -535,6 +535,14 @@ async def send_ai_chat_message(conversation_id: str, data: ai_chat.ChatMessageIn
         raise HTTPException(status, str(exc)) from exc
 
 
+@app.post("/api/ai/chat/conversations/{conversation_id}/suggestions")
+async def get_ai_chat_suggestions(conversation_id: str, data: ai_chat.ChatSuggestionsIn):
+    try:
+        return await ai_chat.get_suggested_questions(conversation_id, data.context)
+    except ai_chat.AIChatError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
 @app.post("/api/ai/chat/conversations/{conversation_id}/actions/{action_id}/confirm")
 def confirm_ai_chat_action(conversation_id: str, action_id: str):
     try:

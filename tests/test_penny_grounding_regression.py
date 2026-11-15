@@ -54,6 +54,76 @@ def _october_context():
     }
 
 
+def test_quick_questions_and_short_followup_use_the_requested_scope(penny_grounding_db, monkeypatch):
+    _seed_grounded_rows()
+    monkeypatch.setattr(chat_service, "get_secret_config", lambda: None)
+    conversation = chat_service.create_conversation()["id"]
+
+    def ask(text, context=None):
+        return asyncio.run(chat_service.send_message(conversation, text, context))["assistant_message"]
+
+    assert "2026-10 月度收支统计" in ask(
+        "最近有账单的月份收入和支出各是多少？", {"period": "2026-11"}
+    )
+    followup = ask("那运动呢？", {"period": "2026-11"})
+    assert "2026-10" in followup and "¥20.00" in followup
+    overview = ask("我的支出主要分在哪些类别？")
+    assert "2026-10 支出分类概览" in overview and "占比" in overview
+    pending = ask("还有哪些历史交易需要确认 AI 分类？")
+    assert "历史学习分析" in pending and "支出分类概览" not in pending
+    excluded = ask("除了2026年11月，我的支出类别主要是")
+    assert "不含 2026-11" in excluded and "运动健身" in excluded
+    assert "2026-11 月度收支统计" in ask("2026年11月支出多少？")
+
+
+def test_excluding_this_month_uses_the_month_shown_in_the_previous_answer(penny_grounding_db, monkeypatch):
+    _seed_grounded_rows()
+    monkeypatch.setattr(chat_service, "get_secret_config", lambda: None)
+    conversation = chat_service.create_conversation()["id"]
+    previous = asyncio.run(chat_service.send_message(
+        conversation, "我的支出主要分在哪些类别？", {"period": "2026-11"},
+    ))["assistant_message"]
+    assert previous.startswith("### 2026-11 支出分类概览")
+
+    result = asyncio.run(chat_service.send_message(
+        conversation, "除了这一月", {"period": "2026-10"},
+    ))["assistant_message"]
+    assert result.startswith("### 账本已有月份（不含 2026-11） 支出分类概览")
+    assert "运动健身" in result
+
+    fresh = chat_service.create_conversation()["id"]
+    unclear = asyncio.run(chat_service.send_message(fresh, "除了这一月"))["assistant_message"]
+    assert "你想排除哪个月份" in unclear
+
+
+def test_local_clarifications_resume_after_short_replies(penny_grounding_db, monkeypatch):
+    _seed_grounded_rows()
+    monkeypatch.setattr(chat_service, "get_secret_config", lambda: None)
+    conversation = chat_service.create_conversation()["id"]
+
+    def ask(text):
+        return asyncio.run(chat_service.send_message(conversation, text))
+
+    first = ask("除了这一月")
+    assert first["agent_task"]["status"] == "waiting_for_user"
+    second = ask("2026-11")
+    assert second["agent_task"]["id"] == first["agent_task"]["id"]
+    assert "支出分类、收入分类" in second["assistant_message"]
+    result = ask("支出分类")
+    assert result["agent_task"]["status"] == "completed"
+    assert "不含 2026-11" in result["assistant_message"]
+    assert "运动健身" in result["assistant_message"]
+
+    assert "哪个月份" in ask("今年支出分类有哪些？")["assistant_message"]
+    assert "2026-10 支出分类概览" in ask("2026年10月")["assistant_message"]
+
+    conversation = chat_service.create_conversation()["id"]
+    assert "你想先看哪一项" in ask("帮我分析一下")["assistant_message"]
+    assert "2026-10 月度收支统计" in ask("2026年10月收支")["assistant_message"]
+    ask("除了这一月")
+    assert ask("算了")["agent_task"]["status"] == "completed"
+
+
 def test_category_date_question_returns_only_matching_database_rows_and_skips_model(
     penny_grounding_db, monkeypatch
 ):

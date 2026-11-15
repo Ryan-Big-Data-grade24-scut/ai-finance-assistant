@@ -1,6 +1,7 @@
 """Single Main Agent orchestration: context -> plan -> validate -> execute -> verify -> synthesize."""
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -68,6 +69,7 @@ class AgentRuntime:
 
         task_context = {
             "page_context": context,
+            "local_clarification": None,
             "user_message_id": self.task_store.last_user_message_id(conversation_id)
             if hasattr(self.task_store, "last_user_message_id") else None,
             "inherited_constraints": assembled.get("inherited_constraints") or {},
@@ -367,14 +369,6 @@ class AgentRuntime:
                 phase="synthesizing",
                 progress_message="证据核验完成，正在整理分析结论…",
             )
-            answer, used_evidence_ids = await self.synthesizer.synthesize(
-                config,
-                user_message=user_message,
-                goal=plan.goal or user_message,
-                plan=plan.model_dump(),
-                verification=verification.model_dump(),
-            )
-
             def validate_synthesized_answer(candidate: str, evidence_ids: list[str]):
                 valid = {
                     str(item.get("evidence_id")) for item in verification.usable_results
@@ -394,23 +388,38 @@ class AgentRuntime:
                 )
                 return ok, issue, selected
 
-            answer_ok, answer_issue, selected_evidence = validate_synthesized_answer(
-                answer, used_evidence_ids
-            )
-            if not answer_ok:
-                # One bounded repair gives the model the exact verifier failure,
-                # while still restricting it to the same verified evidence set.
-                answer, used_evidence_ids = await self.synthesizer.synthesize(
-                    config,
-                    user_message=user_message,
-                    goal=plan.goal or user_message,
-                    plan=plan.model_dump(),
-                    verification=verification.model_dump(),
-                    validation_feedback=answer_issue,
-                )
-                answer_ok, answer_issue, selected_evidence = validate_synthesized_answer(
-                    answer, used_evidence_ids
-                )
+            try:
+                # Share a single time budget between synthesis and its evidence repair.
+                async with asyncio.timeout(18):
+                    answer, used_evidence_ids = await self.synthesizer.synthesize(
+                        config,
+                        user_message=user_message,
+                        goal=plan.goal or user_message,
+                        plan=plan.model_dump(),
+                        verification=verification.model_dump(),
+                    )
+                    answer_ok, answer_issue, selected_evidence = validate_synthesized_answer(
+                        answer, used_evidence_ids
+                    )
+                    if not answer_ok:
+                        # One bounded repair gives the model the exact verifier failure,
+                        # while still restricting it to the same verified evidence set.
+                        answer, used_evidence_ids = await self.synthesizer.synthesize(
+                            config,
+                            user_message=user_message,
+                            goal=plan.goal or user_message,
+                            plan=plan.model_dump(),
+                            verification=verification.model_dump(),
+                            validation_feedback=answer_issue,
+                        )
+                        answer_ok, answer_issue, selected_evidence = validate_synthesized_answer(
+                            answer, used_evidence_ids
+                        )
+            except (TimeoutError, AIProviderError):
+                if not verification.usable_results:
+                    raise AIProviderError("模型未能及时生成回答，请稍后重试。")
+                answer_ok = False
+                answer_issue = "模型未能及时整理回答，已显示核验过的数据。"
             if not answer_ok:
                 # Never drop valid query evidence solely because prose introduced
                 # an unsupported number. Return a deterministic, strictly bounded
@@ -429,7 +438,7 @@ class AgentRuntime:
                         "partial": True,
                         "synthesis_fallback": True,
                     }),
-                    progress_message="已保留可核实的部分数据，未采用缺少证据的模型结论。",
+                    progress_message=answer_issue or "已保留可核实的数据。",
                     completed_at=self._now(),
                 )
                 return answer, report.created_actions

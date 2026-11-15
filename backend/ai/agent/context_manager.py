@@ -85,6 +85,7 @@ class ContextManager:
                 "intent": latest.get("intent"),
                 "status": latest.get("status"),
                 "clarification_question": latest.get("clarification_question"),
+                "prior_query_scope": prior_context.get("page_context") or {},
                 "previous_plan": self._plan_summary(latest_plan),
                 "generation": int(latest.get("generation") or 1),
                 "checkpoint_steps": [

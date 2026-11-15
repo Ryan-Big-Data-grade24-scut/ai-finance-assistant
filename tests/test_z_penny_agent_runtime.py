@@ -656,6 +656,31 @@ def test_runtime_pauses_for_clarification_and_saves_question(agent_db):
     assert task["clarification_question"] == answer
 
 
+def test_tool_round_limit_asks_for_the_result_and_resumes_original_scope(agent_db, monkeypatch):
+    conversation_id = chat_service.create_conversation()["id"]
+    monkeypatch.setattr(chat_service, "get_secret_config", lambda: _config())
+    monkeypatch.setattr(chat_service, "_should_use_agent_runtime", lambda *_args: False)
+
+    async def limited_chat(*_args):
+        return chat_service.TOOL_ROUND_LIMIT_ANSWER, []
+
+    monkeypatch.setattr(chat_service, "_run_openai_chat", limited_chat)
+    first = asyncio.run(chat_service.send_message(conversation_id, "2026年10月哪家商户消费最多？"))
+    assert first["agent_task"]["status"] == "waiting_for_user"
+    assert "金额汇总、分类分布，还是逐笔交易" in first["assistant_message"]
+
+    class CheckingRuntime:
+        async def run(self, **kwargs):
+            assert kwargs["user_message"] == "金额汇总"
+            assert kwargs["requires_evidence"] is True
+            assert kwargs["context"]["_resolved_month"] == "2026-10"
+            return "已汇总该月的商户支出。", []
+
+    monkeypatch.setattr(chat_service, "_get_agent_runtime", lambda: CheckingRuntime())
+    second = asyncio.run(chat_service.send_message(conversation_id, "金额汇总", {"period": "2026-11"}))
+    assert second["assistant_message"] == "已汇总该月的商户支出。"
+
+
 def test_conversation_detail_exposes_public_agent_progress_only(agent_db):
     conversation = chat_service.create_conversation()
     store = AgentTaskStore()
