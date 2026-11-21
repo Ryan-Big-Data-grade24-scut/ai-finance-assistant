@@ -695,6 +695,20 @@ onMounted(() => {
         </ul>
 
         <div v-if="view === 'table'" class="l2-tree" data-testid="tree">
+          <!-- 仅展示现有状态，不改变账本数据、选择或拖拽行为 -->
+          <div class="ledger-toolbar">
+            <div class="ledger-toolbar__heading">
+              <span class="ledger-toolbar__icon" aria-hidden="true">▤</span>
+              <div class="ledger-toolbar__titles">
+                <strong>账本明细</strong>
+                <small>分类清晰，收支一目了然</small>
+              </div>
+            </div>
+            <div class="ledger-toolbar__stats">
+              <span v-if="data">{{ data.scope.tx_in_scope }} 笔交易</span>
+              <span v-if="selList.length" class="ledger-toolbar__selected">已选 {{ selList.length }} 项</span>
+            </div>
+          </div>
           <div class="thead">
             <span class="c-grip" /><span class="c-check" /><span class="c-name">命名</span>
             <span class="c-note">备注</span><span class="c-meta">分类 / 日期</span>
@@ -704,7 +718,16 @@ onMounted(() => {
             <p v-if="loading && !data" class="muted pad">加载中…</p>
             <div v-for="r in rows" :key="r.key" :ref="el => setRowEl(r.key, el)"
                  class="row"
-                 :class="[`row--${r.kind}`, { 'row--sel': selected.has(r.key), 'row--drag': dragging?.has(r.key), 'row--drop': dropTarget?.key === r.key }]"
+                 :class="[
+                   `row--${r.kind}`,
+                   {
+                     'row--root': r.kind === 'node' && r.node.kind === 'root',
+                     'row--category': r.kind === 'node' && r.node.kind === 'category',
+                     'row--sel': selected.has(r.key),
+                     'row--drag': dragging?.has(r.key),
+                     'row--drop': dropTarget?.key === r.key,
+                   },
+                 ]"
                  :data-key="r.key" :data-drop-key="r.key" :data-drop-kind="r.kind"
                  @pointerdown="itemDown($event, r.key)">
               <span class="c-grip">
@@ -1004,48 +1027,220 @@ onMounted(() => {
 .panel--hist li.undone { opacity: .5; text-decoration: line-through; }
 .panel--hist small { display: block; }
 
-/* 表格：表头固定，表体在自己内部滚 */
+/* 账本代数 V2 的视觉增强：只影响中间表格，不触碰账本计算或操作逻辑。 */
 .l2-tree {
-  flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #dce5f0;
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(32, 60, 99, .055);
 }
+.ledger-toolbar {
+  flex: none;
+  min-height: 64px;
+  padding: 12px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: linear-gradient(115deg, #ffffff 0%, #f7faff 100%);
+  border-bottom: 1px solid #e8edf5;
+}
+.ledger-toolbar__heading { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.ledger-toolbar__icon {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: #e9f2ff;
+  color: #2463ac;
+  font-size: 19px;
+  font-weight: 700;
+}
+.ledger-toolbar__titles { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ledger-toolbar__titles strong { color: #172b4d; font-size: 15px; line-height: 1.1; letter-spacing: .015em; }
+.ledger-toolbar__titles small { color: #73839a; font-size: 11px; white-space: nowrap; }
+.ledger-toolbar__stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  color: #526884;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ledger-toolbar__selected {
+  color: #255f9f;
+  border: 1px solid #bdd7f7;
+  background: #eaf3ff;
+  padding: 4px 9px;
+  border-radius: 999px;
+}
+
+/* 表头与数据行共用网格，保证金额列严格对齐。 */
 .thead, .row {
-  display: grid; align-items: center; gap: 6px;
-  grid-template-columns: 22px 22px minmax(160px, 1.4fr) minmax(90px, 1fr) 130px 88px 88px;
+  display: grid;
+  align-items: center;
+  gap: 6px;
+  grid-template-columns: 20px 24px minmax(150px, 1.45fr) minmax(80px, .9fr)
+                         minmax(118px, 1.05fr) minmax(86px, .67fr) minmax(86px, .67fr);
 }
 .thead {
-  flex: none; padding: 7px 10px; font-size: 12px; color: var(--color-muted);
-  border-bottom: 1px solid var(--color-border); background: #f7f9fc;
+  flex: none;
+  min-height: 40px;
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .02em;
+  color: #5b6c84;
+  border-bottom: 1px solid #dfe7f1;
+  background: #f1f6fd;
 }
 .tbody {
-  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  padding: 2px 0; user-select: none; scrollbar-gutter: stable;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0;
+  user-select: none;
+  scrollbar-gutter: stable;
+  scrollbar-color: #c5d2e3 transparent;
+  scrollbar-width: thin;
 }
-.row { padding: 3px 10px; font-size: 13px; border-bottom: 1px solid #f2f4f7; }
-.row:hover { background: #fafbfd; }
-.row--sel { background: #eaf2fd; }
+.row {
+  min-height: 38px;
+  padding: 7px 12px;
+  font-size: 13px;
+  color: #25354b;
+  border-bottom: 1px solid #edf1f6;
+  background: #ffffff;
+  transition: background-color .14s ease, box-shadow .14s ease;
+}
+.row--tx:nth-child(even) { background: #fcfdff; }
+.row:hover { background: #f3f8ff; }
+.row--node { font-weight: 650; background: #f7faff; }
+.row--node:not(.row--root):not(.row--category) { box-shadow: inset 3px 0 0 #b4cbed; }
+.row--root {
+  min-height: 45px;
+  color: #153e70;
+  background: linear-gradient(90deg, #e5f0ff, #f1f7ff 80%);
+  border-bottom-color: #d4e2f3;
+  box-shadow: inset 4px 0 0 #2b6eb9;
+}
+.row--root .name { font-size: 14px; font-weight: 750; }
+.row--root .c-num { font-size: 14px; font-weight: 750; }
+.row--category {
+  min-height: 41px;
+  background: #f4f8fe;
+  box-shadow: inset 3px 0 0 #91b8e9;
+}
+.row--category .name { color: #244d7d; font-weight: 700; }
+.row--group { background: #f8f7fd; box-shadow: inset 3px 0 0 #a8a0da; }
+.row--group .name { font-weight: 600; }
+.row--sel, .row--sel:hover {
+  background: #e6f1ff;
+  box-shadow: inset 3px 0 0 #337bce;
+}
 .row--drag { opacity: .45; }
-.row--drop { outline: 2px solid #1d5fa8; outline-offset: -2px; background: #dcebfb; }
-.row--node { font-weight: 600; }
+.row--drop, .row--drop:hover {
+  outline: 2px solid #256fb9;
+  outline-offset: -2px;
+  background: #d7e9fe;
+  box-shadow: inset 3px 0 0 #256fb9;
+}
 .c-grip { display: flex; justify-content: center; }
-.grip { cursor: grab; color: #98a2b3; user-select: none; padding: 0 2px; }
-.c-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.c-name .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
-.name--tx, .name--group { font-weight: 400; }
-.name--root { color: #101828; }
-.name--category { color: #376fae; }
-.c-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: 12px; }
-.c-meta { white-space: nowrap; }
-.c-num { text-align: right; font-variant-numeric: tabular-nums; }
-.e { color: var(--color-expense); }
-.i { color: var(--color-income); }
-.twisty { width: 18px; border: 0; background: none; padding: 0; text-align: center; color: var(--color-muted); }
+.grip {
+  cursor: grab;
+  color: #a4b3c8;
+  user-select: none;
+  padding: 0 2px;
+  transition: color .14s;
+}
+.row:hover .grip { color: #5f7fa9; }
+.c-check { display: flex; align-items: center; justify-content: center; }
+.c-check input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #286cb6;
+  cursor: pointer;
+}
+.c-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.c-name .name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+.name--tx { font-weight: 450; }
+.name--root { color: #183f6b; }
+.c-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #72829a;
+  font-size: 12px;
+}
+.c-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.row--node .c-meta { font-weight: 650; }
+.c-num {
+  text-align: right;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 550;
+  letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums;
+}
+.row--node .c-num, .row--group .c-num { font-weight: 700; }
+.e { color: #cf3547; }
+.i { color: #16865a; }
+.twisty {
+  width: 18px;
+  height: 22px;
+  flex: none;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  padding: 0;
+  text-align: center;
+  font-size: 15px;
+  color: #6b85a8;
+}
+button.twisty:hover:not(:disabled) { background: #e1edfc; color: #255f9f; }
 .inline-edit { width: 100%; min-width: 80px; }
-.tag { font-size: 11px; padding: 0 6px; border-radius: 6px; background: #eef2f7; color: var(--color-muted); font-weight: 400; flex: none; }
-.tag--net { background: #e3f0ff; color: #1d5fa8; font-weight: 600; }
-.tag--m { background: #fff0d9; color: #9a5b00; font-weight: 600; }
-.tag--cat { background: #e9f1fb; color: #376fae; }
-.pad { padding: 12px; }
+.tag {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  line-height: 1.3;
+  border-radius: 999px;
+  font-weight: 650;
+  letter-spacing: .02em;
+  background: #edf1f7;
+  color: #586b84;
+}
+.tag--cat { color: #245d9c; background: #e1edfb; border: 1px solid #c9ddf6; }
+.tag--net { color: #6955a6; background: #efebfc; border: 1px solid #ded5fa; }
+.tag--m { color: #946316; background: #fff1d9; border: 1px solid #f6dfb7; }
+.pad { padding: 16px; }
 
 .muted { color: var(--color-muted); font-size: var(--font-sm, 13px); }
 button {
