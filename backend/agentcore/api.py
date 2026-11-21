@@ -89,7 +89,7 @@ def _action_view(row: dict) -> dict:
 
 @router.get('/health')
 def health() -> dict:
-    return {'ok': True, **db.health_snapshot()}
+    return {'ok': True, **db.health_snapshot(), 'context': runtime.context_limits()}
 
 
 # ── 会话 ──────────────────────────────────────────────────────────────────────

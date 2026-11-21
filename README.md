@@ -67,7 +67,7 @@ AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工
 
 ### MCP 接入（给 AI 客户端用）
 
-`backend/mcp/server.py` 以 stdio 方式运行，包含报告、导入、账本和 AI 分类工作流工具（当前 27 个）。先执行服务端自检，再执行真实 stdio 客户端握手测试：
+`backend/mcp/server.py` 以 stdio 方式运行，暴露 V2 账本工具（当前 6 个）：只读流水 SQL、账本读 / 写、导入读 / 写与 `read_skill`。先执行服务端自检，再执行真实 stdio 客户端握手测试：
 
 ```powershell
 .venv\Scripts\python.exe -m backend.mcp.server --selftest
@@ -96,7 +96,7 @@ AI 个人财务助手 —— 围绕用户自己的算账逻辑打造的财务工
 }
 ```
 
-分类工具固定走“查询 → 草案 → 澄清 → 用户确认 → Ledger 落账”流程。草案可跨对话恢复；服务端会强制拦截未澄清的规则冲突。MCP 层只转发；业务逻辑集中在 `backend/classification/`，账本写入仍只能经过 Ledger 引擎。
+工具 schema 与页面共用 `backend/agentcore/registry.py`。`finance_ledger_apply` 和 `finance_import_commit` 直接执行写操作并返回回执，不生成待确认卡；账本写入仍只能经过 `backend/ledger2` 引擎。外部模型应先 `read_skill` 获取操作顺序，再按回执继续。
 
 ### 三个坑（都是实测踩出来的，别改回去）
 

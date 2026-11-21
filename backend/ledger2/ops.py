@@ -65,7 +65,7 @@ def _resolve_node(conn, tx: TxRef, *, alive_only: bool = True) -> str:
     if row:
         return row['node_id']
     if tx.role == 'mirror':
-        raise LedgerError('TX_NOT_FOUND', f'交易 {tx.tx_id} 没有分裂副本。')
+        raise LedgerError('TX_NOT_FOUND', f'交易 {tx.tx_id} 没有镜像副本。')
     raise LedgerError('TX_NOT_INITIALIZED', f'交易 {tx.tx_id} 还没有初始化，不在账本里。')
 
 
@@ -135,7 +135,7 @@ def parse_item(raw) -> str | TxRef | GroupRef:
         return TxRef(int(s[4:]), 'mirror')
     if s.startswith('g:'):
         if len(s) < 3:
-            raise LedgerError('BAD_REF', f'「{s}」不是合法的 +2 组引用。')
+            raise LedgerError('BAD_REF', f'「{s}」不是合法的净额组引用。')
         return GroupRef(s[2:])
     return s
 
@@ -217,7 +217,7 @@ def fold_for_join(conn, items: list) -> list[TxRef]:
     """加入 +2：最简折叠后必须全是交易（不能有 M / +2）。"""
     nodes, groups, txs = _fold(conn, [parse_item(i) for i in items])
     if nodes or groups:
-        raise LedgerError('JOIN_REQUIRES_TX', '加入 +2 只能选交易（t / t′），不能有 M 或 +2。')
+        raise LedgerError('JOIN_REQUIRES_TX', '加入净额组只能选交易（原始交易或镜像交易），不能有分组或净额组。')
     if not txs:
         raise LedgerError('EMPTY_SELECTION', '没有可以加入的交易。')
     return txs
@@ -269,6 +269,29 @@ def expand_selection(conn, items: list):
     return nodes, groups, txs
 
 
+def dissolve_selection(conn, items: list):
+    """解散的选择：只取明确选中的 M / +2，不展开子树。
+
+    解散一个 M 的含义是「拆掉这一层，把直接内容上移到父节点」；子节点是
+    被保留的内容，不是被解散对象。以前这里复用最繁展开，选中 M1 会把未选中
+    的 M11、M111 一起拆掉。显式同时选中父子时，仍交给 dissolve() 按深度处理。
+    """
+    nodes: list[str] = []
+    groups: list[str] = []
+    for item in items:
+        p = parse_item(item)
+        if isinstance(p, str):
+            _node(conn, p)                              # 不存在的节点直接报错
+            if p not in nodes:
+                nodes.append(p)
+        elif isinstance(p, GroupRef):
+            _group(conn, p.id)
+            if p.id not in groups:
+                groups.append(p.id)
+        # 交易引用（t / t′）不是解散对象；只选交易时由 dissolve() 报 NOTHING_TO_DISSOLVE。
+    return nodes, groups
+
+
 def split_candidates(conn, keys) -> list[int]:
     """分裂：从最繁展开的交易引用里筛出「还没分裂的原始 t」。
 
@@ -285,7 +308,7 @@ def split_candidates(conn, keys) -> list[int]:
             continue
         ids.append(tx_id)
     if not ids:
-        raise LedgerError('NOTHING_TO_SPLIT', '选中的对象里没有可以分裂的原始交易（t′ 和已分裂过的会被跳过）。')
+        raise LedgerError('NOTHING_TO_SPLIT', '选中的对象里没有可以生成镜像的原始交易（镜像交易和已经生成过镜像的会被跳过）。')
     return ids
 
 
@@ -295,7 +318,7 @@ def split_sources(conn, keys) -> list[int]:
     hits = [tx_id for tx_id in sorted(ids)
             if conn.execute('SELECT 1 FROM ledger2_split_tx WHERE src_tx_id=?', (tx_id,)).fetchone()]
     if not hits:
-        raise LedgerError('NOTHING_TO_UNSPLIT', '选中的对象里没有已分裂的交易。')
+        raise LedgerError('NOTHING_TO_UNSPLIT', '选中的对象里没有已生成镜像的交易。')
     return hits
 
 
@@ -562,7 +585,7 @@ def dissolve(conn, node_ids, group_ids) -> None:
     nodes = list(dict.fromkeys(str(n) for n in node_ids))
     gids = list(dict.fromkeys(str(g) for g in group_ids))
     if not nodes and not gids:
-        raise LedgerError('NOTHING_TO_DISSOLVE', '选中的对象里没有可解散的 M 或 +2。')
+        raise LedgerError('NOTHING_TO_DISSOLVE', '选中的对象里没有可解散的分组或净额组。')
     D = set(nodes)
     originals: dict[str, dict] = {}
     for n in nodes:
@@ -645,7 +668,7 @@ def create_net_group(conn, items: list, name: str | None = None, note: str = '')
         if p.key not in {t.key for t in txs}:
             txs.append(p)
     if len(txs) < 2:
-        raise LedgerError('GROUP_TOO_SMALL', '一个 +2 组至少要有 2 个成员。')
+        raise LedgerError('GROUP_TOO_SMALL', '一个净额组至少要有 2 个成员。')
 
     by_node: dict[str, list[str]] = {}
     for t in txs:
@@ -656,7 +679,7 @@ def create_net_group(conn, items: list, name: str | None = None, note: str = '')
         detail = {'按父节点': {_node_name(conn, n): m for n, m in by_node.items()}}
         raise LedgerError(
             'SAME_PARENT_REQUIRED',
-            '不能跨分组建立 +2 关系：' + '；'.join(
+            '不能跨分组建立净额关系：' + '；'.join(
                 f'「{_node_name(conn, n)}」下有 {"、".join(m)}' for n, m in by_node.items()
             ),
             detail,
@@ -800,11 +823,11 @@ def split_txs(conn, tx_ids: list[int], op_name: str = 'split') -> list[int]:
     """
     ids = list(dict.fromkeys(int(i) for i in tx_ids))
     if not ids:
-        raise LedgerError('EMPTY_SELECTION', '没有可以分裂的交易。')
+        raise LedgerError('EMPTY_SELECTION', '没有可以生成镜像的交易。')
     prims: list[dict] = []
     for tx_id in ids:
         if conn.execute('SELECT 1 FROM ledger2_split_tx WHERE src_tx_id=?', (tx_id,)).fetchone():
-            raise LedgerError('ALREADY_SPLIT', f'交易 {tx_id} 已经分裂过了。')
+            raise LedgerError('ALREADY_SPLIT', f'交易 {tx_id} 已经生成过镜像了。')
         node = _resolve_node(conn, TxRef(tx_id, 'primary'))
         prims.append({'op': 'split_add', 'src_tx_id': tx_id})
         prims.append({'op': 'tx_place', 'tx_id': tx_id, 'role': 'mirror', 'node_id': node, 'group_id': None,
@@ -823,7 +846,7 @@ def split_tx(conn, tx_id: int, node_id: str | None = None) -> list[int]:
     """
     exists = conn.execute('SELECT 1 FROM ledger2_split_tx WHERE src_tx_id=?', (tx_id,)).fetchone()
     if exists:
-        raise LedgerError('ALREADY_SPLIT', '这笔交易已经分裂过了。')
+        raise LedgerError('ALREADY_SPLIT', '这笔交易已经生成过镜像了。')
     src = TxRef(int(tx_id), 'primary')
     node = _resolve_node(conn, src)             # 不存在 / 已删除 / 未初始化 → 报错
     if node_id is not None:
@@ -842,12 +865,12 @@ def unsplit_txs(conn, tx_ids: list[int], op_name: str = 'unsplit') -> list[int]:
     """
     ids = list(dict.fromkeys(int(i) for i in tx_ids))
     if not ids:
-        raise LedgerError('EMPTY_SELECTION', '没有可以取消分裂的交易。')
+        raise LedgerError('EMPTY_SELECTION', '没有可以取消镜像的交易。')
     removed: set[tuple[int, str]] = set()
     prims: list[dict] = []
     for tx_id in ids:
         if not conn.execute('SELECT 1 FROM ledger2_split_tx WHERE src_tx_id=?', (tx_id,)).fetchone():
-            raise LedgerError('NOT_SPLIT', f'交易 {tx_id} 当前没有分裂。')
+            raise LedgerError('NOT_SPLIT', f'交易 {tx_id} 当前没有镜像。')
         mirror = TxRef(tx_id, 'mirror')
         removed.add(mirror.key)
         p = _prim_tx_unplace(conn, mirror)
@@ -990,11 +1013,11 @@ def init_txs(conn, tx_ids: list, op: dict | None = None) -> dict:
     for spec in op.get('splits') or []:
         t = int(spec['tx'])
         if t not in id_set:
-            raise LedgerError('NOT_IN_INIT_SET', f'分裂里的交易 {t} 不在这次要初始化的列表里。', {'tx_id': t})
+            raise LedgerError('NOT_IN_INIT_SET', f'生成镜像里的交易 {t} 不在这次要初始化的列表里。', {'tx_id': t})
         if t in split_ids:
-            raise LedgerError('ALREADY_SPLIT', f'交易 {t} 被分裂了两次。', {'tx_id': t})
+            raise LedgerError('ALREADY_SPLIT', f'交易 {t} 被生成了两次镜像。', {'tx_id': t})
         target = spec.get('node')
-        where[(t, 'mirror')] = node_of(target, '分裂') if target else where[(t, 'primary')]
+        where[(t, 'mirror')] = node_of(target, '生成镜像') if target else where[(t, 'primary')]
         split_ids.append(t)
 
     # 4. 组 +2（放置与分裂之后检查同父；成员可以是 t′）
@@ -1011,18 +1034,18 @@ def init_txs(conn, tx_ids: list, op: dict | None = None) -> dict:
             if ref.key not in {m.key for m in members}:
                 members.append(ref)
         if len(members) < 2:
-            raise LedgerError('GROUP_TOO_SMALL', '一个 +2 组至少要有 2 个成员。')
+            raise LedgerError('GROUP_TOO_SMALL', '一个净额组至少要有 2 个成员。')
         by_node: dict[str, list[str]] = {}
         for m in members:
             if m.key not in where:
-                raise LedgerError('NOT_IN_INIT_SET', f'组成员 {m} 不在这次初始化的范围内（t′ 要先在 splits 里分出来）。')
+                raise LedgerError('NOT_IN_INIT_SET', f'净额组成员 {m} 不在这次初始化的范围内（镜像交易要先在 splits 里生成）。')
             if m.key in grouped:
                 raise LedgerError('ALREADY_GROUPED', f'{m} 已经属于别的净额组了。')
             by_node.setdefault(where[m.key], []).append(str(m))
         if len(by_node) > 1:
             raise LedgerError(
                 'SAME_PARENT_REQUIRED',
-                '不能跨分组建立 +2 关系：' + '；'.join(
+                '不能跨分组建立净额关系：' + '；'.join(
                     f'「{label(n)}」下有 {"、".join(v)}' for n, v in by_node.items()),
                 {'按父节点': {label(n): v for n, v in by_node.items()}},
             )

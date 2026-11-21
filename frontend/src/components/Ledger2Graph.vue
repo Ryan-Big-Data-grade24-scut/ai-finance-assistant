@@ -10,8 +10,10 @@
  * 折叠时子节点缩回父节点、其它节点挤回原位（d3 collapsible-tree 的同一套路：
  * 缓存上一帧位置 → 对目标位置做缓动，进入从父旧位置出发，退出朝父新位置收缩）。
  *
- * 单选时相机「normal to」选中的东西：把它移到视口中心并按层级放大
- * （交易 < 未展开的 M < 已展开的 M，已展开时缩放到刚好装下它的可见子节点）。
+ * 相机「normal to」当前关心的对象：选择变化（单击 / 框选 / 筛选命中）取景到整个选区；
+ * 展开 / 折叠时取景到「已选择 ∪ 刚变动的节点」。单个对象按层级放大
+ * （交易 < 未展开的 M < 已展开的 M，已展开时缩放到刚好装下它的可见子节点），
+ * 多个对象取它们可见子树的并集包围盒。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { Ledger2Group, Ledger2Node, Ledger2Tx } from '@/api/ledger2'
@@ -176,7 +178,7 @@ const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
     hasChildren: n.children.length > 0,
   })
   const groupItem = (g: Ledger2Group): GItem => ({
-    key: `g:${g.id}`, kind: 'group', name: g.name || '（未命名 +2）', note: g.note,
+    key: `g:${g.id}`, kind: 'group', name: g.name || '（未命名净额组）', note: g.note,
     e: g.e, i: g.i, count: g.count, hasChildren: g.members.length > 0,
   })
   const txItem = (x: Ledger2Tx): GItem => ({
@@ -500,19 +502,19 @@ function resetCamera() {
 const VIEW_W = 1800
 const VIEW_H = 1000
 
-/** 一个节点「该放多大、以哪为中心」：交易 < 未展开的 M < 已展开的 M。
- *
- * 已展开的 M 要「刚好装下它的可见子树」，所以取子树包围盒的**中心**（不是节点自己），
- * 否则子节点全在一边时会被画布边缘切掉。子树太大时允许缩到 1 以下。 */
-function focusTarget(n: GNode): { z: number; cx: number; cy: number } {
-  const idx = new Map(graph.value.nodes.map(x => [x.key, x]))
+function childMap(): Map<string, string[]> {
   const kids = new Map<string, string[]>()
   for (const e of graph.value.edges) {
     const arr = kids.get(e.from)
     if (arr) arr.push(e.to)
     else kids.set(e.from, [e.to])
   }
-  let minX = n.x - n.r, maxX = n.x + n.r, minY = n.y - n.r, maxY = n.y + n.r
+  return kids
+}
+
+/** 一个节点连同它当前可见的子树占的矩形。 */
+function subtreeBox(n: GNode, idx: Map<string, GNode>, kids: Map<string, string[]>): Box {
+  let x0 = n.x - n.r, x1 = n.x + n.r, y0 = n.y - n.r, y1 = n.y + n.r
   const stack = [n.key]
   const seen = new Set<string>()
   while (stack.length) {
@@ -522,19 +524,29 @@ function focusTarget(n: GNode): { z: number; cx: number; cy: number } {
     const item = idx.get(k)
     if (!item) continue
     const bounds = labelBox(item)
-    minX = Math.min(minX, bounds.x0)
-    maxX = Math.max(maxX, bounds.x1)
-    minY = Math.min(minY, bounds.y0)
-    maxY = Math.max(maxY, bounds.y1)
+    x0 = Math.min(x0, bounds.x0)
+    x1 = Math.max(x1, bounds.x1)
+    y0 = Math.min(y0, bounds.y0)
+    y1 = Math.max(y1, bounds.y1)
     for (const c of kids.get(k) ?? []) stack.push(c)
   }
-  const bw = Math.max(140, maxX - minX + 120)   // 给条目右侧的金额标签留余量
-  const bh = Math.max(140, maxY - minY + 100)
+  return { x0, y0, x1, y1 }
+}
+
+/** 一个节点「该放多大、以哪为中心」：交易 < 未展开的 M < 已展开的 M。
+ *
+ * 已展开的 M 要「刚好装下它的可见子树」，所以取子树包围盒的**中心**（不是节点自己），
+ * 否则子节点全在一边时会被画布边缘切掉。子树太大时允许缩到 1 以下。 */
+function focusTarget(n: GNode): { z: number; cx: number; cy: number } {
+  const idx = new Map(graph.value.nodes.map(x => [x.key, x]))
+  const box = subtreeBox(n, idx, childMap())
+  const bw = Math.max(140, box.x1 - box.x0 + 120)   // 给条目右侧的金额标签留余量
+  const bh = Math.max(140, box.y1 - box.y0 + 100)
   const fit = Math.min(VIEW_W / bw, VIEW_H / bh)
   if (n.kind === 'tx') return { z: clamp(fit, 1.2, 1.9), cx: n.x, cy: n.y }
-  if (n.key === 'root') return { z: clamp(fit, ZOOM_MIN, 1.3), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
+  if (n.key === 'root') return { z: clamp(fit, ZOOM_MIN, 1.3), cx: (box.x0 + box.x1) / 2, cy: (box.y0 + box.y1) / 2 }
   if (!isOpen(n)) return { z: clamp(fit, 2.1, 2.6), cx: n.x, cy: n.y }
-  return { z: clamp(fit, ZOOM_MIN, 3.4), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
+  return { z: clamp(fit, ZOOM_MIN, 3.4), cx: (box.x0 + box.x1) / 2, cy: (box.y0 + box.y1) / 2 }
 }
 
 function focusOn(key: string) {
@@ -545,15 +557,52 @@ function focusOn(key: string) {
   animateCamera(z, { x: -z * cx, y: -z * cy })
 }
 
-const focusKey = computed(() => (props.selected.size === 1 ? [...props.selected][0] : ''))
-/** 被选中的那个自己展开/折叠了（这时要重新取景；展开别的节点不动相机）。 */
-const focusOpen = computed(() => {
-  const k = focusKey.value
-  return k ? props.expanded.has(k.startsWith('g:') ? k.slice(2) : k) : false
-})
-watch([focusKey, focusOpen], () => {
-  if (focusKey.value) focusOn(focusKey.value)
+/** 一组对象一起取景：把它们的可见子树并成一个包围盒。 */
+function fitKeys(keys: Iterable<string>): boolean {
+  const idx = new Map(graph.value.nodes.map(x => [x.key, x]))
+  const kids = childMap()
+  let box: Box | null = null
+  for (const key of new Set(keys)) {
+    const n = idx.get(key)
+    if (!n) continue
+    const b = subtreeBox(n, idx, kids)
+    box = box ? {
+      x0: Math.min(box.x0, b.x0), y0: Math.min(box.y0, b.y0),
+      x1: Math.max(box.x1, b.x1), y1: Math.max(box.y1, b.y1),
+    } : b
+  }
+  if (!box) return false
+  const bw = Math.max(140, box.x1 - box.x0 + 120)
+  const bh = Math.max(140, box.y1 - box.y0 + 100)
+  const z = clamp(Math.min(VIEW_W / bw, VIEW_H / bh), ZOOM_MIN, 3.4)
+  animateCamera(z, { x: -z * (box.x0 + box.x1) / 2, y: -z * (box.y0 + box.y1) / 2 })
+  return true
+}
+
+/** 单个对象沿用分层取景；多个对象取并集。已折叠、看不见的键自动忽略。 */
+function normalTo(keys: Iterable<string>) {
+  const visible = [...new Set(keys)].filter(key => graph.value.nodes.some(n => n.key === key))
+  if (!visible.length) return
+  if (visible.length === 1) focusOn(visible[0])
+  else fitKeys(visible)
+}
+
+// 选择一变（单击、框选、筛选命中）就取景到整个选区。
+watch(() => props.selected, next => {
+  if (next.size) normalTo(next)
 }, { immediate: true })
+
+// 展开/折叠任一节点时，取景到「已选择 ∪ 刚变动的那个」；没有选择就只看变动项。
+let lastExpanded = new Set(props.expanded)
+watch(() => props.expanded, next => {
+  const changed: string[] = []
+  for (const id of next) if (!lastExpanded.has(id)) changed.push(id)
+  for (const id of lastExpanded) if (!next.has(id)) changed.push(id)
+  lastExpanded = new Set(next)
+  if (!changed.length) return
+  // expanded 存的是节点 / 净额组 id；星图里净额组的键多一层 g: 前缀。
+  normalTo(new Set([...props.selected, ...changed.flatMap(id => [id, `g:${id}`])]))
+})
 
 // ── 空白处：拖框选择；按住不动 = 拖视野；中键按下拖 = 拖视野 ──────────────
 

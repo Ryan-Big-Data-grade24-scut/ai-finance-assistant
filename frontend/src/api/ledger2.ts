@@ -57,7 +57,10 @@ export interface Ledger2Status {
 }
 export interface Ledger2Tree {
   tree: Ledger2Node
-  scope: { date_from: string | null; date_to: string | null; tx_in_scope: number; tx_total: number }
+  scope: {
+    date_from: string | null; date_to: string | null
+    tx_in_scope: number; tx_total: number
+  }
   /** 还没初始化的存活交易数 */
   uninit: number
   /** 存活交易的日期边界（读出口径，用来提示「最近有数据的月份」） */
@@ -66,13 +69,13 @@ export interface Ledger2Tree {
   result?: {
     op: string
     created?: {
-      /** 新建 M 的 id */
+      /** 新建分组的节点 id */
       node_id?: string
-      /** 新建 +2 的 id */
+      /** 新建净额组的组 id */
       group_id?: string
-      /** 真正被分裂的源交易 id（选中的 t / t′ 已过滤） */
+      /** 真正生成镜像的原始交易 id（选中的镜像交易已过滤） */
       split?: number[]
-      /** 真正被取消分裂的源交易 id（前端把 t′ 换成原型 t） */
+      /** 真正取消镜像的原始交易 id（前端把镜像交易换回原始交易） */
       unsplit?: number[]
       [key: string]: unknown
     }
@@ -80,7 +83,7 @@ export interface Ledger2Tree {
 }
 export interface Ledger2Op {
   type:
-    | 'init' | 'create_node' | 'move' | 'join' | 'create_group' | 'dissolve'
+    | 'init' | 'uninstall' | 'create_node' | 'move' | 'join' | 'create_group' | 'dissolve'
     | 'split' | 'unsplit' | 'update'
     | 'dissolve_node' | 'rename_node' | 'update_node'
     | 'add_member' | 'remove_member' | 'rename_group' | 'dissolve_group'
@@ -94,10 +97,37 @@ export interface Ledger2Op {
   tx?: string
   tx_id?: number
   tx_ids?: number[]
+  /** 初始化：按账单平台分类放置 */
   style?: string
+  /** 初始化：自定义放置计划 */
   plan?: object
+  /** 初始化：新建一个分组再全部放入 */
+  new_node?: { name: string; parent?: string }
+  /** 初始化：明确选择全部未初始化交易（默认就是全部） */
+  all_uninitialized?: boolean
 }
-export interface Ledger2Range { date_from?: string; date_to?: string }
+export interface Ledger2UninitItem {
+  tx_id: number
+  date: string
+  tx_time: string
+  counterparty: string
+  item: string
+  category: string
+  e: number
+  i: number
+}
+export interface Ledger2Uninit {
+  total: number
+  /** 全部未初始化 id；前端据此做全选/反选，写回时精确传 tx_ids */
+  ids: number[]
+  /** 前 N 笔的展示字段（列表用） */
+  items: Ledger2UninitItem[]
+  truncated: boolean
+}
+export interface Ledger2Range {
+  date_from?: string
+  date_to?: string
+}
 
 export class Ledger2Error extends Error {
   code: string
@@ -119,6 +149,9 @@ async function request<T>(url: string, body?: object): Promise<T> {
   }
   return response.json() as Promise<T>
 }
+
+export const getLedger2Uninitialized = (limit = 500) =>
+  request<Ledger2Uninit>(`/api/ledger2/uninitialized?limit=${limit}`)
 
 export function getLedger2Tree(range: Ledger2Range = {}) {
   const q = new URLSearchParams()

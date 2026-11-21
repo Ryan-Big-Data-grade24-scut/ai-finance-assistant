@@ -1,41 +1,24 @@
 <script setup lang="ts">
 /** 页面只订阅已落盘的步骤；离开页面不停止，停止也不回滚已提交的操作。 */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { renderMarkdown } from '@/utils/markdown'
+import AgentCoreChat from '@/components/AgentCoreChat.vue'
+import { useAgentSession } from '@/composables/useAgentSession'
+import { buildAgentPageContext, readAgentSelection } from '@/utils/agentPageContext'
+import { TODO_LABELS, kindLabel, stateLabel } from '@/utils/agentLabels'
 import {
-  AgentCoreError, confirmAction, createSession, deleteSession, getSession, getStage,
-  listActions, listSessions, prepareImport, rejectAction, startTurn, stopTurn, subscribeTurn, uploadBill,
-  type AgentAction, type AgentChatItem, type AgentEvent, type AgentImportCommitted, type AgentRun,
-  type AgentSession, type AgentSessionDetail, type AgentStage, type AgentTodo,
+  AgentCoreError, confirmAction, getSession, getStage, listActions, prepareImport,
+  rejectAction, uploadBill,
+  type AgentAction, type AgentImportCommitted, type AgentStage,
 } from '@/api/agentCore'
 
 const route = useRoute()
-const sessions = ref<AgentSession[]>([])
-const detail = ref<AgentSessionDetail | null>(null)
-const externalActions = ref<AgentAction[]>([])
-const currentId = computed(() => detail.value?.session.id ?? null)
-const run = computed(() => detail.value?.run ?? null)
-const active = computed(() => run.value !== null && run.value.end_id === null)
-const items = computed(() => detail.value?.messages ?? [])
-const todos = computed(() => detail.value?.todos ?? [])
 
-const input = ref('')
-const composing = ref(false)
-const opening = ref(true)
-const sending = ref(false)
-const stopping = ref(false)
-const reconnectText = ref('')
-const testMode = import.meta.env.VITE_AGENTCORE_TEST_MODE === '1'
-const errorBanner = ref<{ code: string; message: string } | null>(null)
-const notice = ref('')
-const actionError = ref('')
-const scrollArea = ref<HTMLElement | null>(null)
-let controller: AbortController | null = null
-let stageToken = 0
-let disposed = false
+// ── 页面上下文与本地上传 ──────────────────────────────────────────────────────
 
-const scope = ref<{ date_from?: string; date_to?: string; selection: string[] }>({ selection: [] })
+const scope = ref<{
+  date_from?: string; date_to?: string; selection: string[]
+}>({ selection: [] })
 const attachment = ref<AgentStage | null>(null)
 const staged = computed(() => attachment.value?.state === 'staged' ? attachment.value : null)
 const imported = computed(() => attachment.value?.state === 'committed' ? attachment.value.receipt : null)
@@ -47,75 +30,62 @@ const preparing = ref(false)
 const uploadError = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 const deciding = ref<string | null>(null)
+const externalActions = ref<AgentAction[]>([])
+const actionError = ref('')
+const testMode = import.meta.env.VITE_AGENTCORE_TEST_MODE === '1'
+const stageKey = 'agentcore.stage'
+let gone = false
+let stageToken = 0
+
+function pageContext(): Record<string, unknown> {
+  const stage = staged.value
+  return buildAgentPageContext({
+    route: route.path,
+    surface: 'page',
+    dateFrom: scope.value.date_from,
+    dateTo: scope.value.date_to,
+    selection: scope.value.selection,
+    stagedImport: stage ? {
+      stage_id: stage.stage_id, platform_name: stage.platform_name, total: stage.total,
+      date_from: stage.date_from, date_to: stage.date_to,
+    } : null,
+  })
+}
+
+const {
+  sessions, detail, input, opening, sending, stopping, reconnectText, errorBanner, notice,
+  currentId, run, active, items, todos, formatError, showError, refreshSessions,
+  openSession, newSession, removeCurrent, send, stop, init,
+} = useAgentSession({
+  pageContext,
+  canSend: () => !uploading.value && !restoringStage.value && !preparing.value,
+  onToolResult: (name, result) => {
+    if (name === 'finance_import_commit' && result.state === 'committed'
+        && result.stage_id === attachment.value?.stage_id) {
+      attachment.value = result as unknown as AgentImportCommitted
+    }
+  },
+  onRunEnd: async () => {
+    await refreshActions().catch(() => undefined)
+    await restoreStage()
+  },
+})
 
 const actions = computed(() => detail.value?.actions ?? [])
 const pendingOwn = computed(() => actions.value.filter(action => action.state === 'pending'))
 const pendingExternal = computed(() => externalActions.value)
 const recentActions = computed(() => actions.value.filter(action => action.state !== 'pending').slice(0, 6))
-const hasScope = computed(() => !!(scope.value.date_from || scope.value.date_to || scope.value.selection.length))
-
-const KIND_LABELS: Record<string, string> = {
-  init: '初始化', uninstall: '卸载', move: '移动', create_node: '新建节点', join: '加入净额组',
-  create_group: '新建净额组', dissolve: '解散', dissolve_group: '解散净额组',
-  split: '分裂', unsplit: '取消分裂', update: '改名/备注', undo: '撤销', redo: '重做', import: '导入账单',
-}
-const kindLabel = (kind: string) => KIND_LABELS[kind] ?? kind
-const STATE_LABELS: Record<string, string> = {
-  pending: '待确认', confirmed: '已确认', rejected: '已拒绝', expired: '已失效',
-  running: '运行中', stopping: '正在停止', completed: '本轮已结束', failed: '本轮失败',
-  stopped: '已停止', interrupted: '服务中断',
-}
-const stateLabel = (state: string) => STATE_LABELS[state] ?? state
-const TODO_LABELS = { pending: '待做', in_progress: '进行中', completed: '已完成' }
-const stageKey = 'agentcore.stage'
+const hasScope = computed(() =>
+  Boolean(scope.value.date_from || scope.value.date_to || scope.value.selection.length))
 
 const pretty = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2)
-function callArgs(args: string) {
-  try { return pretty(JSON.parse(args)) } catch { return args }
-}
-function resultLabel(item: Extract<AgentChatItem, { type: 'tool' }>) {
-  const result = typeof item.result === 'object' ? item.result : null
-  if (item.is_error) {
-    const error = result?.error as { code?: string } | undefined
-    if (error?.code === 'STOPPED_BEFORE_CALL' || error?.code === 'INTERRUPTED_BEFORE_CALL') return '未派发'
-    if (error?.code === 'RECEIPT_UNAVAILABLE' || error?.code === 'RECEIPT_MISSING') return '回执缺失 · 待核对'
-    return '失败'
-  }
-  if (item.name === 'finance_ledger_apply' && result?.state === 'executed') return 'V2 已执行'
-  if (item.name === 'finance_import_commit' && result?.state === 'committed') return '已入库'
-  return '结果'
-}
 
-function formatError(error: unknown): string {
-  if (error instanceof AgentCoreError) {
-    if (error.code === 'STALE_ACTION') return '账本在预览之后变过，这张卡已失效；请拒绝旧卡并按当前账本操作。'
-    if (error.code === 'ACTION_NOT_PENDING') return '这个操作已经被处理过，卡片已刷新。'
-  }
-  return error instanceof Error ? error.message : '操作失败。'
-}
-function showError(error: unknown, fallback: string) {
-  errorBanner.value = { code: error instanceof AgentCoreError ? error.code : fallback, message: formatError(error) }
-}
-const needsSettings = computed(() =>
-  errorBanner.value?.code === 'NOT_CONFIGURED' || errorBanner.value?.code === 'NOT_AUTHORIZED')
-
-function scrollToBottom() {
-  nextTick(() => {
-    if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight
-  })
-}
-
-// ── 会话与持久事件 ────────────────────────────────────────────────────────────
-
-async function refreshSessions() {
-  const next = await listSessions()
-  if (!disposed) sessions.value = next.sessions
-}
+// ── 旧卡与本地上传 ────────────────────────────────────────────────────────────
 
 async function refreshExternal() {
   try {
     const next = await listActions({ state: 'pending', unclaimed: true })
-    if (!disposed) externalActions.value = next.actions
+    if (!gone) externalActions.value = next.actions
   } catch {
     // 旧卡拉取失败不打断运行，也不清除已经看到的卡片。
   }
@@ -131,218 +101,6 @@ async function refreshActions() {
   ])
 }
 
-function disconnect() {
-  controller?.abort()
-  controller = null
-  reconnectText.value = ''
-}
-
-function openSnapshot(next: AgentSessionDetail) {
-  disconnect()
-  actionError.value = ''
-  notice.value = ''
-  detail.value = next
-  localStorage.setItem('agentcore.session', next.session.id)
-  if (next.run?.end_id === null) follow(next.run)
-  scrollToBottom()
-}
-
-async function loadSession(id: string) {
-  const next = await getSession(id)
-  if (!disposed) openSnapshot(next)
-}
-
-async function openSession(id: string) {
-  if (disposed || sending.value || opening.value) return
-  opening.value = true
-  errorBanner.value = null
-  try {
-    await loadSession(id)
-  } catch (error) {
-    if (!disposed) showError(error, 'LOAD_FAILED')
-  } finally {
-    opening.value = false
-  }
-}
-
-async function createAndOpenSession() {
-  const next = await createSession('账本助手')
-  if (disposed) return
-  sessions.value.unshift(next)
-  await loadSession(next.id)
-}
-
-async function newSession() {
-  if (disposed || sending.value || opening.value) return
-  opening.value = true
-  errorBanner.value = null
-  try {
-    await createAndOpenSession()
-  } catch (error) {
-    if (!disposed) showError(error, 'SESSION_FAILED')
-  } finally {
-    opening.value = false
-  }
-}
-
-async function removeCurrent() {
-  const id = currentId.value
-  if (disposed || !id || active.value || opening.value || sending.value) return
-  if (!window.confirm('删除这个会话？聊天记录一起删除，未处理的旧卡会作废。已经提交的业务操作不会撤销。')) return
-  opening.value = true
-  errorBanner.value = null
-  try {
-    await deleteSession(id)
-    if (disposed) return
-    disconnect()
-    detail.value = null
-    localStorage.removeItem('agentcore.session')
-    await refreshSessions()
-    if (disposed) return
-    if (sessions.value.length) await loadSession(sessions.value[0].id)
-    else await createAndOpenSession()
-    if (!disposed) notice.value = '会话已删除。'
-  } catch (error) {
-    if (!disposed) showError(error, 'DELETE_FAILED')
-  } finally {
-    opening.value = false
-  }
-}
-
-function consume(event: AgentEvent, nextRun: AgentRun) {
-  const view = detail.value
-  if (!view || view.run?.id !== nextRun.id || event.cursor <= view.cursor) return
-  if (event.type === 'status') {
-    view.status = event.text
-    if (event.step != null) view.step = event.step
-    if (event.state === 'stopping' && view.run.end_id === null) view.run.state = 'stopping'
-  } else if (event.type === 'usage') {
-    view.totals = event.totals
-  } else {
-    const item = event.item
-    view.messages.push(item)
-    if (item.type === 'terminal') {
-      view.run.state = item.state
-      view.run.end_id = item.id
-      view.totals = item.totals
-      view.step = item.step
-      view.status = ''
-    } else if (item.type === 'tool' && !item.is_error && item.result && typeof item.result !== 'string') {
-      const result = item.result
-      if (item.name === 'todo_write' && Array.isArray(result.todos)) view.todos = result.todos as AgentTodo[]
-      if (item.name === 'finance_import_commit' && result.state === 'committed'
-          && result.stage_id === attachment.value?.stage_id) {
-        attachment.value = result as unknown as AgentImportCommitted
-      }
-    }
-  }
-  view.cursor = event.cursor
-  reconnectText.value = ''
-  scrollToBottom()
-}
-
-function follow(nextRun: AgentRun) {
-  disconnect()
-  const local = new AbortController()
-  controller = local
-  void (async () => {
-    let failures = 0
-    try {
-      while (!local.signal.aborted && detail.value?.run?.id === nextRun.id && active.value) {
-        try {
-          await subscribeTurn(nextRun, detail.value.cursor, event => {
-            if (local.signal.aborted) return
-            consume(event, nextRun)
-            failures = 0
-          }, local.signal)
-          break
-        } catch (error) {
-          if (local.signal.aborted) return
-          if (error instanceof AgentCoreError && error.code === 'RUN_NOT_FOUND') {
-            reconnectText.value = '找不到该轮，请刷新会话读取最新状态。'
-            return
-          }
-          reconnectText.value = '订阅已断开，正在重连。断开不会停止运行。'
-          await new Promise(resolve => window.setTimeout(resolve, Math.min(500 * 2 ** failures++, 5000)))
-        }
-      }
-      if (!local.signal.aborted) {
-        void refreshActions().catch(() => undefined)
-        void restoreStage()
-      }
-    } finally {
-      if (controller === local) controller = null
-    }
-  })()
-}
-
-const pagePayload = (): Record<string, unknown> => {
-  const { selection, ...dates } = scope.value
-  const stage = staged.value
-  return {
-    route: '/v2/assistant',
-    scope: dates,
-    selection,
-    ...(stage ? { staged_import: {
-      stage_id: stage.stage_id, platform_name: stage.platform_name, total: stage.total,
-      date_from: stage.date_from, date_to: stage.date_to,
-    } } : {}),
-  }
-}
-
-async function send() {
-  const view = detail.value
-  const text = input.value.trim()
-  if (!view || !text || active.value || sending.value || opening.value || uploading.value
-      || restoringStage.value || preparing.value) return
-  sending.value = true
-  errorBanner.value = null
-  notice.value = ''
-  try {
-    const nextRun = await startTurn(view.session.id, text, pagePayload())
-    if (detail.value !== view) return
-    if (input.value.trim() === text) input.value = ''
-    view.run = nextRun
-    view.cursor = nextRun.start_id - 1
-    view.status = '运行已启动，正在接收步骤…'
-    view.step = 0
-    view.totals = null
-    follow(nextRun)
-  } catch (error) {
-    // POST 可能已成功但回复丢失；只读回最新运行，绝不自动重发一个可能已经写账的请求。
-    if (detail.value === view) {
-      const next = await getSession(view.session.id).catch(() => null)
-      const recovered = next?.run
-      if (detail.value === view && next && recovered && recovered.id !== view.run?.id) {
-        if (input.value.trim() === text && next.messages.some(item =>
-          item.type === 'user' && item.id >= recovered.start_id && item.text === text)) input.value = ''
-        openSnapshot(next)
-        notice.value = '已从会话记录接回最新一轮，没有重发消息。'
-      } else if (detail.value === view) {
-        showError(error, 'TURN_FAILED')
-      }
-    }
-  } finally {
-    sending.value = false
-  }
-}
-
-async function stop() {
-  const nextRun = run.value
-  if (!nextRun || nextRun.state !== 'running' || stopping.value) return
-  stopping.value = true
-  try {
-    const stopped = await stopTurn(nextRun.session_id, nextRun.id)
-    if (run.value?.id === stopped.id && active.value && stopped.state === 'stopping') {
-      run.value.state = 'stopping'
-    }
-  } catch (error) {
-    if (run.value?.id === nextRun.id) showError(error, 'STOP_FAILED')
-  } finally {
-    stopping.value = false
-  }
-}
-
 // ── 手工卡与本地上传 ──────────────────────────────────────────────────────────
 
 async function decide(action: AgentAction, approve: boolean) {
@@ -354,7 +112,7 @@ async function decide(action: AgentAction, approve: boolean) {
     const sessionId = view?.session.id ?? null
     if (approve) await confirmAction(action.id, sessionId)
     else await rejectAction(action.id, sessionId)
-    if (disposed) return
+    if (gone) return
     if (detail.value === view) {
       notice.value = approve
         ? (action.kind === 'import' ? '导入已执行，回执见卡片。' : '旧卡已确认，V2 操作已执行。')
@@ -362,19 +120,19 @@ async function decide(action: AgentAction, approve: boolean) {
     }
     if (action.kind === 'import') await restoreStage()
   } catch (error) {
-    if (!disposed && detail.value === view) actionError.value = formatError(error)
+    if (!gone && detail.value === view) actionError.value = formatError(error)
   } finally {
     deciding.value = null
-    if (!disposed) await refreshActions().catch(() => undefined)
+    if (!gone) await refreshActions().catch(() => undefined)
   }
 }
 
 async function restoreStage() {
-  if (disposed || uploading.value) return
+  if (gone || uploading.value) return
   const id = localStorage.getItem(stageKey)
   if (!id) return
   const token = ++stageToken
-  const current = () => !disposed && token === stageToken && localStorage.getItem(stageKey) === id
+  const current = () => !gone && token === stageToken && localStorage.getItem(stageKey) === id
   restoringStage.value = true
   uploadError.value = ''
   try {
@@ -406,7 +164,7 @@ async function doUpload() {
   uploadError.value = ''
   try {
     const next = await uploadBill(stagedFile.value, password.value)
-    if (disposed) return
+    if (gone) return
     attachment.value = next
     localStorage.setItem(stageKey, next.stage_id)
     stagedFile.value = null
@@ -427,44 +185,29 @@ async function makeImportCard() {
   uploadError.value = ''
   try {
     await prepareImport(staged.value.stage_id, view?.session.id ?? null)
-    if (disposed) return
+    if (gone) return
     if (detail.value === view) notice.value = '手工导入卡已生成，卡片确认前不执行。'
     await refreshActions()
   } catch (error) {
-    if (!disposed && detail.value === view) uploadError.value = formatError(error)
+    if (!gone && detail.value === view) uploadError.value = formatError(error)
   } finally {
     preparing.value = false
   }
 }
 
-onMounted(async () => {
+onMounted(() => {
   const query = route.query
-  const selection = window.history.state?.agentcoreSelection
   scope.value = {
     date_from: typeof query.date_from === 'string' ? query.date_from : undefined,
     date_to: typeof query.date_to === 'string' ? query.date_to : undefined,
-    selection: Array.isArray(selection) ? selection.filter(ref => typeof ref === 'string')
-      : typeof query.sel === 'string' ? query.sel.split(',').filter(Boolean) : [],
+    selection: readAgentSelection(query),
   }
   void restoreStage()
   void refreshExternal()
-  try {
-    await refreshSessions()
-    if (disposed) return
-    const stored = localStorage.getItem('agentcore.session')
-    const pick = sessions.value.find(candidate => candidate.id === stored) ?? sessions.value[0]
-    if (pick) await loadSession(pick.id)
-    else await createAndOpenSession()
-  } catch (error) {
-    if (!disposed) showError(error, 'LOAD_FAILED')
-  } finally {
-    opening.value = false
-  }
+  void init()
 })
 onBeforeUnmount(() => {
-  disposed = true
-  detail.value = null
-  disconnect()
+  gone = true
 })
 </script>
 
@@ -498,79 +241,13 @@ onBeforeUnmount(() => {
     </aside>
 
     <!-- 中：对话 -->
-    <section class="ac-col ac-chat">
-      <header class="ac-chat-head">
-        <div>
-          <h2>{{ detail?.session.title || '账本助手' }}</h2>
-          <p class="muted">可查流水、导入账单和修改 V2。明确要求执行时会直接写入，结果以回执为准。</p>
-          <p v-if="testMode" class="ac-warning" data-testid="ac-test-mode">测试模式 · 虚构账单 / 脚本化模型</p>
-        </div>
-        <div v-if="run" class="ac-run" data-testid="ac-run">
-          <b>{{ run.model }}</b>
-          <span>{{ stateLabel(run.state) }} · 第 {{ detail?.step ?? 0 }} 步</span>
-          <small v-if="detail?.totals" class="ac-usage">
-            输入 {{ detail.totals.input_tokens ?? 0 }} / 输出 {{ detail.totals.output_tokens ?? 0 }}<br>
-            缓存读 {{ detail.totals.cache_read_tokens ?? 0 }} / 写 {{ detail.totals.cache_write_tokens ?? 0 }}
-          </small>
-        </div>
-      </header>
-
-      <div ref="scrollArea" class="ac-messages" data-testid="ac-messages">
-        <template v-for="item in items" :key="item.id">
-          <article v-if="item.type === 'user'" class="ac-msg ac-msg--user">
-            <div class="ac-bubble">{{ item.text }}</div>
-          </article>
-          <template v-else-if="item.type === 'assistant'">
-            <article v-if="item.text" class="ac-msg ac-msg--assistant">
-              <div class="ac-bubble md" v-html="renderMarkdown(item.text)"></div>
-            </article>
-            <details v-for="call in item.calls" :key="call.id" class="ac-tool-result" data-testid="ac-tool-call">
-              <summary>第 {{ item.step ?? '—' }} 步 · 调用 {{ call.name }}</summary>
-              <pre>{{ callArgs(call.arguments) }}</pre>
-            </details>
-          </template>
-          <details v-else-if="item.type === 'tool'" class="ac-tool-result" data-testid="ac-tool-result"
-                   :class="{ 'ac-tool-result--error': item.is_error }">
-            <summary>{{ item.name }} · {{ resultLabel(item) }}<template v-if="item.recovered"> · 已恢复回执</template></summary>
-            <pre>{{ pretty(item.result) }}</pre>
-          </details>
-          <p v-else-if="item.type === 'terminal'" class="ac-terminal" :class="{ 'ac-warning': item.state !== 'completed' }"
-             :data-state="item.state" data-testid="ac-terminal">
-            <b>{{ stateLabel(item.state) }}</b><template v-if="item.message"> · {{ item.message }}</template>
-          </p>
-          <details v-else class="ac-tool-result">
-            <summary>已整理上下文</summary>
-            <pre>{{ item.text }}</pre>
-          </details>
-        </template>
-
-        <p v-if="active" class="ac-status" data-testid="ac-status" role="status">{{ detail?.status || '等待下一步…' }}</p>
-        <p v-if="reconnectText" class="ac-warning" role="status">{{ reconnectText }}</p>
-      </div>
-
-      <div v-if="errorBanner" class="ac-banner" data-testid="ac-error">
-        <span>{{ errorBanner.message }}</span>
-        <RouterLink v-if="needsSettings" to="/ai/settings" class="ac-banner-link">去 AI 设置 →</RouterLink>
-      </div>
-      <p v-if="notice" class="ac-notice">{{ notice }}</p>
-
-      <div class="ac-composer">
-        <textarea v-model="input" rows="2" data-testid="ac-input"
-                  placeholder="例如：导入右侧账单，把这批新增流水初始化到「旅行」，再核对净额。"
-                  @compositionstart="composing = true"
-                  @compositionend="composing = false"
-                  @keydown.enter.exact.prevent="!composing && send()"></textarea>
-        <button v-if="!active" class="ac-send" data-testid="ac-send"
-                :disabled="!currentId || !input.trim() || opening || sending || uploading || restoringStage || preparing"
-                @click="send">
-          {{ sending ? '启动中…' : '发送' }}
-        </button>
-        <button v-else class="ac-send ac-send--stop" data-testid="ac-stop"
-                :disabled="stopping || run?.state === 'stopping'" @click="stop">
-          {{ stopping || run?.state === 'stopping' ? '正在停止…' : '停止' }}
-        </button>
-      </div>
-    </section>
+    <AgentCoreChat class="ac-col" v-model:input="input" :items="items" :run="run" :active="active"
+                   :status="detail?.status ?? ''" :step="detail?.step ?? 0" :totals="detail?.totals ?? null"
+                   :sending="sending" :stopping="stopping" :opening="opening"
+                   :reconnect-text="reconnectText" :error-banner="errorBanner" :notice="notice"
+                   :test-mode="testMode" :title="detail?.session.title || 'ATLAS'"
+                   subtitle="ATLAS 可查流水、导入账单和修改 V2。明确要求执行时会直接写入，结果以回执为准。"
+                   @send="send" @stop="stop" />
 
     <!-- 右：任务、导入与旧卡 -->
     <aside class="ac-col ac-side">
@@ -620,8 +297,8 @@ onBeforeUnmount(() => {
       </section>
 
       <section v-if="pendingOwn.length" class="ac-panel" data-testid="ac-pending">
-        <h3>旧待确认卡 · 本会话 <span class="ac-count">{{ pendingOwn.length }}</span></h3>
-        <p class="muted">这些卡不会自动执行，也不阻塞新任务。</p>
+        <h3>历史待确认记录 · 本会话 <span class="ac-count">{{ pendingOwn.length }}</span></h3>
+        <p class="muted">来自旧版确认卡；它们不是已执行的结果，不会自动执行，也不阻塞新任务。</p>
         <article v-for="action in pendingOwn" :key="action.id" class="ac-card" :data-action-id="action.id">
           <header>
             <b>{{ action.title || kindLabel(action.kind) }}</b>
@@ -660,8 +337,8 @@ onBeforeUnmount(() => {
       </section>
 
       <section v-if="pendingExternal.length" class="ac-panel" data-testid="ac-external">
-        <h3>未认领的旧卡 <span class="ac-count">{{ pendingExternal.length }}</span></h3>
-        <p class="muted">这些旧卡没有会话归属，可以在此手工处理。</p>
+        <h3>未认领的历史记录 <span class="ac-count">{{ pendingExternal.length }}</span></h3>
+        <p class="muted">这些旧卡没有会话归属，可以在此手工处理；不是已执行的结果。</p>
         <article v-for="action in pendingExternal" :key="action.id" class="ac-card" :data-action-id="action.id">
           <header>
             <b>{{ action.title || kindLabel(action.kind) }}</b>
@@ -745,13 +422,16 @@ h3 { font-size: var(--font-sm); margin-bottom: var(--space-2); }
 .mini--primary:hover { background: #285f95; }
 .mini--danger { margin: var(--space-3); color: var(--color-expense); border-color: #f0d4d5; }
 
-/* 会话栏 */
+/* 会话 */
 .ac-session-list { list-style: none; overflow-y: auto; flex: 1; padding: var(--space-2); }
 .ac-session {
-  display: block; width: 100%; text-align: left; padding: 8px 10px; border: 0;
-  border-radius: var(--radius); background: transparent; cursor: pointer;
+  display: block; width: 100%; text-align: left; padding: 8px 10px;
+  border: 0; border-radius: var(--radius); background: transparent; cursor: pointer;
 }
-.ac-session b { display: block; font-size: var(--font-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-session b {
+  display: block; font-size: var(--font-xs);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ac-session small { color: var(--color-muted); font-size: 10px; }
 .ac-session:hover { background: #f3f6fa; }
 .ac-session--on { background: #edf3fa; }
@@ -761,65 +441,11 @@ h3 { font-size: var(--font-sm); margin-bottom: var(--space-2); }
   font-size: var(--font-xs); color: #45607a; line-height: 1.6;
 }
 
-/* 聊天 */
-.ac-chat { background: linear-gradient(180deg, #fbfdff, #ffffff); }
-.ac-chat-head {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2);
-  padding: var(--space-3); border-bottom: 1px solid var(--color-border);
-}
-.ac-chat-head p { margin-top: 2px; font-size: var(--font-xs); }
-.ac-run {
-  flex: 0 1 42%; min-width: 0; display: grid; gap: 3px; text-align: right;
-  color: #45607a; font-size: var(--font-xs); overflow-wrap: anywhere;
-}
-.ac-usage { color: var(--color-muted); font-size: 10px; }
-.ac-messages { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-3); display: flex; flex-direction: column; gap: 10px; }
-.ac-msg { display: flex; }
-.ac-msg--user { justify-content: flex-end; }
-.ac-bubble {
-  max-width: 78%; padding: 9px 12px; border-radius: 13px; line-height: 1.7;
-  overflow-wrap: anywhere; font-size: var(--font-sm);
-}
-.ac-msg--user .ac-bubble { background: #2f6fae; color: #fff; border-bottom-right-radius: 4px; }
-.ac-msg--assistant .ac-bubble { background: #f3f7fb; border: 1px solid #e3ebf3; border-bottom-left-radius: 4px; }
-.ac-tool-result {
-  padding: 7px 10px; border-radius: var(--radius); background: #f7fafc;
-  border: 1px solid #e3ebf3; font-size: var(--font-xs); color: #45607a;
-}
-.ac-terminal {
-  padding: 7px 0; border-top: 1px solid var(--color-border);
-  font-size: var(--font-xs); color: var(--color-muted);
-}
-.ac-tool-result summary { cursor: pointer; }
-.ac-tool-result pre, .ac-card pre {
+/* 侧栏里旧卡回执的代码块（对话区的样式在 AgentCoreChat 内）。 */
+.ac-card pre {
   margin-top: 6px; padding: 8px; border-radius: var(--radius); background: #172a3b; color: #eaf2fa;
   overflow: auto; max-height: 220px; font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.ac-tool-result--error summary { color: var(--color-expense); }
-.ac-status { color: var(--color-muted); font-size: var(--font-xs); }
-.ac-warning { color: #9a6b00; font-size: var(--font-xs); }
-.ac-banner {
-  margin: 0 var(--space-3); padding: 9px 11px; border-radius: var(--radius);
-  background: #fdf3f3; border: 1px solid #f2d6d7; color: #8c2f33; font-size: var(--font-xs);
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
-}
-.ac-banner-link { color: #2f6fae; font-weight: 600; text-decoration: none; white-space: nowrap; }
-.ac-notice { margin: 6px var(--space-3) 0; color: #2f7d57; font-size: var(--font-xs); }
-.ac-composer {
-  display: flex; gap: var(--space-2); padding: var(--space-3);
-  border-top: 1px solid var(--color-border); background: #fff;
-}
-.ac-composer textarea {
-  flex: 1; resize: none; border: 1px solid var(--color-border); border-radius: var(--radius);
-  padding: 9px 11px; font-size: var(--font-sm); line-height: 1.5; outline: none;
-}
-.ac-composer textarea:focus { border-color: #8db4d9; box-shadow: 0 0 0 3px rgba(54, 121, 237, .12); }
-.ac-send {
-  align-self: flex-end; padding: 10px 16px; border: 0; border-radius: var(--radius);
-  background: #2f6fae; color: #fff; cursor: pointer; font-weight: 600;
-}
-.ac-send:disabled { opacity: .45; cursor: default; }
-.ac-send--stop { background: #8c2f33; }
 
 /* 侧栏 */
 .ac-side { overflow-y: auto; background: transparent; border: 0; gap: var(--space-3); }
@@ -857,22 +483,6 @@ h3 { font-size: var(--font-sm); margin-bottom: var(--space-2); }
   display: inline-block; min-width: 18px; text-align: center; padding: 0 5px;
   border-radius: 999px; background: #2f6fae; color: #fff; font-size: 10px;
 }
-
-/* Markdown */
-.md :deep(p) { margin: 0 0 8px; }
-.md :deep(p:last-child) { margin-bottom: 0; }
-.md :deep(h1), .md :deep(h2), .md :deep(h3), .md :deep(h4) { margin: 10px 0 6px; line-height: 1.4; }
-.md :deep(h2) { font-size: 15px; }
-.md :deep(h3), .md :deep(h4) { font-size: 14px; }
-.md :deep(ul), .md :deep(ol) { margin: 5px 0 9px; padding-left: 19px; }
-.md :deep(li) { margin: 3px 0; }
-.md :deep(code) { padding: 1px 4px; border-radius: 5px; background: #e9f0f7; font-family: ui-monospace, Consolas, monospace; font-size: .92em; }
-.md :deep(pre) { overflow-x: auto; margin: 8px 0; padding: 10px; border-radius: 9px; background: #172a3b; color: #eaf2fa; }
-.md :deep(pre code) { padding: 0; background: transparent; color: inherit; }
-.md :deep(table) { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 11px; }
-.md :deep(th), .md :deep(td) { padding: 5px 7px; border: 1px solid #e2eaf1; text-align: left; }
-.md :deep(th) { background: #f1f6fb; }
-.md :deep(a) { color: #2c75b4; }
 
 @media (max-width: 1180px) {
   .ac-shell { grid-template-columns: 180px minmax(0, 1fr) 300px; height: auto; }

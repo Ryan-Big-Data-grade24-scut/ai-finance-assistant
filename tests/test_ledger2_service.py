@@ -41,7 +41,8 @@ def test_get_tree_full_shape(conn):
     assert set(out) == {'tree', 'scope', 'status', 'uninit', 'available'}
     assert out['uninit'] == 0 and out['available']['first'] is not None
     assert (out['tree']['e'], out['tree']['i']) == ROOT_VALUE
-    assert out['scope'] == {'date_from': None, 'date_to': None, 'tx_in_scope': 7, 'tx_total': 7}
+    assert out['scope'] == {'date_from': None, 'date_to': None,
+                            'tx_in_scope': 7, 'tx_total': 7}
     assert out['status']['can_undo'] is False and out['status']['can_redo'] is False
     assert out['status']['seq'] == 0 and out['status']['warnings'] == []
 
@@ -49,7 +50,8 @@ def test_get_tree_full_shape(conn):
 def test_get_tree_date_range_projection(conn):
     out = service.get_tree(conn, '2026-01-01', '2026-01-31')
     t = out['tree']
-    assert out['scope'] == {'date_from': '2026-01-01', 'date_to': '2026-01-31', 'tx_in_scope': 5, 'tx_total': 7}
+    assert out['scope'] == {'date_from': '2026-01-01', 'date_to': '2026-01-31',
+                            'tx_in_scope': 5, 'tx_total': 7}
     assert (t['e'], t['i']) == (10000, 805000)               # 一月：支出 30+20+50，收入 8000+50
     ids = [c['id'] for c in t['children']]
     assert 'cat:交通' not in ids and 'cat:餐饮' in ids       # 二月才有的分类整个不出现

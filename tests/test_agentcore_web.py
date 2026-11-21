@@ -486,7 +486,7 @@ def test_mcp_cold_start_over_stdio(agentcore_paths, agentcore_evidence):
         'import os, runpy; from pathlib import Path; from backend import db; '
         'root = Path(os.environ["SYNTHETIC_DB_DIR"]); '
         'db.DB_DIR = root; db.DB_PATH = root / "synthetic.db"; db.SEED_PATH = root / "no_seed"; '
-        'runpy.run_module("backend.mcp.agentcore_server", run_name="__main__")'
+        'runpy.run_module("backend.mcp.server", run_name="__main__")'
     )
     params = StdioServerParameters(command=sys.executable, args=['-X', 'utf8', '-c', bootstrap], cwd=root, env={
         'SYNTHETIC_DB_DIR': str(agentcore_paths), 'AGENTCORE_HOME': str(agentcore_paths / 'agentcore'),
@@ -500,7 +500,7 @@ def test_mcp_cold_start_over_stdio(agentcore_paths, agentcore_evidence):
                 assert handshake.serverInfo.name == 'ai-finance-ledger'
                 tools = (await client.list_tools()).tools
                 expected = registry.openai_tools(scope='business')
-                assert len(tools) == len(expected) == 5
+                assert len(tools) == len(expected) == 6
                 assert [(t.name, t.description, t.inputSchema) for t in tools] == [
                     (t['function']['name'], t['function']['description'], t['function']['parameters']) for t in expected
                 ]

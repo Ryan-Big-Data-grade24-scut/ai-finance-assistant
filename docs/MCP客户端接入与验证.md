@@ -1,6 +1,6 @@
-# MCP 客户端接入与验证（AI Workflow V1.1）
+# MCP 客户端接入与验证（账本 V2）
 
-本项目使用本机 MCP stdio Server。模型运行在用户选择的 AI 客户端中；项目不内置模型 API，也不接收模型 API Key。
+本项目用本机 MCP stdio Server 把 V2 账本能力暴露给你自己的 AI 客户端。模型运行在客户端里；项目不内置模型 API，也不接收 API Key。Server 模块路径是 `backend.mcp.server`，和页面共用同一套 `backend/agentcore/registry.py` 工具定义。
 
 ## 1. 先完成服务端自检
 
@@ -10,7 +10,7 @@
 .\.venv\Scripts\python.exe -m backend.mcp.server --selftest
 ```
 
-应显示 27 个工具已注册，并以 `[OK] selftest 全部通过` 结束。
+应显示 6 个业务工具，并通过工具契约、`read_skill`、直写重读、拒绝会话工具四项检查。
 
 ## 2. 自动生成客户端配置
 
@@ -44,44 +44,34 @@ VS Code 的 `mcp.json` 使用 `servers` 字段，脚本会生成对应结构。
 .\.venv\Scripts\python.exe scripts\check_mcp_connection.py
 ```
 
-该脚本会启动一个独立 MCP 子进程，执行 initialize、tools/list，并只读调用 `query_ledger_books`。它不会创建分类草案、修改交易或执行账本操作。
+该脚本会启动独立的 MCP 子进程，执行 initialize、tools/list，调用一次只读 SQL 和一次 `read_skill`。它不会修改账本或导入数据。
 
 预期：
 
 ```text
-✓ initialize：...
-✓ tools/list：27 个工具全部可见
-✓ tools/call：query_ledger_books 只读调用成功
+✓ initialize：ai-finance-ledger 0.2.0
+✓ tools/list：6 个工具全部可见
+✓ initialize：服务端提供了使用说明
+✓ tools/call：只读 SQL 与 read_skill 调用成功
 [OK] MCP stdio 客户端握手、工具发现和只读调用全部通过
 ```
 
-## 4. AI 对话恢复与多轮澄清
+## 4. 外部模型看到的工具
 
-### 对话中断后恢复
+| 工具 | 用途 |
+|---|---|
+| `finance_query_transactions` | 只读 SQL 查原始流水；表和字段见工具描述 |
+| `finance_ledger_read` | 读 V2 账本树、交易归属、历史与操作范围 |
+| `finance_ledger_apply` | 直接执行 V2 操作（初始化、移动、分组、净额组、镜像、卸载等） |
+| `finance_import_read` | 读已解析的暂存账单与导入批次 |
+| `finance_import_commit` | 把暂存批次写入原始流水；不自动初始化 V2 |
+| `read_skill` | 读取操作顺序与具体做法（`finance-import`、`ledger-classify`、`ledger-initialize-uninstall`、`ledger-select-operate`） |
 
-1. 调用 `list_classification_proposals`，默认查询 draft。
-2. 如果某项 `stale=true`，不要继续确认，重新获取分类批次。
-3. 否则调用 `get_classification_proposal`，读取每笔建议和问题。
-
-### 用户回答澄清问题
-
-1. AI 将用户回答转换为明确的目标节点、置信度和理由。
-2. 调用 `resolve_classification_clarification`，传入原 `proposal_id`、该笔 `suggestion` 和 `user_answer`。
-3. 该工具只更新原草案，不写账本。
-4. AI 重新展示更新后的草案。
-5. 用户明确确认后，才调用 `confirm_classifications`。
-
-### 规则冲突保护
-
-如果同一交易命中多条指向不同分类的有效规则，服务端 `preview_classifications` 会拒绝直接分类，返回 `RULE_HINT_CONFLICT`。AI 必须先创建澄清项。不能只依赖提示词。
-
-### 部分确认
-
-`confirm_classifications` 的 `approved_tx_ids` 必须明确列出用户批准的交易。未批准项会在本份草案中标记为 rejected，不会暗中保留成待确认项。若用户之后改变主意，应重新读取批次并创建新草案。已批准部分可使用 `undo_classifications` 整体撤销。
+`initialize` 会返回一段 `instructions`：写操作直接执行并以回执为准，页面选区只是视图，导入入库和 V2 初始化是两步。复杂任务应先 `read_skill`，再按回执继续。
 
 ## 5. 隐私和安全
 
 - MCP Server 默认在本机 stdio 运行，不开放网络端口。
-- 客户端模型可能会接收 AI 工具读取到的交易文本；使用前应检查客户端和模型服务的数据政策。
+- 客户端模型会接收工具读到的交易文本；使用前检查客户端和模型服务的数据政策。
+- `finance_query_transactions` 只读；`finance_ledger_apply` 只通过 V2 引擎写账本，不改原始流水。
 - 不要把真实数据库、原始账单、`.env` 或 API Key 放进 Git 或发给不可信的模型。
-- AI 不得直接执行 SQL；所有账本写入仍经过 Classification Service 和 Ledger Engine。

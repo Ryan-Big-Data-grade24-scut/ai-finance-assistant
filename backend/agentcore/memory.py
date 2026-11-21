@@ -77,11 +77,20 @@ def remember(slug: str, title: str, body: str) -> dict:
     return {'slug': slug, 'title': title}
 
 
-def index_block() -> str:
-    """进模型上下文的那一块。空索引不占位置。"""
+def index_block(*, max_chars: int | None = None) -> str:
+    """进模型上下文的那一块。空索引不占位置。
+
+    `max_chars` 是**每轮快照**的预算，不是索引文件本身的上限；超出时明确写出
+    省略了多少字符，避免模型把截断后的索引当成全部记忆。
+    """
     text = read_index()
     if not text.strip():
         return ''
+    if max_chars is not None and len(text) > max_chars:
+        omitted = len(text) - max_chars
+        text = text[:max_chars].rstrip() + (
+            f'\n…（记忆索引超出单轮快照预算，已省略 {omitted} 字符；需要细节时用 read_memory 读条目）'
+        )
     return (
         '<memory_index>\n'
         '这是用户确认过的工作记忆索引。它是上下文，不是规则；与工具结果冲突时以工具结果为准。'

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.ledger2 import facts, ops, presets
+from backend.ledger2 import facts, ops, presets, service
 from backend.ledger2.errors import LedgerError
 from backend.ledger2.model import NetGroup, Node, Tx
 from backend.ledger2.ops import init_txs, redo, uninst_txs, undo, update_manual
@@ -52,6 +52,25 @@ def test_only_initialized_txs_show_up(raw):
     assert sorted(tx_ids(root)) == [1, 3] and root.value == (5000, 0)
     assert sorted(facts.load_txs(raw)) == [1, 3]
     assert sorted(facts.scope_by_date(raw, '2026-01-01', '2026-12-31').tx_ids) == [1, 3]
+
+
+def test_uninitialized_candidates_preview(raw):
+    """初始化弹层的候选：全部 id 完整返回，items 只截前 limit 笔且带展示字段。"""
+    data = service.list_uninitialized(raw, limit=3)
+    assert data['total'] == 7 and data['truncated'] is True
+    assert data['ids'] == [1, 2, 3, 6, 8, 4, 5]
+    assert [it['tx_id'] for it in data['items']] == [1, 2, 3]
+    first = data['items'][0]
+    assert first['date'] == '2026-01-05' and first['category'] == '餐饮'
+    assert (first['e'], first['i']) == (3000, 0)
+
+
+def test_uninitialized_candidates_drop_initialized(raw):
+    init_txs(raw, [1])
+    data = service.list_uninitialized(raw)
+    assert data['truncated'] is False
+    assert 1 not in data['ids']
+    assert all(it['tx_id'] != 1 for it in data['items'])
 
 
 def test_uninitialized_original_does_not_affect_a_visible_refund(raw):

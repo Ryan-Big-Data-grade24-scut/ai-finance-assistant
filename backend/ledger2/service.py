@@ -16,9 +16,10 @@ def ensure(conn) -> None:
 
 
 def _scope(conn, date_from: str | None, date_to: str | None):
+    """读时作用域：日期区间。"""
     if not date_from and not date_to:
         return None
-    if not (date_from and date_to):
+    if bool(date_from) != bool(date_to):
         raise LedgerError('BAD_RANGE', '日期范围要同时给起止两个日期。')
     if date_from > date_to:
         raise LedgerError('BAD_RANGE', '起始日期不能晚于结束日期。')
@@ -46,11 +47,22 @@ def get_tree(conn, date_from: str | None = None, date_to: str | None = None) -> 
         root = reader.read_scope(root, scope)
     return {
         'tree': reader.to_json(root),
-        'scope': {'date_from': date_from, 'date_to': date_to, 'tx_in_scope': reader._count(root), 'tx_total': total},
+        'scope': {'date_from': date_from, 'date_to': date_to,
+                  'tx_in_scope': reader._count(root), 'tx_total': total},
         'uninit': len(facts.uninitialized_ids(conn)),
         'available': facts.date_bounds(conn),
         'status': status(conn),
     }
+
+
+def list_uninitialized(conn, limit: int = 500) -> dict:
+    """初始化弹层的候选：全部未初始化 id + 前 N 笔的展示字段。
+
+    `ids` 完整返回，前端才能「全选/反选」后精确传 `tx_ids`；`items` 只用于列表展示。
+    """
+    ids = facts.uninitialized_ids(conn)
+    items = facts.uninitialized_preview(conn, limit)
+    return {'total': len(ids), 'ids': ids, 'items': items, 'truncated': len(ids) > len(items)}
 
 
 def _need(op: dict, key: str):
@@ -108,15 +120,16 @@ def _apply_update(conn, op: dict) -> None:
         # 交易的人工字段叫 title（前端仍叫「命名」）
         ops.update_manual(conn, item.tx_id, name, note)
     else:
-        raise LedgerError('MIRROR_HAS_NO_MANUAL', 't′ 没有人工字段，只能改它所属的 t。')
+        raise LedgerError('MIRROR_HAS_NO_MANUAL', '镜像交易没有人工字段，只能改它所属的原始交易。')
 
 
 def apply(conn, op: dict) -> dict:
     """执行一个用户操作。返回 {'created': {...}}（新建对象的 id），树由调用方再读。
 
-    选择语义分两种（见 draft 10）：
+    选择语义分三种（见 draft 10）：
     - 最简（move / join / create_*）：`ops.fold_*`，被覆盖的子项不再单独处理；
-    - 最繁（dissolve / split / unsplit）：`ops.expand_selection`，展开出全部可执行对象。
+    - 最繁（split / unsplit）：`ops.expand_selection`，展开出全部可执行对象；
+    - 解散（dissolve）：只解散明确选中的 M / +2，不把未选中的子节点一起拆掉。
     """
     kind = _need(op, 'type')
     created: dict = {}
@@ -135,13 +148,13 @@ def apply(conn, op: dict) -> dict:
     elif kind == 'create_group':
         name = (_need(op, 'name') or '').strip()
         if not name:
-            raise LedgerError('EMPTY_NAME', '新建 +2 时必须命名。')
+            raise LedgerError('EMPTY_NAME', '新建净额组时必须命名。')
         txs = ops.fold_for_join(conn, _need(op, 'items'))
         created['group_id'] = ops.create_net_group(conn, txs, name, op.get('note') or '')
     elif kind == 'dissolve':
-        nodes, groups, _ = ops.expand_selection(conn, _need(op, 'items'))
-        nodes.discard(root_id(conn))            # 根不能解散；选中根时忽略它
-        ops.dissolve(conn, sorted(nodes), sorted(groups))
+        nodes, groups = ops.dissolve_selection(conn, _need(op, 'items'))
+        nodes = [n for n in nodes if n != root_id(conn)]    # 根不能解散；选中根时忽略它
+        ops.dissolve(conn, nodes, groups)
     elif kind == 'split':
         if 'items' in op:
             _nodes, _groups, txs = ops.expand_selection(conn, op['items'])

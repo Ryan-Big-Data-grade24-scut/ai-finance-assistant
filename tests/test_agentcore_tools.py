@@ -306,7 +306,7 @@ def test_classification_examples_are_per_tx_still_current_and_user_confirmed(rea
 def test_mcp_sdk_and_web_registry_share_business_schema_and_results(ready_db, staged):
     from mcp.shared.memory import create_connected_server_and_client_session
 
-    from backend.mcp import agentcore_server as mcp
+    from backend.mcp import server as mcp
 
     async def check():
         async with create_connected_server_and_client_session(mcp.server) as client:
@@ -315,8 +315,11 @@ def test_mcp_sdk_and_web_registry_share_business_schema_and_results(ready_db, st
             assert [(t.name, t.description, t.inputSchema) for t in resources] == [
                 (t['function']['name'], t['function']['description'], t['function']['parameters']) for t in web
             ]
-            assert len(resources) == 5
-            assert not {'finance_ledger_propose', 'finance_import_prepare', 'todo_write'} & {t.name for t in resources}
+            assert len(resources) == 6
+            assert not {'finance_ledger_propose', 'finance_import_prepare', 'todo_write', 'read_memory'} & {
+                t.name for t in resources}
+            skill = await client.call_tool('read_skill', {'skill_id': 'ledger-classify'})
+            assert not skill.isError and '<skill_content' in mcp._payload(skill)['content']
             args = {'stage_id': staged['stage_id']}
             imported = await client.call_tool(COMMIT, args)
             assert not imported.isError and mcp._payload(imported) == result(COMMIT, args)

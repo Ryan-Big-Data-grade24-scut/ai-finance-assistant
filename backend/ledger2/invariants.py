@@ -32,15 +32,16 @@ def violations(conn) -> list[str]:
     for r in conn.execute(
             "SELECT p.tx_id FROM ledger2_tx p WHERE p.role='mirror' "
             "AND NOT EXISTS (SELECT 1 FROM ledger2_split_tx s WHERE s.src_tx_id=p.tx_id)"):
-        out.append(f'交易 {r["tx_id"]} 有镜像行但没有分裂记录')
+        out.append(f'交易 {r["tx_id"]} 有镜像交易行但缺少镜像记录')
 
     # 初始化：一行 = 已初始化（正常状态 initialized 恒为 1；0 只可能是坏数据）。
+    roles = {'primary': '原始交易', 'mirror': '镜像交易'}
     for r in conn.execute("SELECT tx_id, role FROM ledger2_tx WHERE initialized != 1"):
-        out.append(f'交易 {r["tx_id"]}（{r["role"]}）的行标成了未初始化')
+        out.append(f'交易 {r["tx_id"]}（{roles.get(r["role"], r["role"])}）的行标成了未初始化')
     for r in conn.execute(
             "SELECT s.src_tx_id FROM ledger2_split_tx s WHERE NOT EXISTS "
             "(SELECT 1 FROM ledger2_tx p WHERE p.tx_id=s.src_tx_id AND p.role='mirror')"):
-        out.append(f'交易 {r["src_tx_id"]} 有分裂记录但 t′ 没有行')
+        out.append(f'交易 {r["src_tx_id"]} 有镜像记录但没有对应的镜像交易行')
     return out
 
 

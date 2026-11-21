@@ -2,23 +2,27 @@
 /**
  * 账本代数 V2 —— 表格视图 / 星云视图 + 主控台。
  *
- * 选择 ⇒ 操作 是这套引擎的核心：移动 / 加入 / 新建 / 分裂 / 解散 / 取消分裂都有一个「已选集合」。
+ * 选择 ⇒ 操作 是这套引擎的核心：移动 / 加入 / 新建 / 生成镜像 / 解散 / 取消镜像都有一个「已选集合」。
  * - 单击条目 = 选择（Ctrl/⌘ 单击 = 加选 / 取消）；空白处 / 未选中条目上拖动 = 框选；
- * - 选中后按住条目立即就能拖动：拖到 M 上 = 移动，拖到 +2 上 = 加入；非法放置时指针旁给理由；
+ * - 选中后按住条目立即就能拖动：拖到分组上 = 移动，拖到净额组上 = 加入；非法放置时指针旁给理由；
  * - 中键（滚轮键）按住上下拖 = 滚动表格；星云视图里中键按住拖 = 移动视野；
  * - 写操作之后**保持原来的选中状态**：移动 / 加入 / 新建不动选择；
- *   分裂后加上新生成的 t′；取消分裂后把 t′ 换成原型 t；解散后只剩还活着的那些；
- * - 新建 M / +2 不在这里填名字：点按钮后弹框让你命名（备注可选）；
+ *   生成镜像后加上新的镜像交易；取消镜像后换回原始交易；解散后只剩还活着的那些；
+ * - 新建分组 / 净额组不在这里填名字：点按钮后弹框让你命名（备注可选）；
  * - 单选时右侧「详细信息」面板显示它的命名 / 备注和交易的其它字段。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
-  applyLedger2Op, getLedger2Tree, redoLedger2, undoLedger2,
+  applyLedger2Op, getLedger2Tree, getLedger2Uninitialized, redoLedger2, undoLedger2,
+  Ledger2Error,
   type Ledger2Group, type Ledger2Node, type Ledger2Op, type Ledger2Range,
-  type Ledger2Tree, type Ledger2Tx,
+  type Ledger2Tree, type Ledger2Tx, type Ledger2UninitItem,
 } from '@/api/ledger2'
 import Ledger2Graph from '@/components/Ledger2Graph.vue'
+import {
+  clearAgentPage, setAgentPageRange, setAgentPageRoute, setAgentPageSelection,
+} from '@/utils/agentPageState'
 
 type Row =
   | { key: string; depth: number; kind: 'node'; node: Ledger2Node; parentId: string | null }
@@ -29,11 +33,70 @@ const data = ref<Ledger2Tree | null>(null)
 const loading = ref(false)
 const error = ref('')
 const notice = ref('')
-const view = ref<'table' | 'star'>('table')
-const dateFrom = ref('')
-const dateTo = ref('')
+const route = useRoute()
+
+function storedView(): 'table' | 'star' {
+  try {
+    return localStorage.getItem('ledger2.view') === 'star' ? 'star' : 'table'
+  } catch {
+    return 'table'
+  }
+}
+const view = ref<'table' | 'star'>(storedView())
+watch(view, (v) => {
+  try { localStorage.setItem('ledger2.view', v) } catch { /* 隐私模式等场景忽略 */ }
+})
+
+const validDate = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+
+interface StoredRange { date_from: string; date_to: string }
+/**
+ * 最近一次的范围。URL query 是首选（刷新 / 前进后退 / 从助手返回）；
+ * 导航栏的 `/v2` 链接本身不带 query，所以再用 localStorage 兜一层，
+ * 否则「切到别的页再切回来」会掉回本月。
+ */
+function storedRange(): StoredRange | null {
+  try {
+    const raw = localStorage.getItem('ledger2.range')
+    if (!raw) return null
+    const value = JSON.parse(raw) as Partial<Record<keyof StoredRange, unknown>>
+    if (!value || typeof value !== 'object') return null
+    return {
+      date_from: validDate(value.date_from) ? value.date_from : '',
+      date_to: validDate(value.date_to) ? value.date_to : '',
+    }
+  } catch {
+    return null
+  }
+}
+
+const queryFrom = route.query.date_from
+const queryTo = route.query.date_to
+const queryFromOk = validDate(queryFrom) ? queryFrom : ''
+const queryToOk = validDate(queryTo) ? queryTo : ''
+const queryRange = !!queryFromOk && !!queryToOk && queryFromOk <= queryToOk
+const saved = queryRange ? null : storedRange()
+const savedDatePair = !!saved && ((!saved.date_from && !saved.date_to)
+  || (!!saved.date_from && !!saved.date_to && saved.date_from <= saved.date_to))
+const restore = saved && savedDatePair ? saved : null
+const initialRange = queryRange
+  ? { from: queryFromOk, to: queryToOk }
+  : restore ? { from: restore.date_from, to: restore.date_to } : null
+const hasInitialRange = initialRange !== null
+const dateFrom = ref(initialRange?.from ?? '')
+const dateTo = ref(initialRange?.to ?? '')
+/** 只禁「只填了一头」的输入；两头都空表示全部日期。 */
+const canLoad = computed(() => !loading.value && (!!dateFrom.value === !!dateTo.value))
 const expanded = ref<Set<string>>(new Set(['root']))
 const selected = ref<Set<string>>(new Set())
+
+// 浮窗助手读这一份页面快照；只带范围和引用，金额仍由助手自己重读账本。
+watch([dateFrom, dateTo, selected], () => {
+  setAgentPageRange(dateFrom.value, dateTo.value)
+  setAgentPageSelection([...selected.value])
+}, { immediate: true })
+watch(() => route.path, path => setAgentPageRoute(path), { immediate: true })
 
 const moveTarget = ref('root')
 const joinTarget = ref('')
@@ -56,19 +119,26 @@ const treeEl = ref<HTMLElement | null>(null)
 const rowEls = new Map<string, HTMLElement>()
 
 const OP_LABELS: Record<string, string> = {
-  init: '初始化', create_node: '新建 M', move: '移动', join: '加入 +2', create_group: '新建 +2',
-  dissolve: '解散', split: '分裂', unsplit: '取消分裂', update: '改名/备注',
-  create_net_group: '新建 +2', add_group_member: '加入 +2', remove_group_member: '移出 +2',
-  dissolve_node: '解散', dissolve_group: '解散', split_tx: '分裂', unsplit_tx: '取消分裂',
-  rename_node: '改名', rename_group: '改名', update_node: '改名/备注', update_manual: '改名/备注',
+  init: '初始化', uninstall: '卸载', create_node: '新建分组', move: '移动', join: '加入净额组',
+  create_group: '新建净额组', dissolve: '解散', split: '生成镜像', unsplit: '取消镜像',
+  update: '改名/备注', create_net_group: '新建净额组', add_group_member: '加入净额组',
+  remove_group_member: '移出净额组', dissolve_node: '解散', dissolve_group: '解散',
+  split_tx: '生成镜像', unsplit_tx: '取消镜像', rename_node: '改名', rename_group: '改名',
+  update_node: '改名/备注', update_manual: '改名/备注',
 }
 const opLabel = (name: string) => OP_LABELS[name] ?? name
 
 const yuan = (cents: number) => (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const pad = (n: number) => String(n).padStart(2, '0')
 
-const range = (): Ledger2Range => (dateFrom.value && dateTo.value
-  ? { date_from: dateFrom.value, date_to: dateTo.value } : {})
+const range = (): Ledger2Range => {
+  const out: Ledger2Range = {}
+  if (dateFrom.value && dateTo.value) {
+    out.date_from = dateFrom.value
+    out.date_to = dateTo.value
+  }
+  return out
+}
 
 /**
  * 把仪表盘上的「当前范围 + 已选对象」显式带到账本助手。
@@ -115,9 +185,9 @@ function accept(next: Ledger2Tree) {
 /**
  * 跑一次读或写。**写之后保持原来的选中状态**（不是额外加的函数，而是这里统一收尾）：
  * - 移动 / 加入 / 新建：引擎没删东西，原选择经 accept 的存活过滤后原样留下；
- * - 分裂：原来的 t / M / +2 不动，再补上每个新 t′（`created.split` 是真正裂开的源交易 id）；
- * - 取消分裂：t′ 没了，补上它的原型 t；M / +2 里还活着的子集照常留下；
- * - 解散：被解散的 M / +2 消失，剩下的存活子集经 accept 过滤后自然留下。
+ * - 生成镜像：原来的原始交易 / 分组 / 净额组不动，再补上每个新镜像交易（`created.split` 是真正生成镜像的原始交易 id）；
+ * - 取消镜像：镜像交易没了，补上它的原始交易；分组 / 净额组里还活着的子集照常留下；
+ * - 解散：被解散的分组 / 净额组消失，剩下的存活子集经 accept 过滤后自然留下。
  */
 async function run(job: () => Promise<Ledger2Tree>, ok?: string) {
   loading.value = true
@@ -127,7 +197,7 @@ async function run(job: () => Promise<Ledger2Tree>, ok?: string) {
     const next = await job()
     const created = next.result?.created
     accept(next)
-    // 新建后把新节点展开：被收进新 M / +2 的条目不会「消失」在折叠节点里
+    // 新建后把新节点展开：被收进新分组 / 净额组的条目不会「消失」在折叠节点里
     if (created?.node_id || created?.group_id) reveal(created.node_id ?? created.group_id ?? '')
     if (created?.split?.length) {
       selected.value = new Set([...selected.value, ...created.split.map(id => `txm:${id}`)])
@@ -143,7 +213,56 @@ async function run(job: () => Promise<Ledger2Tree>, ok?: string) {
   }
 }
 
-const load = () => run(() => getLedger2Tree(range()))
+/** 范围同时写 URL 和 localStorage：导航链接不带 query 时也能切回来。 */
+function rememberRange() {
+  try {
+    localStorage.setItem('ledger2.range', JSON.stringify({
+      date_from: dateFrom.value, date_to: dateTo.value,
+    }))
+  } catch {
+    // 隐私模式等场景忽略；URL query 仍然是主存储。
+  }
+}
+
+function syncUrl() {
+  const query: Record<string, string> = {}
+  for (const [key, value] of Object.entries(route.query)) {
+    if (typeof value === 'string') query[key] = value
+  }
+  if (dateFrom.value && dateTo.value) {
+    query.date_from = dateFrom.value
+    query.date_to = dateTo.value
+  } else {
+    delete query.date_from
+    delete query.date_to
+  }
+  // 时段是显示筛选，不留在 URL；顺手清掉旧版本留下的参数。
+  delete query.time_from
+  delete query.time_to
+  const same = query.date_from === route.query.date_from && query.date_to === route.query.date_to
+    && route.query.time_from === undefined && route.query.time_to === undefined
+  if (same) return
+  void router.replace({ path: route.path, query })
+}
+
+let loadedRange = ''
+const load = () => {
+  const key = `${dateFrom.value}|${dateTo.value}`
+  const changed = !!loadedRange && loadedRange !== key
+  // 选区属于「当前视图」：范围一变就清空，但只在确实有选区时提示，避免空喊。
+  const cleared = changed ? selected.value.size : 0
+  if (changed) {
+    selected.value = new Set()
+    moveTarget.value = 'root'
+    joinTarget.value = ''
+    filterActive.value = false
+    filterCount.value = 0
+  }
+  loadedRange = key
+  rememberRange()
+  syncUrl()
+  return run(() => getLedger2Tree(range()), cleared ? '时间范围已变化，已清空选区。' : undefined)
+}
 const send = (op: Ledger2Op, ok?: string) => run(() => applyLedger2Op(op, range()), ok)
 const undo = () => run(() => undoLedger2(range()), '已撤销')
 const redo = () => run(() => redoLedger2(range()), '已重做')
@@ -174,7 +293,7 @@ function showAll() {
 
 function rowName(r: Row): string {
   if (r.kind === 'node') return r.node.name
-  if (r.kind === 'group') return r.group.name || '（未命名 +2）'
+  if (r.kind === 'group') return r.group.name || '（未命名净额组）'
   return r.tx.title || r.tx.counterparty || r.tx.item || `#${r.tx.tx_id}`
 }
 function rowNote(r: Row): string {
@@ -251,10 +370,172 @@ const nodeOptions = computed(() => {
 const groupOptions = computed(() => {
   const out: { id: string; label: string }[] = []
   for (const r of rowIndex.value.values()) {
-    if (r.kind === 'group') out.push({ id: r.group.id, label: `${'　'.repeat(r.depth)}${r.group.name || '（未命名 +2）'}` })
+    if (r.kind === 'group') out.push({ id: r.group.id, label: `${'　'.repeat(r.depth)}${r.group.name || '（未命名净额组）'}` })
   }
   return out
 })
+
+// ── 筛选（只选出来，不改 scope）──────────────────────────────────────────
+
+type FilterField = 'time' | 'clock' | 'category' | 'source' | 'direction'
+const filterField = ref<FilterField>('time')
+const filterFrom = ref('')
+const filterTo = ref('')
+const filterClockFrom = ref('')
+const filterClockTo = ref('')
+const filterCategory = ref('')
+const filterSource = ref('')
+const filterDirection = ref('')
+const filterText = ref('')
+const filterActive = ref(false)
+const filterCount = ref(0)
+
+const categoryOptions = computed(() => {
+  const out = new Set<string>()
+  for (const r of rowIndex.value.values()) {
+    if (r.kind === 'tx') out.add(r.tx.category || '其他')
+  }
+  return [...out].sort((a, b) => a.localeCompare(b, 'zh-CN'))
+})
+const sourceOptions = computed(() => {
+  const out = new Set<string>()
+  for (const r of rowIndex.value.values()) {
+    if (r.kind === 'tx' && r.tx.source) out.add(r.tx.source)
+  }
+  return [...out].sort((a, b) => a.localeCompare(b, 'zh-CN'))
+})
+
+// 选到「时间 / 时段」时直接弹出对应的选择器，少一次点击；浏览器不给弹就保持普通输入。
+watch(filterField, (field) => {
+  if (field !== 'time' && field !== 'clock') return
+  nextTick(() => {
+    const testid = field === 'time' ? 'filter-from' : 'filter-clock-from'
+    const el = document.querySelector<HTMLInputElement & { showPicker?: () => void }>(
+      `[data-testid="${testid}"]`)
+    try { el?.showPicker?.() } catch { /* 需要用户手势 */ }
+  })
+})
+
+function rowSearchText(r: Row): string {
+  if (r.kind === 'tx') {
+    return [
+      r.tx.title, r.tx.counterparty, r.tx.item, r.tx.category, ...r.tx.category_path,
+      r.tx.source, r.tx.note, r.tx.memo, r.tx.date, r.tx.tx_time, String(r.tx.tx_id),
+      r.tx.role === 'mirror' ? '镜像交易' : '原始交易', yuan(r.tx.e), yuan(r.tx.i),
+    ].filter(Boolean).join('\n').toLowerCase()
+  }
+  if (r.kind === 'group') {
+    return [r.group.name, r.group.note, '净额组'].filter(Boolean).join('\n').toLowerCase()
+  }
+  const label = r.node.kind === 'root' ? '总账' : r.node.kind === 'category' ? '分类' : '分组'
+  return [r.node.name, r.node.note, label].filter(Boolean).join('\n').toLowerCase()
+}
+
+function fieldMatches(r: Row): boolean {
+  const field = filterField.value
+  if (field === 'time') {
+    if (!filterFrom.value && !filterTo.value) return true
+    if (r.kind !== 'tx') return false
+    return (!filterFrom.value || r.tx.date >= filterFrom.value)
+      && (!filterTo.value || r.tx.date <= filterTo.value)
+  }
+  if (field === 'clock') {
+    if (!filterClockFrom.value && !filterClockTo.value) return true
+    if (r.kind !== 'tx') return false
+    // tx_time 是带日期的完整时间；只取 时:分 比较，两端都包含。
+    const clock = r.tx.tx_time.match(/\d{2}:\d{2}/)?.[0] ?? ''
+    if (!clock) return false
+    return (!filterClockFrom.value || clock >= filterClockFrom.value)
+      && (!filterClockTo.value || clock <= filterClockTo.value)
+  }
+  if (field === 'category') {
+    if (!filterCategory.value) return true
+    return r.kind === 'tx' && (r.tx.category || '其他') === filterCategory.value
+  }
+  if (field === 'source') {
+    if (!filterSource.value) return true
+    return r.kind === 'tx' && (r.tx.source || '') === filterSource.value
+  }
+  if (!filterDirection.value) return true
+  if (r.kind !== 'tx') return false
+  return r.tx.kind === filterDirection.value
+}
+
+function textMatches(r: Row): boolean {
+  const query = filterText.value.trim().toLowerCase()
+  if (!query) return true
+  const haystack = rowSearchText(r)
+  return query.split(/\s+/).every(term => haystack.includes(term))
+}
+
+function expandAncestors(keys: Set<string>) {
+  const open = new Set(expanded.value)
+  const openPath = (r: Row) => {
+    if (r.kind === 'node') {
+      let cur: string | null = r.node.id
+      while (cur) { open.add(cur); cur = parentOf.value.get(cur) ?? null }
+      return
+    }
+    if (r.kind === 'group') {
+      open.add(r.group.id)
+      let cur: string | null = r.group.node_id
+      while (cur) { open.add(cur); cur = parentOf.value.get(cur) ?? null }
+      return
+    }
+    if (r.groupId) open.add(r.groupId)
+    let cur: string | null = r.parentId
+    while (cur) { open.add(cur); cur = parentOf.value.get(cur) ?? null }
+  }
+  for (const key of keys) {
+    const row = rowIndex.value.get(key)
+    if (row) openPath(row)
+  }
+  expanded.value = open
+}
+
+function applyFilter() {
+  if (!data.value || loading.value) return
+  const hasField = filterField.value === 'time'
+    ? !!(filterFrom.value || filterTo.value)
+    : filterField.value === 'clock' ? !!(filterClockFrom.value || filterClockTo.value)
+    : filterField.value === 'category' ? !!filterCategory.value
+    : filterField.value === 'source' ? !!filterSource.value
+    : !!filterDirection.value
+  if (!hasField && !filterText.value.trim()) {
+    notice.value = '先选择筛选条件或输入搜索词。'
+    return
+  }
+  const hits = new Set<string>()
+  for (const [key, row] of rowIndex.value) {
+    if (row.kind === 'node' && row.node.kind === 'root') continue
+    if (fieldMatches(row) && textMatches(row)) hits.add(key)
+  }
+  filterActive.value = true
+  filterCount.value = hits.size
+  if (!hits.size) {
+    selected.value = new Set()
+    notice.value = '当前范围和条件下没有匹配项。'
+    return
+  }
+  expandAncestors(hits)
+  selected.value = hits
+  notice.value = `已筛选并选中 ${hits.size} 项。`
+}
+
+function clearFilter() {
+  filterFrom.value = ''
+  filterTo.value = ''
+  filterClockFrom.value = ''
+  filterClockTo.value = ''
+  filterCategory.value = ''
+  filterSource.value = ''
+  filterDirection.value = ''
+  filterText.value = ''
+  filterActive.value = false
+  filterCount.value = 0
+  selected.value = new Set()
+  notice.value = '已清除筛选。'
+}
 
 // ── 选择 ─────────────────────────────────────────────────────────────────
 
@@ -267,9 +548,9 @@ const singleIsRoot = computed(() => (single.value?.kind === 'node' ? single.valu
 const singleLabel = computed(() => {
   const r = single.value
   if (!r) return ''
-  if (r.kind === 'group') return '+2'
-  if (r.kind === 'tx') return r.tx.role === 'mirror' ? '交易 t′' : '交易 t'
-  return r.node.kind === 'root' ? '总账根' : r.node.kind === 'category' ? '分类节点' : 'M（分组）'
+  if (r.kind === 'group') return '净额组'
+  if (r.kind === 'tx') return r.tx.role === 'mirror' ? '镜像交易' : '原始交易'
+  return r.node.kind === 'root' ? '总账根' : r.node.kind === 'category' ? '分类节点' : '分组'
 })
 const singleWhere = computed(() => {
   const r = single.value
@@ -277,7 +558,7 @@ const singleWhere = computed(() => {
   if (r.kind === 'tx') {
     const base = nodeName(r.parentId)
     const g = r.groupId ? rowIndex.value.get(`g:${r.groupId}`) : null
-    return g?.kind === 'group' ? `${base} / ${g.group.name || '（未命名 +2）'}` : base
+    return g?.kind === 'group' ? `${base} / ${g.group.name || '（未命名净额组）'}` : base
   }
   if (r.kind === 'group') return nodeName(r.group.node_id)
   return r.parentId ? nodeName(r.parentId) : '（顶层）'
@@ -323,7 +604,7 @@ function toggleOpen(id: string) {
   s.has(id) ? s.delete(id) : s.add(id)
   expanded.value = s
 }
-/** 展开一个节点 / +2（`g:<id>` 也接受），保证刚放进去的条目看得见。 */
+/** 展开一个节点 / 净额组（`g:<id>` 也接受），保证刚放进去的条目看得见。 */
 function reveal(keyOrId: string) {
   if (!keyOrId) return
   const id = keyOrId.startsWith('g:') ? keyOrId.slice(2) : keyOrId
@@ -417,7 +698,7 @@ function pressUp(e: PointerEvent) {
 
 /** 跟随指针的提示：悬停的放置目标 + 合法 / 非法原因。 */
 function updateGhost(x: number, y: number) {
-  let text = `拖动 ${dragging.value?.size ?? 0} 项：放到 M 上移动，放到 +2 上加入`
+  let text = `拖动 ${dragging.value?.size ?? 0} 项：放到分组上移动，放到净额组上加入`
   let bad = false
   let target: { key: string; kind: Row['kind'] } | null = null
   const el = document.elementFromPoint(x, y)?.closest('[data-drop-key]') as HTMLElement | null
@@ -430,7 +711,7 @@ function updateGhost(x: number, y: number) {
       bad = true
     } else {
       target = { key, kind }
-      text = kind === 'group' ? '放开：加入这个 +2' : '放开：移到这里'
+      text = kind === 'group' ? '放开：加入这个净额组' : '放开：移到这里'
     }
   }
   dropTarget.value = target
@@ -445,7 +726,7 @@ function draggedKeys(): string[] {
 function dropReason(targetKey: string, kind: Row['kind']): string | null {
   const keys = draggedKeys()
   if (!keys.length) return '没有要拖动的项'
-  if (kind === 'tx') return '交易不能作为放置目标：请拖到 M（移动）或 +2（加入）上'
+  if (kind === 'tx') return '交易不能作为放置目标：请拖到分组（移动）或净额组（加入）上'
   const rowsIn = keys.map(k => rowIndex.value.get(k)).filter((r): r is Row => !!r)
   if (kind === 'node') {
     const nodeRow = rowIndex.value.get(targetKey)
@@ -453,7 +734,7 @@ function dropReason(targetKey: string, kind: Row['kind']): string | null {
     for (const r of rowsIn) {
       if (r.kind !== 'node') continue
       if (r.node.id === nodeRow.node.id) return '不能移到自己里面'
-      if (isDescendant(nodeRow.node.id, r.node.id)) return '不能把 M 移到它自己的子树里'
+      if (isDescendant(nodeRow.node.id, r.node.id)) return '不能把分组移到它自己的子树里'
     }
     return null
   }
@@ -461,7 +742,7 @@ function dropReason(targetKey: string, kind: Row['kind']): string | null {
   if (!gRow || gRow.kind !== 'group') return '这个位置不能放'
   const g = gRow.group
   for (const r of rowsIn) {
-    if (r.kind !== 'tx') return '加入 +2 只能选交易（不能有 M / +2）'
+    if (r.kind !== 'tx') return '加入净额组只能选交易（不能有分组或净额组）'
     if (g.members.some(m => m.ref === r.tx.ref)) return '这笔交易已经在组里了'
     if (r.parentId !== g.node_id) {
       return `只能加入同父的交易：「${nodeName(r.parentId)}」和组所在的「${nodeName(g.node_id)}」不同`
@@ -476,7 +757,7 @@ function performDrop(key: string, kind: Row['kind']) {
   if (kind === 'group') {
     const row = rowIndex.value.get(key)
     if (!row || row.kind !== 'group') return
-    void send({ type: 'join', items: keys, group_id: row.group.id }, '已加入 +2')
+    void send({ type: 'join', items: keys, group_id: row.group.id }, '已加入净额组')
       .then(() => { if (!error.value) reveal(key) })
   } else if (kind === 'node') {
     void send({ type: 'move', items: keys, target: key }, '已移动')
@@ -555,6 +836,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointermove', bandMove)
   window.removeEventListener('pointerup', bandEnd)
   window.removeEventListener('pointercancel', bandEnd)
+  clearAgentPage()
 })
 
 /** 星云视图展开 / 折叠（和表格的 ▸ / ▾ 同一份 expanded）。 */
@@ -596,7 +878,7 @@ function confirmCreate() {
   const items = selList.value
   dialog.value = null
   if (d.kind === 'node') send({ type: 'create_node', name, note: note || undefined, items }, `已新建「${name}」`)
-  else send({ type: 'create_group', name, note: note || undefined, items }, `已新建 +2「${name}」`)
+  else send({ type: 'create_group', name, note: note || undefined, items }, `已新建净额组「${name}」`)
 }
 function cancelCreate() {
   dialog.value = null
@@ -611,13 +893,191 @@ const doMove = async () => {
 }
 const doJoin = async () => {
   if (!selList.value.length || !joinTarget.value) return
-  await send({ type: 'join', items: selList.value, group_id: joinTarget.value }, '已加入 +2')
+  await send({ type: 'join', items: selList.value, group_id: joinTarget.value }, '已加入净额组')
   if (!error.value) reveal(joinTarget.value)
 }
-const doSplit = () => selList.value.length && send({ type: 'split', items: selList.value }, '已分裂')
+const doSplit = () => selList.value.length && send({ type: 'split', items: selList.value }, '已生成镜像')
 const doDissolve = () => selList.value.length && send({ type: 'dissolve', items: selList.value }, '已解散')
-const doUnsplit = () => selList.value.length && send({ type: 'unsplit', items: selList.value }, '已取消分裂')
-const doInit = () => send({ type: 'init', style: 'platform' }, '已按平台分类初始化')
+const doUnsplit = () => selList.value.length && send({ type: 'unsplit', items: selList.value }, '已取消镜像')
+
+// ── 初始化（常驻入口 + 两步弹层）──────────────────────────────────────────
+
+type InitMode = 'platform' | 'root' | 'new_node' | 'target' | 'assistant'
+const initOpen = ref(false)
+const initStep = ref<1 | 2>(1)
+const initMode = ref<InitMode>('platform')
+const initName = ref('')
+const initTarget = ref('root')
+const initBusy = ref(false)
+const initCount = computed(() => data.value?.uninit ?? 0)
+
+// 候选：ids 是完整的未初始化交易，items 只负责列表展示（可能截断）。
+const initLoading = ref(false)
+const initError = ref('')
+const initIds = ref<number[]>([])
+const initItems = ref<Ledger2UninitItem[]>([])
+const initTruncated = ref(false)
+const initSelected = ref<Set<number>>(new Set())
+const initSelectedCount = computed(() => initSelected.value.size)
+
+// 「放入已有分组」要列全部分组，不能只列当前时间范围里恰好有交易的节点
+// （选中未初始化交易时，当前范围很可能一笔都没有，树里只剩总账）。
+const initNodes = ref<{ id: string; label: string }[]>([])
+const initNodeOptions = computed(() => initNodes.value.length ? initNodes.value : nodeOptions.value)
+
+function flattenNodeOptions(tree: Ledger2Node): { id: string; label: string }[] {
+  const out: { id: string; label: string }[] = []
+  const walk = (n: Ledger2Node, depth: number) => {
+    out.push({ id: n.id, label: `${'　'.repeat(depth)}${n.name}` })
+    for (const c of n.children) if (c.type === 'node') walk(c, depth + 1)
+  }
+  walk(tree, 0)
+  return out
+}
+
+async function loadInitCandidates() {
+  if (initLoading.value) return
+  initLoading.value = true
+  initError.value = ''
+  try {
+    const [res, full] = await Promise.all([
+      getLedger2Uninitialized(500),
+      getLedger2Tree().catch(() => null),
+    ])
+    initIds.value = res.ids
+    initItems.value = res.items
+    initTruncated.value = res.truncated
+    initSelected.value = new Set(res.ids)
+    if (full) initNodes.value = flattenNodeOptions(full.tree)
+  } catch (e) {
+    initError.value = e instanceof Ledger2Error ? e.message : '读取未初始化交易失败。'
+  } finally {
+    initLoading.value = false
+  }
+}
+
+function toggleInitItem(id: number) {
+  const next = new Set(initSelected.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  initSelected.value = next
+}
+function selectAllInit(on: boolean) {
+  initSelected.value = on ? new Set(initIds.value) : new Set()
+}
+function invertInit() {
+  initSelected.value = new Set(initIds.value.filter(id => !initSelected.value.has(id)))
+}
+
+function openInit() {
+  if (!data.value || loading.value || initCount.value === 0) return
+  initStep.value = 1
+  initMode.value = 'platform'
+  initName.value = ''
+  initTarget.value = 'root'
+  initIds.value = []
+  initItems.value = []
+  initNodes.value = []
+  initSelected.value = new Set()
+  initOpen.value = true
+  void loadInitCandidates()
+}
+function closeInit() {
+  if (!initBusy.value) initOpen.value = false
+}
+
+function handoffInit() {
+  if (!initSelectedCount.value) return
+  const query: Record<string, string> = {}
+  if (dateFrom.value && dateTo.value) {
+    query.date_from = dateFrom.value
+    query.date_to = dateTo.value
+  }
+  const refs = [...initSelected.value].map(id => `tx:${id}`)
+  initOpen.value = false
+  router.push({ path: '/v2/assistant', query, state: { agentcoreSelection: refs } })
+}
+
+function nextInit() {
+  if (!initSelectedCount.value) return
+  if (initMode.value === 'new_node' && !initName.value.trim()) return
+  if (initMode.value === 'target' && !initTarget.value) return
+  if (initMode.value === 'assistant') {
+    handoffInit()
+    return
+  }
+  initStep.value = 2
+}
+
+async function confirmInit() {
+  if (!data.value || loading.value || initBusy.value) return
+  const ids = [...initSelected.value]
+  if (!ids.length) return
+  const count = ids.length
+  const name = initName.value.trim()
+  const op: Ledger2Op = { type: 'init', tx_ids: ids }
+  if (initMode.value === 'platform') op.style = 'platform'
+  else if (initMode.value === 'new_node') op.new_node = { name }
+  else if (initMode.value === 'target') op.target = initTarget.value
+  const targetLabel = initNodeOptions.value.find(o => o.id === initTarget.value)?.label.trim() || initTarget.value
+  const ok = initMode.value === 'platform' ? `已按平台分类初始化 ${count} 笔`
+    : initMode.value === 'new_node' ? `已初始化 ${count} 笔到「${name}」`
+    : initMode.value === 'target' ? `已初始化 ${count} 笔到「${targetLabel}」`
+    : `已初始化 ${count} 笔到总账`
+  initBusy.value = true
+  initOpen.value = false
+  selected.value = new Set()
+  try {
+    await send(op, ok)
+  } finally {
+    initBusy.value = false
+  }
+}
+
+// ── 卸载（只撤账本归属，原始流水不动）────────────────────────────────────
+
+const uninstallOpen = ref(false)
+
+function primaryTxIds(keys: string[]): number[] {
+  const ids = new Set<number>()
+  const visit = (row: Row) => {
+    if (row.kind === 'tx') {
+      if (row.tx.role === 'primary') ids.add(row.tx.tx_id)
+      return
+    }
+    if (row.kind === 'group') {
+      for (const member of row.group.members) {
+        if (member.role === 'primary') ids.add(member.tx_id)
+      }
+      return
+    }
+    for (const child of row.node.children) {
+      if (child.type === 'node') visit({ key: child.id, depth: 0, kind: 'node', node: child, parentId: row.node.id })
+      else if (child.type === 'group') {
+        visit({ key: `g:${child.id}`, depth: 0, kind: 'group', group: child, parentId: row.node.id })
+      } else if (child.role === 'primary') ids.add(child.tx_id)
+    }
+  }
+  for (const key of keys) {
+    const row = rowIndex.value.get(key)
+    if (row) visit(row)
+  }
+  return [...ids]
+}
+
+const uninstallIds = computed(() => primaryTxIds(selList.value))
+const canUninstall = computed(() => !loading.value && uninstallIds.value.length > 0)
+
+function openUninstall() {
+  if (canUninstall.value) uninstallOpen.value = true
+}
+async function confirmUninstall() {
+  const ids = uninstallIds.value
+  if (!ids.length) return
+  uninstallOpen.value = false
+  selected.value = new Set()
+  await send({ type: 'uninstall', tx_ids: ids }, `已卸载 ${ids.length} 笔（原始流水未删除）`)
+}
 
 // ── 改名 / 备注 ──────────────────────────────────────────────────────────
 
@@ -627,7 +1087,7 @@ function commitUpdate(item: string, field: 'name' | 'note', value: string) {
   const current = field === 'name' ? rowName(row) : rowNote(row)
   if (value === current) return
   if (row.kind === 'tx' && row.tx.role === 'mirror') {
-    error.value = 't′ 没有人工字段，只能改它所属的 t。'
+    error.value = '镜像交易没有人工字段，只能改它所属的原始交易。'
     return
   }
   send({ type: 'update', item, [field]: value }, field === 'name' ? '已命名' : '备注已更新')
@@ -662,8 +1122,9 @@ function commitConsole(field: 'name' | 'note') {
 // ── 生命周期 ─────────────────────────────────────────────────────────────
 
 onMounted(() => {
-  const d = new Date()
-  setMonth(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`)
+  // 地址栏带范围（刷新、前进后退、从助手回来）就沿用它；否则默认本月。
+  if (hasInitialRange) load()
+  else thisMonth()
 })
 </script>
 
@@ -693,6 +1154,55 @@ onMounted(() => {
         <ul v-if="data?.status.warnings.length" class="banner banner--warn" data-testid="warnings">
           <li v-for="w in data.status.warnings" :key="w">{{ w }}</li>
         </ul>
+
+        <!-- 筛选：只在当前范围里把匹配项选出来，不改账本 scope。 -->
+        <div class="l2-filter" data-testid="filter-bar">
+          <div class="filter-box">
+            <select v-model="filterField" class="filter-field" data-testid="filter-field" title="常用字段筛选">
+              <option value="time">日期</option>
+              <option value="clock">时段</option>
+              <option value="category">分类</option>
+              <option value="source">来源</option>
+              <option value="direction">收支</option>
+            </select>
+            <template v-if="filterField === 'time'">
+              <input v-model="filterFrom" type="date" data-testid="filter-from" aria-label="筛选起始日期">
+              <span class="muted">~</span>
+              <input v-model="filterTo" type="date" data-testid="filter-to" aria-label="筛选结束日期">
+            </template>
+            <template v-else-if="filterField === 'clock'">
+              <input v-model="filterClockFrom" type="time" step="60"
+                     data-testid="filter-clock-from" aria-label="筛选起始时刻">
+              <span class="muted">~</span>
+              <input v-model="filterClockTo" type="time" step="60"
+                     data-testid="filter-clock-to" aria-label="筛选结束时刻">
+            </template>
+            <select v-else-if="filterField === 'category'" v-model="filterCategory"
+                    class="filter-value" data-testid="filter-category">
+              <option value="">全部分类</option>
+              <option v-for="c in categoryOptions" :key="c" :value="c">{{ c }}</option>
+            </select>
+            <select v-else-if="filterField === 'source'" v-model="filterSource"
+                    class="filter-value" data-testid="filter-source">
+              <option value="">全部来源</option>
+              <option v-for="s in sourceOptions" :key="s" :value="s">{{ s }}</option>
+            </select>
+            <select v-else v-model="filterDirection" class="filter-value" data-testid="filter-direction">
+              <option value="">全部收支</option>
+              <option value="expense">支出</option>
+              <option value="income">收入</option>
+            </select>
+          </div>
+          <div class="filter-box filter-box--search">
+            <input v-model="filterText" class="filter-text" data-testid="filter-text"
+                   placeholder="搜索对方 / 商品 / 分类 / 备注 / 金额…"
+                   @keyup.enter="applyFilter">
+            <button :disabled="loading" data-testid="filter-apply" @click="applyFilter">筛选</button>
+            <button v-if="filterActive" class="link" data-testid="filter-clear" @click="clearFilter">清除</button>
+            <span v-if="filterActive" class="muted" data-testid="filter-count">已筛出 {{ filterCount }} 项</span>
+          </div>
+          <span class="filter-note" data-testid="filter-note">筛选只影响显示，不改变金额</span>
+        </div>
 
         <div v-if="view === 'table'" class="l2-tree" data-testid="tree">
           <!-- 仅展示现有状态，不改变账本数据、选择或拖拽行为 -->
@@ -746,8 +1256,8 @@ onMounted(() => {
                 </button>
                 <span v-else class="twisty" />
                 <span v-if="r.kind === 'node' && r.node.kind === 'category'" class="tag tag--cat">分类</span>
-                <span v-if="r.kind === 'group'" class="tag tag--net">+2</span>
-                <span v-if="r.kind === 'tx' && r.tx.role === 'mirror'" class="tag tag--m">t′</span>
+                <span v-if="r.kind === 'group'" class="tag tag--net">净额组</span>
+                <span v-if="r.kind === 'tx' && r.tx.role === 'mirror'" class="tag tag--m">镜像</span>
                 <input v-if="editing && editing.key === r.key && editing.field === 'name'" :ref="setEditInput"
                        v-model="editValue" class="inline-edit" @keyup.enter="commitEdit(true)"
                        @keyup.esc="commitEdit(false)" @blur="commitEdit(true)">
@@ -764,7 +1274,7 @@ onMounted(() => {
               </span>
               <span class="c-meta muted">
                 <template v-if="r.kind === 'tx'">{{ r.tx.date }} · {{ r.tx.category || '其他' }}</template>
-                <template v-else>{{ r.kind === 'node' ? r.node.count : r.group.count }} 笔{{ r.kind === 'group' ? ' · ν' : '' }}</template>
+                <template v-else>{{ r.kind === 'node' ? r.node.count : r.group.count }} 笔{{ r.kind === 'group' ? ' · 净额' : '' }}</template>
               </span>
               <span class="c-num e">{{ r.kind === 'node' ? (r.node.e ? '¥' + yuan(r.node.e) : '—')
                 : r.kind === 'group' ? (r.group.e ? '¥' + yuan(r.group.e) : '—') : (r.tx.e ? '¥' + yuan(r.tx.e) : '—') }}</span>
@@ -790,7 +1300,7 @@ onMounted(() => {
             <label class="field">到<input v-model="dateTo" type="date" data-testid="date-to"></label>
           </div>
           <div class="mini-grid">
-            <button :disabled="loading || !dateFrom || !dateTo" data-testid="apply-range" @click="load">按范围读</button>
+            <button :disabled="!canLoad" data-testid="apply-range" @click="load">按范围读</button>
             <button :disabled="loading" @click="thisMonth">本月</button>
             <button :disabled="loading || !lastMonth" @click="setMonth(lastMonth)">最近有数据</button>
             <button :disabled="loading" @click="showAll">全部</button>
@@ -800,43 +1310,45 @@ onMounted(() => {
             <button @click="expandAll(false)">全部折叠</button>
           </div>
           <p v-if="data" class="muted scope-line" data-testid="scope-info">
-            {{ data.scope.date_from ? `${data.scope.date_from} ~ ${data.scope.date_to}` : '全部时间' }}
+            {{ data.scope.date_from ? `${data.scope.date_from} ~ ${data.scope.date_to}` : '全部日期' }}
             · 范围内 {{ data.scope.tx_in_scope }} / 共 {{ data.scope.tx_total }} 笔
           </p>
-          <button v-if="data && data.uninit > 0" class="btn--init" :disabled="loading" data-testid="init"
-                  title="按平台分类初始化所有未初始化的交易（可撤销）" @click="doInit">
-            初始化 {{ data.uninit }} 笔
+          <button class="btn--init" :disabled="loading || initCount === 0" data-testid="init"
+                  :title="initCount ? `把 ${initCount} 笔未初始化的交易放进账本（可撤销）` : '当前没有未初始化的交易'"
+                  @click="openInit">
+            初始化{{ initCount ? ` ${initCount} 笔` : '' }}
           </button>
           <button class="btn--ask" data-testid="ask-assistant"
-                  :title="`把当前范围和 ${selList.length} 项选择带到账本助手`" @click="askAssistant">
-            ✎ 带着当前范围问助手
+                  :title="`把当前范围和 ${selList.length} 项选择带到 ATLAS`" @click="askAssistant">
+            ✎ 带着当前范围问 ATLAS
           </button>
         </section>
 
         <section class="panel panel--ops" data-testid="console">
-          <h3 class="panel-title"><i class="dot dot--ops" />操控面板</h3>
+          <h3 class="panel-title"><i class="dot dot--ops" />操作面板</h3>
           <div class="sel-line">
             <b>已选 {{ selList.length }} 项</b>
             <span v-if="selList.length" class="muted">支 ¥{{ yuan(selSum.e) }} · 收 ¥{{ yuan(selSum.i) }}</span>
             <button v-if="selList.length" class="link" @click="clearSelection">清除</button>
           </div>
           <div class="op-grid">
-            <button :disabled="loading || !selList.length" data-testid="create-node" @click="openCreate('node')">新建 M</button>
+            <button :disabled="loading || !selList.length" data-testid="create-node" @click="openCreate('node')">新建分组</button>
             <button :disabled="loading || !selAllTx || selRows.length < 2" data-testid="create-group"
-                    @click="openCreate('group')">新建 +2</button>
-            <button :disabled="loading || !selList.length" data-testid="split" @click="doSplit">分裂</button>
+                    @click="openCreate('group')">新建净额组</button>
+            <button :disabled="loading || !selList.length" data-testid="split" @click="doSplit">生成镜像</button>
             <button :disabled="loading || !selList.length" data-testid="dissolve" @click="doDissolve">解散</button>
-            <button :disabled="loading || !selList.length" data-testid="unsplit" @click="doUnsplit">取消分裂</button>
+            <button :disabled="loading || !selList.length" data-testid="unsplit" @click="doUnsplit">取消镜像</button>
+            <button :disabled="!canUninstall" data-testid="uninstall" @click="openUninstall">卸载所选</button>
           </div>
           <div class="op-line">
-            <select v-model="moveTarget" data-testid="move-target" title="移动到的目标 M">
+            <select v-model="moveTarget" data-testid="move-target" title="移动到的目标分组">
               <option v-for="o in nodeOptions" :key="o.id" :value="o.id">{{ o.label }}</option>
             </select>
             <button :disabled="loading || !selList.length" data-testid="move" @click="doMove">移动到</button>
           </div>
           <div class="op-line">
-            <select v-model="joinTarget" data-testid="join-target" title="加入到的 +2">
-              <option value="">选择 +2…</option>
+            <select v-model="joinTarget" data-testid="join-target" title="加入到的净额组">
+              <option value="">选择净额组…</option>
               <option v-for="g in groupOptions" :key="g.id" :value="g.id">{{ g.label }}</option>
             </select>
             <button :disabled="loading || !joinTarget || !selAllTx" data-testid="join" @click="doJoin">加入到</button>
@@ -846,7 +1358,7 @@ onMounted(() => {
             <button :disabled="loading || !data?.status.can_redo" data-testid="redo" @click="redo">↷ 重做</button>
           </div>
           <p class="muted hint-line">
-            单击＝选择（Ctrl/⌘ 单击＝加选）；选中后按住即可拖动，拖到 M 上＝移动、拖到 +2 上＝加入。
+            单击＝选择（Ctrl/⌘ 单击＝加选）；选中后按住即可拖动，拖到分组上＝移动、拖到净额组上＝加入。
             未选中的条目上直接拖＝框选；中键按住上下拖＝滚动。
           </p>
         </section>
@@ -856,7 +1368,7 @@ onMounted(() => {
           <template v-if="single">
             <div class="detail-head">
               <span class="pill">{{ singleLabel }}</span>
-              <span v-if="singleIsMirror" class="muted">t′ 没有人工字段</span>
+              <span v-if="singleIsMirror" class="muted">镜像交易没有人工字段</span>
             </div>
             <label class="d-row">
               <span>命名</span>
@@ -879,23 +1391,23 @@ onMounted(() => {
                 <dt>平台分类</dt><dd>{{ single.tx.category_path.length ? single.tx.category_path.join(' / ') : (single.tx.category || '其他') }}</dd>
                 <dt>来源</dt><dd>{{ single.tx.source || '—' }}</dd>
                 <dt>原始备注</dt><dd>{{ single.tx.note || '—' }}</dd>
-                <dt>身份</dt><dd>{{ single.tx.role === 'mirror' ? 't′（分裂镜像）' : 't（原始交易）' }}</dd>
+                <dt>身份</dt><dd>{{ single.tx.role === 'mirror' ? '镜像交易' : '原始交易' }}</dd>
               </template>
               <template v-else-if="single.kind === 'group'">
-                <dt>金额（ν）</dt><dd>支 ¥{{ yuan(single.group.e) }} · 收 ¥{{ yuan(single.group.i) }}</dd>
+                <dt>金额</dt><dd>支 ¥{{ yuan(single.group.e) }} · 收 ¥{{ yuan(single.group.i) }}</dd>
                 <dt>成员</dt><dd>{{ single.group.count }} 笔</dd>
               </template>
               <template v-else>
                 <dt>金额</dt><dd>支 ¥{{ yuan(single.node.e) }} · 收 ¥{{ yuan(single.node.i) }}</dd>
                 <dt>笔数</dt><dd>{{ single.node.count }} 笔</dd>
-                <dt>类型</dt><dd>{{ single.node.kind === 'root' ? '总账根' : single.node.kind === 'category' ? '平台分类' : 'M（分组）' }}</dd>
+                <dt>类型</dt><dd>{{ single.node.kind === 'root' ? '总账根' : single.node.kind === 'category' ? '平台分类' : '分组' }}</dd>
                 <dt>子项</dt><dd>{{ single.node.children.length }} 项</dd>
               </template>
               <dt>所在</dt><dd>{{ singleWhere }}</dd>
             </dl>
           </template>
           <p v-else class="muted">
-            {{ selList.length ? '已选多项，汇总见操控面板。' : '单选一项时显示命名、备注和明细。' }}
+            {{ selList.length ? '已选多项，汇总见操作面板。' : '单选一项时显示命名、备注和明细。' }}
           </p>
         </section>
 
@@ -905,7 +1417,7 @@ onMounted(() => {
           <ol v-else>
             <li v-for="h in [...data.status.history].reverse()" :key="h.seq" :class="{ undone: h.state === 'undone' }">
               <b>#{{ h.seq }}</b> {{ opLabel(h.name) }}
-              <small class="muted">{{ h.prims }} 个原语<template v-if="h.state === 'undone'"> · 已撤销</template></small>
+              <small class="muted">{{ h.prims }} 步操作<template v-if="h.state === 'undone'"> · 已撤销</template></small>
             </li>
           </ol>
         </section>
@@ -922,7 +1434,7 @@ onMounted(() => {
     <!-- 新建弹框 -->
     <div v-if="dialog" class="modal-mask" @mousedown.self="cancelCreate">
       <div class="modal" data-testid="create-dialog">
-        <h3>{{ dialog.kind === 'node' ? '新建 M（分组）' : '新建 +2（净额组）' }}</h3>
+        <h3>{{ dialog.kind === 'node' ? '新建分组' : '新建净额组' }}</h3>
         <p class="muted">已选 {{ selList.length }} 项。名字必填，备注可选。</p>
         <label class="field">命名 <input ref="dialogName" v-model="dialog.name" class="modal-input"
                                       @keyup.enter="confirmCreate" @keyup.esc="cancelCreate"></label>
@@ -932,6 +1444,121 @@ onMounted(() => {
           <button @click="cancelCreate">取消</button>
           <button class="btn--primary" :disabled="!dialog.name.trim()" data-testid="create-confirm"
                   @click="confirmCreate">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 初始化：两步弹层 -->
+    <div v-if="initOpen" class="modal-mask" @mousedown.self="closeInit">
+      <div class="modal modal--wide" data-testid="init-dialog">
+        <h3>初始化账本</h3>
+        <p v-if="initStep === 1" class="muted">
+          有 {{ initCount }} 笔交易还没有放进账本。先挑交易，再选放置方式，下一步确认。
+        </p>
+        <template v-if="initStep === 1">
+          <div class="init-candidates">
+            <div class="init-cand-head">
+              <b>候选交易</b>
+              <span class="muted">已选 {{ initSelectedCount }} / {{ initIds.length || initCount }}</span>
+              <button class="link" :disabled="initLoading || !initIds.length" @click="selectAllInit(true)">全选</button>
+              <button class="link" :disabled="initLoading || !initIds.length" @click="selectAllInit(false)">全不选</button>
+              <button class="link" :disabled="initLoading || !initIds.length" @click="invertInit">反选</button>
+            </div>
+            <p v-if="initLoading" class="muted">读取未初始化交易…</p>
+            <p v-else-if="initError" class="init-error">
+              {{ initError }}
+              <button class="link" @click="loadInitCandidates">重试</button>
+            </p>
+            <ul v-else class="init-cand-list" data-testid="init-candidates">
+              <li v-for="it in initItems" :key="it.tx_id">
+                <label>
+                  <input type="checkbox" :checked="initSelected.has(it.tx_id)"
+                         :data-testid="`init-cand-${it.tx_id}`" @change="toggleInitItem(it.tx_id)">
+                  <span class="init-cand-date">{{ it.date }}</span>
+                  <span class="init-cand-name">{{ it.item || it.counterparty || '（无摘要）' }}</span>
+                  <span class="init-cand-cat muted">{{ it.category }}</span>
+                  <span class="init-cand-amt">
+                    支 ¥{{ yuan(it.e) }}<template v-if="it.i"> · 收 ¥{{ yuan(it.i) }}</template>
+                  </span>
+                </label>
+              </li>
+            </ul>
+            <p v-if="initTruncated" class="muted">
+              列表只展开前 {{ initItems.length }} 笔；其余 {{ initIds.length - initItems.length }} 笔同样按当前选择处理。
+            </p>
+          </div>
+
+          <label class="init-option">
+            <input v-model="initMode" type="radio" value="platform" data-testid="init-mode-platform">
+            <span><b>按平台分类放置</b><small>用账单自带的分类（餐饮、交通、购物…）建分类节点，各自放入。</small></span>
+          </label>
+          <label class="init-option">
+            <input v-model="initMode" type="radio" value="root" data-testid="init-mode-root">
+            <span><b>全部放到总账</b><small>先平铺到总账根，之后用拖动或操作面板自己整理。</small></span>
+          </label>
+          <label class="init-option">
+            <input v-model="initMode" type="radio" value="new_node" data-testid="init-mode-new-node">
+            <span><b>放到新分组</b><small>新建一个分组，把这批交易全部放进去。</small></span>
+          </label>
+          <label v-if="initMode === 'new_node'" class="field init-name">
+            分组名
+            <input v-model="initName" class="modal-input" data-testid="init-name"
+                   placeholder="例如：2026 年 11 月" @keyup.enter="nextInit">
+          </label>
+          <label class="init-option">
+            <input v-model="initMode" type="radio" value="target" data-testid="init-mode-target">
+            <span><b>放入已有分组</b><small>直接选一个现有的分组或分类节点。</small></span>
+          </label>
+          <label v-if="initMode === 'target'" class="field init-name">
+            目标
+            <select v-model="initTarget" class="modal-input" data-testid="init-target">
+              <option v-for="o in initNodeOptions" :key="o.id" :value="o.id">{{ o.label }}</option>
+            </select>
+          </label>
+          <label class="init-option">
+            <input v-model="initMode" type="radio" value="assistant" data-testid="init-mode-assistant">
+            <span><b>交给 ATLAS 处理</b><small>带着这批候选跳到助手页，由 ATLAS 按你的要求放置。</small></span>
+          </label>
+        </template>
+        <template v-else>
+          <p class="init-summary" data-testid="init-summary">
+            将 <b>{{ initSelectedCount }} 笔</b>未初始化的交易
+            <template v-if="initMode === 'platform'">按平台分类放入账本。</template>
+            <template v-else-if="initMode === 'root'">全部放入总账根。</template>
+            <template v-else-if="initMode === 'target'">
+              放入「{{ initNodeOptions.find(o => o.id === initTarget)?.label.trim() || initTarget }}」。
+            </template>
+            <template v-else>放入新分组「{{ initName.trim() }}」。</template>
+          </p>
+          <p class="muted">这是账本操作，可撤销；原始流水不会改变。</p>
+        </template>
+        <div class="modal-actions">
+          <button v-if="initStep === 2" @click="initStep = 1">上一步</button>
+          <button @click="closeInit">取消</button>
+          <button v-if="initStep === 1" class="btn--primary" data-testid="init-next"
+                  :disabled="initLoading || initSelectedCount === 0
+                    || (initMode === 'new_node' && !initName.trim())"
+                  @click="nextInit">
+            {{ initMode === 'assistant' ? '交给 ATLAS' : '下一步' }}
+          </button>
+          <button v-else class="btn--primary" :disabled="initBusy || initSelectedCount === 0"
+                  data-testid="init-confirm" @click="confirmInit">确认初始化 {{ initSelectedCount }} 笔</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 卸载确认 -->
+    <div v-if="uninstallOpen" class="modal-mask" @mousedown.self="uninstallOpen = false">
+      <div class="modal" data-testid="uninstall-dialog">
+        <h3>卸载所选</h3>
+        <p>
+          将 <b>{{ uninstallIds.length }} 笔</b>交易移出账本：撤销它们的归属、人工命名/备注和生成的镜像交易。
+        </p>
+        <p class="muted">原始流水不会被删除；之后还可以重新初始化。这个操作可撤销。</p>
+        <div class="modal-actions">
+          <button @click="uninstallOpen = false">取消</button>
+          <button class="btn--danger" :disabled="!uninstallIds.length" data-testid="uninstall-confirm"
+                  @click="confirmUninstall">卸载 {{ uninstallIds.length }} 笔</button>
         </div>
       </div>
     </div>
@@ -967,6 +1594,20 @@ onMounted(() => {
 /* 中间视图 */
 .l2-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 .l2-main > .banner { flex: none; }
+
+/* 筛选条：常用字段 + 跨字段搜索；只选出匹配项，不改账本范围。 */
+.l2-filter {
+  flex: none; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  padding: 7px 10px; background: var(--color-card);
+  border: 1px solid var(--color-border); border-radius: 10px;
+}
+.filter-box { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.filter-box--search { flex: 1; min-width: 220px; }
+.filter-field { flex: none; }
+.filter-value { min-width: 110px; }
+.filter-text { flex: 1; min-width: 0; }
+.filter-note { flex: none; margin-left: auto; color: var(--color-muted); font-size: var(--font-sm, 13px); }
+.l2-filter input[type='date'] { min-width: 128px; }
 
 /* 右侧栏 */
 .l2-side {
@@ -1145,7 +1786,8 @@ onMounted(() => {
 .row--category .name { color: #244d7d; font-weight: 700; }
 .row--group { background: #f8f7fd; box-shadow: inset 3px 0 0 #a8a0da; }
 .row--group .name { font-weight: 600; }
-.row--sel, .row--sel:hover {
+/* 双层类名是为了压住斑马纹 .row--tx:nth-child(even)，避免选中行一半蓝一半白。 */
+.row.row--sel, .row.row--sel:hover {
   background: #e6f1ff;
   box-shadow: inset 3px 0 0 #337bce;
 }
@@ -1273,11 +1915,40 @@ input[type='text'], input:not([type]), input[type='date'], select {
 }
 .modal {
   background: #fff; border-radius: 12px; padding: 18px 20px; width: min(420px, 92vw);
+  max-height: 88vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 10px; box-shadow: 0 12px 40px rgba(16, 24, 40, .25);
 }
+.modal--wide { width: min(520px, 94vw); }
 .modal h3 { margin: 0; font-size: 16px; }
+.modal p { margin: 0; line-height: 1.55; }
 .modal-input { width: 100%; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.btn--danger { background: #b42318; border-color: #b42318; color: #fff; }
+.btn--danger:hover:not(:disabled) { background: #912018; }
+.init-option {
+  display: flex; align-items: flex-start; gap: 9px; padding: 9px 10px;
+  border: 1px solid var(--color-border); border-radius: 9px; cursor: pointer;
+  font-size: 13px; line-height: 1.45;
+}
+.init-option:has(input:checked) { border-color: #1d5fa8; background: #f3f8ff; }
+.init-option input { margin-top: 2px; flex: none; }
+.init-option span { display: flex; flex-direction: column; gap: 2px; }
+.init-option small { color: var(--color-muted); font-size: 12px; }
+.init-name { margin-top: 2px; }
+.init-summary { font-size: 14px; }
+.init-candidates { border: 1px solid var(--color-border); border-radius: 9px; padding: 8px 10px; }
+.init-cand-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px;
+}
+.init-cand-list { list-style: none; margin: 0; padding: 0; max-height: 150px; overflow-y: auto; }
+.init-cand-list li + li { border-top: 1px solid #f0f3f7; }
+.init-cand-list label {
+  display: grid; grid-template-columns: 18px 74px minmax(0, 1fr) 66px auto;
+  gap: 8px; align-items: center; padding: 4px 0; font-size: 12px; cursor: pointer;
+}
+.init-cand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.init-cand-amt { color: var(--color-expense); white-space: nowrap; }
+.init-error { color: var(--color-expense); font-size: 12px; }
 
 /* 窄屏：回到普通文档流，视图和内部分栏各自滚动。 */
 @media (max-width: 900px) {

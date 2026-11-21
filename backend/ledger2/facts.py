@@ -120,9 +120,10 @@ def date_bounds(conn) -> dict:
 
 
 def scope_by_date(conn, date_from: str, date_to: str) -> Scope:
-    """时间范围 → 存活交易 id 集合。范围是读时参数，不落表。"""
+    """日期区间 → 存活交易 id 集合。范围是读时参数，不落表。"""
     rows = conn.execute(
-        f'SELECT t.id {_FROM} WHERE t.date BETWEEN ? AND ? AND {_LIVE} AND {_INIT}', (date_from, date_to)
+        f'SELECT t.id {_FROM} WHERE {_LIVE} AND {_INIT} AND t.date BETWEEN ? AND ?',
+        (date_from, date_to)
     ).fetchall()
     return Scope(frozenset(int(r['id']) for r in rows))
 
@@ -140,6 +141,31 @@ def uninitialized_ids(conn) -> list[int]:
         f'SELECT t.id {_FROM} WHERE {_LIVE} AND NOT {_INIT} ORDER BY t.tx_time, t.id'
     ).fetchall()
     return [int(r['id']) for r in rows]
+
+
+def uninitialized_preview(conn, limit: int = 500) -> list[dict]:
+    """未初始化交易的展示字段（只读，给初始化弹层列候选；不参与账本计算）。"""
+    rows = conn.execute(
+        'SELECT t.id, t.date, t.tx_time, t.direction, t.amount, t.counterparty, t.item, '
+        f'{_CATEGORY_EXPR} AS category {_FROM} '
+        f'WHERE {_LIVE} AND NOT {_INIT} ORDER BY t.tx_time, t.id LIMIT ?',
+        (max(1, int(limit)),)
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        f = dict(r)
+        e, i = atoms.effective_atom_value(f)
+        out.append({
+            'tx_id': int(f['id']),
+            'date': f['date'],
+            'tx_time': f['tx_time'],
+            'counterparty': f['counterparty'] or '',
+            'item': f['item'] or '',
+            'category': f['category'],
+            'e': e,
+            'i': i,
+        })
+    return out
 
 
 def immutable_fields(conn, tx_ids) -> dict[int, dict]:

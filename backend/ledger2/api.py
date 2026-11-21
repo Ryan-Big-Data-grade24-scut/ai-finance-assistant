@@ -66,22 +66,31 @@ def tree(date_from: str | None = None, date_to: str | None = None):
         return service.get_tree(conn, date_from, date_to)
 
 
+@router.get('/uninitialized')
+def uninitialized(limit: int = 500):
+    with closing(_conn()) as conn:
+        return service.list_uninitialized(conn, limit)
+
+
 @router.post('/op')
 def op(data: ApplyIn):
     with closing(_conn()) as conn:
         result = service.apply(conn, data.op.model_dump(exclude_none=True))
-        return {'result': result, **service.get_tree(conn, data.date_from, data.date_to)}
+        return {'result': result, **service.get_tree(
+            conn, data.date_from, data.date_to)}
 
 
 @router.post('/undo')
 def undo(data: RangeIn):
     with closing(_conn()) as conn:
         result = service.undo(conn)
-        return {'result': result, **service.get_tree(conn, data.date_from, data.date_to)}
+        return {'result': result, **service.get_tree(
+            conn, data.date_from, data.date_to)}
 
 
 @router.post('/redo')
 def redo(data: RangeIn):
     with closing(_conn()) as conn:
         result = service.redo(conn)
-        return {'result': result, **service.get_tree(conn, data.date_from, data.date_to)}
+        return {'result': result, **service.get_tree(
+            conn, data.date_from, data.date_to)}

@@ -67,17 +67,12 @@ def catalog() -> list[SkillSummary]:
 
 
 def catalog_text() -> str:
-    """进系统提示词的目录。只有摘要，不含正文。"""
-    skills = catalog()
-    if not skills:
-        return ''
-    lines = [
-        '## Skill 目录',
-        '这里只有摘要。**载入之前不要推断或执行该 Skill 的指令**；'
-        '确定要用时先调用 read_skill。',
-        '',
-    ]
-    for skill in skills:
+    """进系统提示词的目录正文。只有摘要，不含正文。
+
+    固定标题与使用提醒在 `prompts/05_skills.md`；这里只生成动态条目。
+    """
+    lines = []
+    for skill in catalog():
         line = f'- `{skill.name}` — {skill.description}'
         if skill.when_to_use:
             line += f'（何时用：{skill.when_to_use}）'

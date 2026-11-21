@@ -6,7 +6,7 @@
  * 具体业务内容全在 views/ 里。
  */
 import { useRoute } from 'vue-router'
-import FloatingPenguin from '@/components/FloatingPenguin.vue'
+import FloatingLedgerAssistant from '@/components/FloatingLedgerAssistant.vue'
 const route = useRoute()
 </script>
 
@@ -20,7 +20,7 @@ const route = useRoute()
       <nav class="nav">
         <RouterLink to="/bill" class="nav-item">账单报告</RouterLink>
         <RouterLink to="/v2" class="nav-item">∑ 账本代数 V2</RouterLink>
-        <RouterLink to="/v2/assistant" class="nav-item">✎ 账本助手</RouterLink>
+        <RouterLink to="/v2/assistant" class="nav-item">✎ ATLAS</RouterLink>
         <RouterLink to="/import" class="nav-item">导入账单</RouterLink>
         <RouterLink to="/ai/settings" class="nav-item">AI 设置</RouterLink>
         <RouterLink to="/ai/history" class="nav-item">历史账单学习</RouterLink>
@@ -30,7 +30,7 @@ const route = useRoute()
     <main class="app-main" :class="{ 'app-main--wide': route.name === 'v2' || route.name === 'agentcore' }">
       <RouterView />
     </main>
-    <FloatingPenguin v-if="route.name !== 'agentcore'" />
+    <FloatingLedgerAssistant v-if="route.name !== 'agentcore'" />
   </div>
 </template>
 

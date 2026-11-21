@@ -58,7 +58,7 @@ _DATE = {'type': 'string', 'format': 'date', 'description': 'YYYY-MM-DD；起止
 _LEDGER_READ = _object({
     'mode': {'type': 'string', 'enum': ['summary', 'tree', 'node', 'tx', 'classification_examples'],
              'description': 'summary=总览和撤销栈；tree=根页；node=指定节点或净额组；tx=单笔；classification_examples=仍有效的旧手工确认范例。'},
-    'ref': _string('node/tx 模式的引用：节点 id、g:组id、tx:12、txm:12。', nonempty=True),
+    'ref': _string('node/tx 模式的引用：节点 id、g:组id、tx:12（原始交易）、txm:12（镜像交易）。', nonempty=True),
     'date_from': _DATE, 'date_to': _DATE, **_PAGING,
 }, 'mode')
 
@@ -67,20 +67,20 @@ _INIT_PLAN = _object({
                     '新节点。parent 是已有节点 id 或前面定义的 ref，省略为根；id 不给由引擎生成。'),
     'place': _array(_object({'node': _ID, 'txs': _array(_TX_ID, minimum=1)}, 'node', 'txs'),
                     'node 是已有 id 或 nodes 中的 ref；未指定归属的交易放根。'),
-    'splits': _array(_object({'tx': _TX_ID, 'node': _ID}, 'tx'), '分裂；node 不给时镜像与主交易同节点。'),
+    'splits': _array(_object({'tx': _TX_ID, 'node': _ID}, 'tx'), '生成镜像；node 不给时镜像交易与原始交易同节点。'),
     'groups': _array(_object({'name': _ID, 'txs': _array(_TX_REF, minimum=2), 'note': _TEXT}, 'name', 'txs'),
-                     '净额组；txs 是交易 id、tx:N 或 txm:N，成员必须同父。'),
+                     '净额组；txs 是原始交易或镜像交易的 id/引用，成员必须同父。'),
     'meta': {'type': 'object', 'patternProperties': {r'^[1-9][0-9]*$': _object({'title': _TEXT, 'note': _TEXT})},
              'additionalProperties': False, 'description': '按交易 id 字符串索引的人工标题和备注。'},
 })
 
 _LEDGER_APPLY = _object({
     'op': {'type': 'string', 'enum': sorted(ledger_tools._OPS), 'description': '要执行的 V2 操作。'},
-    'items': _array(_ID, '选择引用：节点 id、tx:12、txm:12、g:组id。create_node/move/join/create_group/dissolve/split/unsplit 用。', minimum=1),
+    'items': _array(_ID, '选择引用：节点 id、tx:12（原始交易）、txm:12（镜像交易）、g:组id。新建分组、移动、加入净额组、新建净额组、解散、生成镜像、取消镜像用。', minimum=1),
     'target': _string('move 或 init 的目标节点 id。', nonempty=True),
     'new_node': {**_object({'name': _ID, 'parent': _ID}, 'name'),
                  'description': 'init 时新建节点再放入。parent 省略时挂根。'},
-    'plan': {**_INIT_PLAN, 'description': '自定义 init，依次建节点、放置、分裂、建组。{} 表示放到根。'},
+    'plan': {**_INIT_PLAN, 'description': '自定义 init，依次建节点、放置、生成镜像、建净额组。{} 表示放到根。'},
     'tx_ids': _array(_TX_ID, 'init/uninstall 的明确交易 id 列表。', minimum=1),
     'all_uninitialized': {'type': 'boolean', 'description': 'init 时明确选择全部未初始化交易；与 tx_ids 互斥。'},
     'style': {'type': 'string', 'enum': ['platform'], 'description': 'init 按账单平台给出的 category 字段建节点并放入（如餐饮/交通/购物/其他收入），不是按微信/支付宝/银行等 source 分组；按来源分组要用 plan 自己建节点。'},
@@ -90,7 +90,7 @@ _LEDGER_APPLY = _object({
     'note': _string('备注；更新时给空串可清除。'),
     'item': _string('update 的单个对象引用。', nonempty=True),
     'node_id': _string('dissolve_node/rename_node/update_node 的节点 id。', nonempty=True),
-    'tx_id': {**_TX_ID, 'description': 'split/unsplit 的单笔选择（与 items 二选一），或 update_manual 的交易 id。'},
+    'tx_id': {**_TX_ID, 'description': '生成镜像/取消镜像的单笔选择（与 items 二选一），或 update_manual 的交易 id。'},
     'title': _string('update_manual 的人工标题。'),
     'expected_seq': {'type': 'integer', 'minimum': 1, 'description': 'undo/redo 可指定预期栈顶序号；先读 summary.status.history。'},
 }, 'op')
@@ -131,7 +131,7 @@ _register(ToolSpec(
         'status, tx_no, merchant_no, remark, date, month, year, weekday, hour, dedupe_key, raw_json, imported_at, import_batch。'
         'agentcore_tx 是排除逻辑删除的分析口径：tx_id, date, month, direction(收入/支出/中性), amount_cents(整数分), '
         'source, platform_id, category(人工分类优先，再平台原分类，最后其他), item, counterparty, status, initialized(1=已进 V2)。'
-        '按 id=tx_id 可取原始详情。只能读这两张流水快照表；3 秒、500 行、60KB，超出用聚合或排序分页。'
+        '按 id=tx_id 可取原始详情。只能读这两张流水快照表；30 秒、500 行、60KB，超出用聚合或排序分页。'
         'coverage 是全集日期覆盖，不是 WHERE 命中期；row_count 是结果行数。问 V2 净额用 finance_ledger_read，不能拿流水求和替代。'
     ),
     schema=_object({'sql': _string('一条 SQLite SELECT/WITH。', nonempty=True)}, 'sql'),
@@ -141,7 +141,7 @@ _register(ToolSpec(
 _register(ToolSpec(
     name='finance_ledger_read',
     description=(
-        '读 V2 树、金额、归属、人工字段和撤销历史。引擎先按范围投影、处理净额组和分裂，'
+        '读 V2 树、金额、归属、人工字段和撤销历史。引擎先按范围投影、处理净额组和镜像交易，'
         '所以不能把原始流水 SUM 当账本。e/i 是整数分；树/节点/组用 next_offset 逐页读直属子项，'
         '每页金额仍是整个投影的引擎结果。用 ref 继续读子树、组或单笔（也能查组中单笔）。'
         'classification_examples 只来自仍与目标一致的旧手工确认，不把当前归属或助手直写冒充用户确认。'
@@ -155,7 +155,8 @@ _register(ToolSpec(
     description=(
         '直接执行 V2 账本操作，不生成待确认卡。明确对象和目标后调用，下一步用 state=executed 的真实回执，'
         'created 返回实际新对象 id，seq 是操作日志序号。复用页面同一引擎：净额组同父、至少两成员；'
-        'move/join/create_* 折叠被覆盖的选择，dissolve/split/unsplit 展开；组内成员有整组移动等规则。'
+        '移动、加入、新建会折叠被覆盖的选择，生成镜像（split）/取消镜像（unsplit）会展开；'
+        'dissolve 只解散明确选中的分组或净额组，不展开未选中的子节点（子节点上移保留）；组内成员有整组移动等规则。'
         'init 的 style/target/new_node/plan 四选一，按指定归属一次放置比先全量再移动更直接。'
         '明确全量用 all_uninitialized=true，空数组不是全部。uninstall 只撤 V2 归属和人工字段，原始流水不动。'
         '连续操作根据上步回执和重读决定，不猜 id；undo/redo 是全账本栈，带 expected_seq 可确保目标正是指定那一步。'
@@ -187,11 +188,32 @@ _register(ToolSpec(
     handler=lambda args, ctx: import_tool.commit(args['stage_id']),
 ))
 
+def _skill_description() -> str:
+    lines = ['开始某类业务时载入对应 Skill，读清操作顺序和理由。可用：']
+    for skill in skills.catalog():
+        line = f'- {skill.name}：{skill.description}'
+        if skill.when_to_use:
+            line += f'（何时用：{skill.when_to_use}）'
+        lines.append(line)
+    lines.append('先载入再执行；正文作为工具结果进入对话。')
+    return '\n'.join(lines)
+
+
+def _skill_schema() -> dict:
+    prop = {'type': 'string', 'description': '要载入的 Skill id。'}
+    ids = [skill.name for skill in skills.catalog()]
+    if ids:
+        prop['enum'] = ids
+    else:
+        prop['minLength'] = 1
+    return _object({'skill_id': prop}, 'skill_id')
+
+
 _register(ToolSpec(
     name='read_skill',
-    description='开始某类业务时载入对应 Skill，读清操作顺序和理由。目录保持短且稳定，正文按需进入对话。',
-    schema=_object({'skill_id': _string('目录里的 Skill id，例如 finance-import。', nonempty=True)}, 'skill_id'),
-    handler=_read_skill, scope='harness', read_only=True,
+    description=_skill_description(),
+    schema=_skill_schema(),
+    handler=_read_skill, scope='business', read_only=True,
 ))
 
 _register(ToolSpec(

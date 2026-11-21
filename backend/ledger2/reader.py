@@ -27,7 +27,7 @@ def read_ledger(conn) -> Node:
     node_rows = {r['id']: dict(r) for r in conn.execute('SELECT * FROM ledger2_node')}
     root_id = next((nid for nid, r in node_rows.items() if r['parent_id'] is None), None)
     if root_id is None:
-        raise LedgerError('NO_ROOT', '这个账本没有根节点 M_r。')
+        raise LedgerError('NO_ROOT', '这个账本没有根节点（总账）。')
 
     primaries = facts.load_txs(conn)
     splits = {int(r['src_tx_id']) for r in conn.execute('SELECT src_tx_id FROM ledger2_split_tx')}
@@ -50,7 +50,7 @@ def read_ledger(conn) -> Node:
 
     for key, p in placements.items():
         if p['role'] == 'mirror' and key[0] not in splits:
-            raise LedgerError('MIRROR_WITHOUT_SPLIT', f'交易 {key[0]} 有镜像归属行，但没有分裂记录。')
+            raise LedgerError('MIRROR_WITHOUT_SPLIT', f'交易 {key[0]} 有镜像归属行，但没有生成镜像的记录。')
         if p['net_group_id']:
             if p['net_group_id'] not in groups:
                 raise LedgerError('GROUP_NOT_FOUND', f'归属行指向了不存在的组 {p["net_group_id"]}。')

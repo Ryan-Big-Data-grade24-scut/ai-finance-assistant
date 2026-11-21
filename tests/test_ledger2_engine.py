@@ -22,6 +22,11 @@ def _node(conn, name, items):
     return service.apply(conn, {'type': 'create_node', 'name': name, 'items': items})['created']['node_id']
 
 
+def _tx_ids(conn, node_id):
+    return [r[0] for r in conn.execute(
+        'SELECT tx_id FROM ledger2_tx WHERE node_id=? ORDER BY tx_id', (node_id,))]
+
+
 def _build_example(conn):
     """搭出用户的例子：M(t1, M_1)；M_1(M_12, t2, t3)；M_12(t4, t5)。"""
     m12 = _node(conn, 'M12', ['tx:4', 'tx:5'])
@@ -85,7 +90,27 @@ def test_move_group_keeps_members_at_same_parent(conn):
     assert g[0] == target and {r[0] for r in rows} == {target}
 
 
-# ── 解散（最繁）/ 取消分裂（最繁）─────────────────────────────────────────
+# ── 解散（只解选中层）/ 取消分裂（最繁）──────────────────────────────────
+
+def test_dissolve_only_selected_node_keeps_unselected_children(conn):
+    """只选 M1：拆掉 M1，未选中的 M12 保留并上移，M12 的 t4/t5 不动。"""
+    m, m1, m12 = _build_example(conn)
+    service.apply(conn, {'type': 'dissolve', 'items': [m1]})
+
+    assert conn.execute('SELECT 1 FROM ledger2_node WHERE id=?', (m1,)).fetchone() is None
+    parent = conn.execute('SELECT parent_id FROM ledger2_node WHERE id=?', (m12,)).fetchone()[0]
+    assert parent == m
+    assert _tx_ids(conn, m12) == [4, 5]
+    assert _tx_ids(conn, m) == [1, 2, 3]
+
+
+def test_dissolve_tx_only_has_nothing_to_dissolve(conn):
+    """解散不作用于单笔交易；只选交易与旧行为一致，报 NOTHING_TO_DISSOLVE。"""
+    _node(conn, 'M', ['tx:1'])
+    with pytest.raises(LedgerError) as e:
+        service.apply(conn, {'type': 'dissolve', 'items': ['tx:1']})
+    assert e.value.code == 'NOTHING_TO_DISSOLVE'
+
 
 def test_dissolve_batch_nested_one_step(conn):
     """父子一起解散：都删掉，内容落到「最近的没被解散的祖先」，一次撤销整体还原。"""

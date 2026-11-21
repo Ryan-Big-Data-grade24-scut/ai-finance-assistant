@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 from collections import deque
 from dataclasses import dataclass, field
@@ -19,8 +20,44 @@ from .registry import ToolContext
 from .store import new_id
 
 log = logging.getLogger(__name__)
-CONTEXT_LIMIT_TOKENS = 96_000  # 估算；真实窗口更小时处理 Provider 的溢出错误。
-COMPACT_AT_RATIO = 0.80
+
+
+def _env_int(name: str, default: int, *, low: int, high: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning('%s=%r 不是整数，使用默认值 %s', name, raw, default)
+        return default
+    if not low <= value <= high:
+        log.warning('%s=%s 超出允许范围 [%s, %s]，使用默认值 %s', name, value, low, high, default)
+        return default
+    return value
+
+
+def _env_ratio(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning('%s=%r 不是数字，使用默认值 %s', name, raw, default)
+        return default
+    if not 0.50 <= value <= 0.95:
+        log.warning('%s=%s 超出允许范围 [0.50, 0.95]，使用默认值 %s', name, value, default)
+        return default
+    return value
+
+
+# 默认 256K：多数可用的长上下文模型都能吃下；1M 模型用
+# AGENTCORE_CONTEXT_LIMIT=1000000 显式打开。窗口更小时仍由 Provider 的
+# CONTEXT_WINDOW_EXCEEDED 触发一次强制压缩，不会把整轮直接打死。
+CONTEXT_LIMIT_TOKENS = _env_int('AGENTCORE_CONTEXT_LIMIT', 256_000, low=16_000, high=2_000_000)
+COMPACT_AT_RATIO = _env_ratio('AGENTCORE_COMPACT_AT_RATIO', 0.80)
+FIXED_PREFIX_WARN_RATIO = 0.15
 RETRY_DELAY = 0.5
 MODEL_RETRIES = 2
 REPEATED_STEPS = 4
@@ -79,6 +116,28 @@ _STARTING: set[asyncio.Task] = set()
 
 def now_text() -> str:
     return datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z')
+
+
+def context_limits() -> dict:
+    """当前生效的上下文预算，供健康检查和排查使用。"""
+    return {
+        'context_limit_tokens': CONTEXT_LIMIT_TOKENS,
+        'compact_at_ratio': COMPACT_AT_RATIO,
+        'compact_at_tokens': int(CONTEXT_LIMIT_TOKENS * COMPACT_AT_RATIO),
+    }
+
+
+def _history_limit(system: str, tools: list[dict]) -> int:
+    """压缩前可用的对话预算：压缩线减去每步必带的固定前缀。
+
+    固定前缀（系统提示词 + 工具 schema）每步都要重发，必须先从压缩线里扣掉；
+    快照与工具结果已经在消息里，由 compact.estimate 一并计入。
+    """
+    fixed = truncate.approx_tokens(system + truncate.json_text(tools))
+    if fixed > CONTEXT_LIMIT_TOKENS * FIXED_PREFIX_WARN_RATIO:
+        log.warning('固定前缀约 %s tokens，占上下文上限 %.1f%%；工具 schema 或系统提示词可能过大。',
+                    fixed, fixed * 100 / max(1, CONTEXT_LIMIT_TOKENS))
+    return max(4_000, int(CONTEXT_LIMIT_TOKENS * COMPACT_AT_RATIO) - fixed)
 
 
 def _json_args(raw: str):
@@ -271,7 +330,7 @@ async def _compact(run: _Run, cfg, system: str, tools: list[dict], limit: int, *
 
 async def _loop(run: _Run, cfg, system: str, tools: list[dict]) -> None:
     run.messages_log = await asyncio.to_thread(session.events, run.session_id)
-    limit = int(CONTEXT_LIMIT_TOKENS * COMPACT_AT_RATIO) - truncate.approx_tokens(system + truncate.json_text(tools))
+    limit = _history_limit(system, tools)
     seen: deque[str] = deque(maxlen=24)
     repeats = 0
     while True:

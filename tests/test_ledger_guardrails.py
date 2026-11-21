@@ -332,26 +332,18 @@ def test_mcp_print_only_in_selftest():
 # ──────────────────────────────────────────────────────────────
 
 def test_ledger_tool_schema_has_no_raw_fields():
-    """账本工具的入参里不许出现原始字段名 / 表名。
+    """V2 账本工具的入参里不许出现原始字段名 / 表名。
 
-    这是「AI 分类插件改不了原始数据」的协议层防线。
-    V3 的三个账本工具：query_ledger_books / query_ledger_tree /
-    apply_ledger_op —— 最后一个的参数是**扁平可选参数**，
-    正好是最容易顺手加一个 `amount` 的地方，所以更要盯死。
+    这是「AI 分类插件改不了原始数据」的协议层防线：写工具只能选账本对象，
+    不能顺手加一个 `amount` 或 `raw_json` 直改原始凭证。
     """
-    import asyncio
+    from backend.mcp.server import _specs
 
-    from backend.mcp.server import mcp
-
-    tools = asyncio.run(mcp.list_tools())
     banned = {"amount", "tx_time", "direction", "counterparty", "pay_method",
               "raw_json", "merchant_no", "ledger_nodes", "ledger_legs",
-              "transactions_raw", "tx_overrides", "tx_overrides"}
-    seen = 0
-    for tool in tools:
-        if not tool.name.startswith(("query_ledger", "apply_ledger")):
-            continue
-        seen += 1
+              "transactions_raw", "tx_overrides"}
+    specs = _specs()
+    for spec in specs:
         keys = set()
 
         def walk(node):
@@ -362,10 +354,10 @@ def test_ledger_tool_schema_has_no_raw_fields():
                 for sub in (node.get("$defs") or {}).values():
                     walk(sub)
 
-        walk(tool.inputSchema or {})
+        walk(spec.schema or {})
         leaked = keys & banned
-        assert not leaked, f"{tool.name} 的 schema 泄漏了 {sorted(leaked)}"
-    assert seen >= 3, f"账本 MCP 工具只剩 {seen} 个 —— 护栏本身失效了"
+        assert not leaked, f"{spec.name} 的 schema 泄漏了 {sorted(leaked)}"
+    assert len(specs) >= 6, f"账本 MCP 工具只剩 {len(specs)} 个 —— 护栏本身失效了"
 
 
 # ──────────────────────────────────────────────────────────────

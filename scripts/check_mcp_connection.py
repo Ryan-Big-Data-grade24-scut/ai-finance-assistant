@@ -5,21 +5,20 @@ import json
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 GBK，勾叉和中文不能把自检本身弄崩。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 EXPECTED_TOOLS = {
-    "query_summary", "query_calendar", "query_trend", "query_by_category",
-    "query_by_method", "query_income_rank", "query_transactions", "get_tx_detail",
-    "list_pending_classification", "set_override", "import_bill",
-    "query_ledger_books", "query_ledger_tree", "apply_ledger_op",
-    "query_classification_status", "query_classification_batch",
-    "preview_classifications", "list_classification_proposals",
-    "get_classification_proposal", "resolve_classification_clarification",
-    "confirm_classifications", "reject_classifications", "undo_classifications",
-    "list_classification_rules", "set_classification_rule_enabled",
-    "update_classification_rule", "delete_classification_rule",
+    "finance_query_transactions", "finance_ledger_read", "finance_ledger_apply",
+    "finance_import_read", "finance_import_commit", "read_skill",
 }
 
 
@@ -52,9 +51,13 @@ async def main() -> int:
                     print(f"✗ 工具列表不一致，missing={sorted(missing)} extra={sorted(extra)}")
                     return 1
                 print(f"✓ tools/list：{len(names)} 个工具全部可见")
-                read_result = await session.call_tool("query_ledger_books", {})
+                if init.instructions:
+                    print("✓ initialize：服务端提供了使用说明")
+                read_result = await session.call_tool(
+                    "finance_query_transactions", {"sql": "SELECT 1 AS ok"}
+                )
                 if getattr(read_result, "isError", False):
-                    print("✗ query_ledger_books 调用返回错误")
+                    print("✗ finance_query_transactions 调用返回错误")
                     for item in getattr(read_result, "content", []):
                         if getattr(item, "text", None):
                             print(item.text)
@@ -64,9 +67,16 @@ async def main() -> int:
                     if getattr(item, "text", None)
                 ]
                 if not text_blocks:
-                    print("✗ query_ledger_books 没有返回可读内容")
+                    print("✗ finance_query_transactions 没有返回可读内容")
                     return 1
-                print("✓ tools/call：query_ledger_books 只读调用成功")
+                skill = await session.call_tool("read_skill", {"skill_id": "ledger-classify"})
+                if getattr(skill, "isError", False):
+                    print("✗ read_skill 调用返回错误")
+                    for item in getattr(skill, "content", []):
+                        if getattr(item, "text", None):
+                            print(item.text)
+                    return 1
+                print("✓ tools/call：只读 SQL 与 read_skill 调用成功")
                 print("\n[OK] MCP stdio 客户端握手、工具发现和只读调用全部通过")
                 return 0
     except Exception as exc:
