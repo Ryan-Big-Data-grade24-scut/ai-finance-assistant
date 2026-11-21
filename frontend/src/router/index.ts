@@ -28,8 +28,7 @@ const router = createRouter({
     },
     {
       path: '/star',
-      name: 'star',
-      component: () => import('@/views/StarView.vue'),
+      redirect: '/v2',
     },
     {
       path: '/v2',
