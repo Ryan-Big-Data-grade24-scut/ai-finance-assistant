@@ -1155,55 +1155,6 @@ onMounted(() => {
           <li v-for="w in data.status.warnings" :key="w">{{ w }}</li>
         </ul>
 
-        <!-- 筛选：只在当前范围里把匹配项选出来，不改账本 scope。 -->
-        <div class="l2-filter" data-testid="filter-bar">
-          <div class="filter-box">
-            <select v-model="filterField" class="filter-field" data-testid="filter-field" title="常用字段筛选">
-              <option value="time">日期</option>
-              <option value="clock">时段</option>
-              <option value="category">分类</option>
-              <option value="source">来源</option>
-              <option value="direction">收支</option>
-            </select>
-            <template v-if="filterField === 'time'">
-              <input v-model="filterFrom" type="date" data-testid="filter-from" aria-label="筛选起始日期">
-              <span class="muted">~</span>
-              <input v-model="filterTo" type="date" data-testid="filter-to" aria-label="筛选结束日期">
-            </template>
-            <template v-else-if="filterField === 'clock'">
-              <input v-model="filterClockFrom" type="time" step="60"
-                     data-testid="filter-clock-from" aria-label="筛选起始时刻">
-              <span class="muted">~</span>
-              <input v-model="filterClockTo" type="time" step="60"
-                     data-testid="filter-clock-to" aria-label="筛选结束时刻">
-            </template>
-            <select v-else-if="filterField === 'category'" v-model="filterCategory"
-                    class="filter-value" data-testid="filter-category">
-              <option value="">全部分类</option>
-              <option v-for="c in categoryOptions" :key="c" :value="c">{{ c }}</option>
-            </select>
-            <select v-else-if="filterField === 'source'" v-model="filterSource"
-                    class="filter-value" data-testid="filter-source">
-              <option value="">全部来源</option>
-              <option v-for="s in sourceOptions" :key="s" :value="s">{{ s }}</option>
-            </select>
-            <select v-else v-model="filterDirection" class="filter-value" data-testid="filter-direction">
-              <option value="">全部收支</option>
-              <option value="expense">支出</option>
-              <option value="income">收入</option>
-            </select>
-          </div>
-          <div class="filter-box filter-box--search">
-            <input v-model="filterText" class="filter-text" data-testid="filter-text"
-                   placeholder="搜索对方 / 商品 / 分类 / 备注 / 金额…"
-                   @keyup.enter="applyFilter">
-            <button :disabled="loading" data-testid="filter-apply" @click="applyFilter">筛选</button>
-            <button v-if="filterActive" class="link" data-testid="filter-clear" @click="clearFilter">清除</button>
-            <span v-if="filterActive" class="muted" data-testid="filter-count">已筛出 {{ filterCount }} 项</span>
-          </div>
-          <span class="filter-note" data-testid="filter-note">筛选只影响显示，不改变金额</span>
-        </div>
-
         <div v-if="view === 'table'" class="l2-tree" data-testid="tree">
           <!-- 仅展示现有状态，不改变账本数据、选择或拖拽行为 -->
           <div class="ledger-toolbar">
@@ -1326,6 +1277,57 @@ onMounted(() => {
 
         <section class="panel panel--ops" data-testid="console">
           <h3 class="panel-title"><i class="dot dot--ops" />操作面板</h3>
+          <!-- 筛选：只在当前范围里把匹配项选出来，不改账本 scope。 -->
+          <div class="ops-filter" data-testid="filter-bar">
+            <div class="ops-filter-head">
+              <b>筛选</b>
+              <span class="muted" data-testid="filter-note">只影响显示，不改变金额</span>
+            </div>
+            <div class="filter-box">
+              <select v-model="filterField" class="filter-field" data-testid="filter-field" title="常用字段筛选">
+                <option value="time">日期</option>
+                <option value="clock">时段</option>
+                <option value="category">分类</option>
+                <option value="source">来源</option>
+                <option value="direction">收支</option>
+              </select>
+              <template v-if="filterField === 'time'">
+                <input v-model="filterFrom" type="date" data-testid="filter-from" aria-label="筛选起始日期">
+                <span class="muted">~</span>
+                <input v-model="filterTo" type="date" data-testid="filter-to" aria-label="筛选结束日期">
+              </template>
+              <template v-else-if="filterField === 'clock'">
+                <input v-model="filterClockFrom" type="time" step="60"
+                       data-testid="filter-clock-from" aria-label="筛选起始时刻">
+                <span class="muted">~</span>
+                <input v-model="filterClockTo" type="time" step="60"
+                       data-testid="filter-clock-to" aria-label="筛选结束时刻">
+              </template>
+              <select v-else-if="filterField === 'category'" v-model="filterCategory"
+                      class="filter-value" data-testid="filter-category">
+                <option value="">全部分类</option>
+                <option v-for="c in categoryOptions" :key="c" :value="c">{{ c }}</option>
+              </select>
+              <select v-else-if="filterField === 'source'" v-model="filterSource"
+                      class="filter-value" data-testid="filter-source">
+                <option value="">全部来源</option>
+                <option v-for="s in sourceOptions" :key="s" :value="s">{{ s }}</option>
+              </select>
+              <select v-else v-model="filterDirection" class="filter-value" data-testid="filter-direction">
+                <option value="">全部收支</option>
+                <option value="expense">支出</option>
+                <option value="income">收入</option>
+              </select>
+            </div>
+            <div class="filter-box filter-box--search">
+              <input v-model="filterText" class="filter-text" data-testid="filter-text"
+                     placeholder="搜索对方 / 商品 / 分类 / 备注 / 金额…"
+                     @keyup.enter="applyFilter">
+              <button :disabled="loading" data-testid="filter-apply" @click="applyFilter">筛选</button>
+              <button v-if="filterActive" class="link" data-testid="filter-clear" @click="clearFilter">清除</button>
+              <span v-if="filterActive" class="muted" data-testid="filter-count">已筛出 {{ filterCount }} 项</span>
+            </div>
+          </div>
           <div class="sel-line">
             <b>已选 {{ selList.length }} 项</b>
             <span v-if="selList.length" class="muted">支 ¥{{ yuan(selSum.e) }} · 收 ¥{{ yuan(selSum.i) }}</span>
@@ -1595,19 +1597,25 @@ onMounted(() => {
 .l2-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 .l2-main > .banner { flex: none; }
 
-/* 筛选条：常用字段 + 跨字段搜索；只选出匹配项，不改账本范围。 */
-.l2-filter {
-  flex: none; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-  padding: 7px 10px; background: var(--color-card);
-  border: 1px solid var(--color-border); border-radius: 10px;
+/* 操作面板里的筛选：常用字段 + 跨字段搜索；只选出匹配项，不改账本范围。 */
+.ops-filter {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-bottom: 8px; padding: 8px;
+  background: var(--color-card);
+  border: 1px solid var(--color-border); border-radius: 8px;
 }
+.ops-filter-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  color: var(--color-muted); font-size: var(--font-sm, 13px);
+}
+.ops-filter-head b { color: var(--color-text); }
 .filter-box { display: flex; gap: 6px; align-items: center; min-width: 0; }
-.filter-box--search { flex: 1; min-width: 220px; }
-.filter-field { flex: none; }
-.filter-value { min-width: 110px; }
-.filter-text { flex: 1; min-width: 0; }
-.filter-note { flex: none; margin-left: auto; color: var(--color-muted); font-size: var(--font-sm, 13px); }
-.l2-filter input[type='date'] { min-width: 128px; }
+.filter-box > select,
+.filter-box > input { min-width: 0; flex: 1; }
+.filter-box--search { flex-wrap: wrap; }
+.filter-box--search .filter-text { flex: 1 1 100%; }
+.filter-value { min-width: 0; }
+.filter-field { flex: 0 0 auto; }
 
 /* 右侧栏 */
 .l2-side {
