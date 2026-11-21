@@ -19,7 +19,6 @@ const route = useRoute()
       </RouterLink>
       <nav class="nav">
         <RouterLink to="/bill" class="nav-item">账单报告</RouterLink>
-        <RouterLink to="/star" class="nav-item">✦ 星云账本</RouterLink>
         <RouterLink to="/v2" class="nav-item">∑ 账本代数 V2</RouterLink>
         <RouterLink to="/v2/assistant" class="nav-item">✎ 账本助手</RouterLink>
         <RouterLink to="/import" class="nav-item">导入账单</RouterLink>
@@ -28,7 +27,7 @@ const route = useRoute()
       </nav>
     </header>
 
-    <main class="app-main" :class="{ 'app-main--wide': route.name === 'star' || route.name === 'v2' || route.name === 'agentcore' }">
+    <main class="app-main" :class="{ 'app-main--wide': route.name === 'v2' || route.name === 'agentcore' }">
       <RouterView />
     </main>
     <FloatingPenguin v-if="route.name !== 'agentcore'" />

@@ -78,8 +78,13 @@ const txIE = (n: { e: number; i: number }) => (n.e && n.i ? `−${money(n.e)} / 
 
 const CJK = /[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]/
 const FS = 10.5                     // 标签字号（与 .l2g-tx / .l2g-tx-amt 一致）
+const textContext = document.createElement('canvas').getContext('2d')
 /** 估算一段文字的像素宽：CJK 按一个字宽，其余按 0.56 字宽。 */
 function textW(s: string, size = FS): number {
+  if (textContext) {
+    textContext.font = `600 ${size}px "Segoe UI", "Microsoft YaHei", sans-serif`
+    return textContext.measureText(s).width
+  }
   let w = 0
   for (const ch of s) w += CJK.test(ch) ? size : size * 0.56
   return w
@@ -89,23 +94,11 @@ const LABEL_MAX = 88                // 名字最多这么宽
 function clipText(s: string, maxW = LABEL_MAX): string {
   if (textW(s) <= maxW) return s
   let out = ''
-  let w = 0
   for (const ch of s) {
-    const cw = CJK.test(ch) ? FS : FS * 0.56
-    if (w + cw + FS > maxW) break
+    if (textW(out + ch + '…') > maxW) break
     out += ch
-    w += cw
   }
   return out + '…'
-}
-/** 一个节点的标签占位宽（含圆点半径），布局按它分扇面/轨道。
- *  交易 = 标题 / 金额两行取宽者；节点 = 标题 / 副标题（¥e / ¥i · n 笔）取宽者。 */
-function labelSpan(it: GItem): number {
-  const name = clipText(it.name)
-  const text = it.kind === 'tx'
-    ? Math.max(textW(name), textW(txIE(it)))
-    : Math.max(textW(name), textW(valueLine(it), 10))
-  return text + radiusOfItem(it) * 2 + 16
 }
 const radiusOfItem = (it: GItem): number => {
   if (it.kind === 'tx') return it.role === 'mirror' ? 4 : 5.5
@@ -125,81 +118,52 @@ function labelWidth(n: GNode): number {
   const name = clipText(n.name)
   return n.kind === 'tx'
     ? Math.max(textW(name), textW(txIE(n)))
-    : Math.max(textW(name), textW(valueLine(n), 10))
+    : Math.max(textW(name, 11.5), textW(valueLine(n), 10))
 }
 /** 节点连同标签一起占的矩形（世界坐标）。标签永远在 x 的正侧或负侧单边伸出。 */
 function labelBox(n: GNode): Box {
   if (n.key === 'root') {
-    const half = Math.max(textW(n.name, 14), textW(`支出 −¥${money(n.e)} · 收入 +¥${money(n.i)}`, 11)) / 2
-    return { x0: n.x - half, x1: n.x + half, y0: n.y - n.r, y1: n.y + 66 }
+    const half = Math.max(textW(n.name, 14), textW(`支出 −¥${money(n.e)} · 收入 +¥${money(n.i)}`, 11)) / 2 + 12
+    return { x0: n.x - half, x1: n.x + half, y0: n.y - n.r - 16, y1: n.y + 78 }
   }
-  const w = labelWidth(n) + 10
+  const gap = 12
+  const radius = n.r + (n.kind === 'tx' ? 6 : 14)
+  const w = labelWidth(n) + gap + 12
   return n.x >= 0
-    ? { x0: n.x - n.r, x1: n.x + n.r + w, y0: n.y - Math.max(n.r, 12), y1: n.y + 16 }
-    : { x0: n.x - n.r - w, x1: n.x + n.r, y0: n.y - Math.max(n.r, 12), y1: n.y + 16 }
+    ? { x0: n.x - radius, x1: n.x + n.r + w, y0: n.y - Math.max(radius, 18), y1: n.y + Math.max(radius, 24) }
+    : { x0: n.x - n.r - w, x1: n.x + radius, y0: n.y - Math.max(radius, 18), y1: n.y + Math.max(radius, 24) }
 }
 
-/** 把互相压住的标签推开：每轮按网格找相交的盒子，让外侧那颗沿重叠小的轴挪开。 */
-function relaxLabels(nodes: GNode[], edges: GEdge[]) {
-  if (nodes.length < 2) return
-  const order = new Map(nodes.map((n, i) => [n.key, i]))
-  const byKey = new Map(nodes.map(n => [n.key, n]))
-  const parentOf = new Map(edges.map(e => [e.to, e.from]))
-  const distOf = (n: GNode) => {
-    const p = byKey.get(parentOf.get(n.key) ?? '')
-    return p ? Math.hypot(n.x - p.x, n.y - p.y) : 0
-  }
-  const CELL = 90
-  for (let pass = 0; pass < 6; pass++) {
-    const boxes = nodes.map(n => ({ n, b: labelBox(n) }))
-    const grid = new Map<string, number[]>()
-    boxes.forEach((e, i) => {
-      for (let gx = Math.floor(e.b.x0 / CELL); gx <= Math.floor(e.b.x1 / CELL); gx++) {
-        for (let gy = Math.floor(e.b.y0 / CELL); gy <= Math.floor(e.b.y1 / CELL); gy++) {
-          const k = gx + ':' + gy
-          let arr = grid.get(k)
-          if (!arr) grid.set(k, arr = [])
-          arr.push(i)
-        }
-      }
-    })
-    const seen = new Set<number>()
-    let moved = 0
-    for (const arr of grid.values()) {
-      for (let a = 0; a < arr.length; a++) {
-        for (let c = a + 1; c < arr.length; c++) {
-          const i = arr[a]
-          const j = arr[c]
-          const pair = i < j ? i * 65536 + j : j * 65536 + i
-          if (seen.has(pair)) continue
-          seen.add(pair)
-          const A = boxes[i]
-          const B = boxes[j]
-          const ox = Math.min(A.b.x1, B.b.x1) - Math.max(A.b.x0, B.b.x0)
-          const oy = Math.min(A.b.y1, B.b.y1) - Math.max(A.b.y0, B.b.y0)
-          if (ox <= 2 || oy <= 2) continue
-          // 谁挪：更深 / 离自己父节点更远 / 序号更大的那颗 —— 也就是「外侧」那颗
-          const da = distOf(A.n)
-          const db = distOf(B.n)
-          const mover = A.n.depth !== B.n.depth ? (A.n.depth > B.n.depth ? A : B)
-            : da !== db ? (da > db ? A : B)
-              : (order.get(A.n.key)! > order.get(B.n.key)! ? A : B)
-          const other = mover === A ? B : A
-          const mx = (mover.b.x0 + mover.b.x1) / 2
-          const my = (mover.b.y0 + mover.b.y1) / 2
-          const nx = (other.b.x0 + other.b.x1) / 2
-          const ny = (other.b.y0 + other.b.y1) / 2
-          if (ox < oy) mover.n.x += (mx >= nx ? 1 : -1) * (ox + 4)
-          else mover.n.y += (my >= ny ? 1 : -1) * (oy + 4)
-          moved++
-        }
-      }
+/** Reserve each label and halo before placing the next node. Moving outward keeps
+ *  every branch in its own sector and terminates beyond the occupied bounds. */
+function separateLabels(nodes: GNode[]) {
+  const cells = new Map<string, Box[]>()
+  const size = 128
+  const keysFor = (b: Box) => {
+    const keys: string[] = []
+    for (let x = Math.floor(b.x0 / size); x <= Math.floor(b.x1 / size); x++) {
+      for (let y = Math.floor(b.y0 / size); y <= Math.floor(b.y1 / size); y++) keys.push(`${x}:${y}`)
     }
-    if (!moved) break
+    return keys
+  }
+  for (const node of [...nodes].sort((a, b) => a.depth - b.depth)) {
+    const angle = Math.atan2(node.y, node.x)
+    let box = labelBox(node)
+    while (keysFor(box).some(key => cells.get(key)?.some(other =>
+      box.x0 < other.x1 && box.x1 > other.x0 && box.y0 < other.y1 && box.y1 > other.y0))) {
+      node.x += Math.cos(angle) * 24
+      node.y += Math.sin(angle) * 24
+      box = labelBox(node)
+    }
+    for (const key of keysFor(box)) {
+      const entries = cells.get(key) ?? []
+      entries.push(box)
+      cells.set(key, entries)
+    }
   }
 }
 
-// ── 布局：按可见子项数分楔形，一圈一圈往外排 ─────────────────────────────
+// ── 布局：分支独立扇区 + 完整标签占位 ─────────────────────────────
 
 const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
   const nodes: GNode[] = []
@@ -258,82 +222,32 @@ const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
     leavesCache.set(it.key, n)
     return n
   }
-  const radiusOf = (it: GItem): number => {
-    if (it.kind === 'tx') return it.role === 'mirror' ? 4 : 5.5
-    if (it.kind === 'group') return 12
-    if (it.key === 'root') return 34
-    return 9 + Math.min(14, Math.log2(it.count + 1) * 2.4)
-  }
-  // 子节点「环绕父节点」摆：父节点**相对它自己的父节点**的外法向是扇面中心，
-  // 扇面随孩子数张开（到 π 为止，不往回长），一圈放不下就再套一圈轨道。
-  // 这样一笔笔交易永远贴着它们自己的 Node，不会因为全局角度撑开而跑到对面去。
-  const ORBIT_STEP = 84       // 轨道之间的径向间距
-  const weightOf = (k: GItem) => Math.max(1, Math.sqrt(leavesOf(k)))
-  const SLOT_WEIGHT = 14      // 展开后占的弧长权重：星系越大，同一圈的邻居被挤得越开
-  /** 一个子项在轨道上要占的弧长：**标签的宽度算进来**（否则字会互相压），
-   *  再叠加「分量」——展开后可见叶变多，占位变大，才会把邻居挤开。 */
-  const slotOf = (k: GItem) => weightOf(k) * SLOT_WEIGHT + labelSpan(k)
-
-  /** 展开的子树整颗往更远的半径挪：越远弧长越大，两个星系才不容易缠在一起。
-   *  挪多远按可见叶数开方走（258 笔 ≈ +300，20 笔 ≈ +140），封顶免得糊出屏幕。 */
-  function pushOf(k: GItem): number {
-    if (!childrenOf(k.key, k.kind).length) return 0
-    return Math.min(300, 24 + 26 * Math.sqrt(leavesOf(k)))
-  }
-
-  /** 顶层分支的色相：12 个在深色底上都清楚的色相轮着用，相邻分支永远差 30° 以上。
-   *  同一分支往下全继承 —— 同一条路径的 M 和 t 是同一个颜色。 */
-  const PATH_HUES = [205, 158, 42, 330, 268, 95, 15, 190, 300, 130, 240, 72]
-  const rootHue = (i: number) => PATH_HUES[i % PATH_HUES.length]
-
-  /** `dir` = 从祖父指向父节点的方向（父节点在整张图里朝外的角度）。 */
-  function layoutKids(parent: GNode, kids: GItem[], dir: number) {
-    const n = kids.length
-    const outward = parent.depth === 0 ? -Math.PI / 2 : dir
-    // 扇面最多张到 ~132°：再宽就往两侧邻居的地盘里探，两个星系会缠在一起
-    const span = parent.depth === 0 ? Math.PI * 2 : Math.min(2.3, Math.max(0.7, n * 0.22))
-    const baseR = parent.depth === 0 ? 235 : 132 + Math.min(84, n * 1.5)
-    const hueOf = new Map(kids.map((k, j) => [k.key, parent.depth === 0 ? rootHue(j) : parent.hue]))
-    let i = 0
-    let orbit = 0
-    while (i < n) {
-      const R = baseR + orbit * ORBIT_STEP
-      const arc = span * R
-      // 一圈能放几个，按标签实际要占的弧长累计，而不是固定个数
-      const chunk: GItem[] = []
-      let need = 0
-      while (i + chunk.length < n) {
-        const s = slotOf(kids[i + chunk.length])
-        if (chunk.length && need + s > arc) break
-        chunk.push(kids[i + chunk.length])
-        need += s
-      }
-      const total = need
-      let acc = outward - span / 2
-      for (const k of chunk) {
-        const w = (slotOf(k) / total) * span
-        const ang = acc + w / 2
-        acc += w
-        const r = R + pushOf(k)
-        layout(k, { x: parent.x + Math.cos(ang) * r, y: parent.y + Math.sin(ang) * r },
-          parent.depth + 1, ang, hueOf.get(k.key) ?? 0)
-      }
-      i += chunk.length
-      orbit++
+  // All descendants share their top-level branch's angular sector. Weighting
+  // by visible leaves reserves space for expanded groups before any points move.
+  const palette = [204, 163, 38, 278, 338, 186, 92, 24]
+  const leafCount = leavesOf(nodeItem(t))
+  const ringStep = Math.max(180, Math.min(420, Math.sqrt(leafCount) * 31))
+  function layout(it: GItem, depth: number, start: number, end: number, hue: number) {
+    const angle = (start + end) / 2
+    const radius = depth === 0 ? 0 : 240 + (depth - 1) * ringStep
+    const node: GNode = {
+      ...it, depth, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius,
+      r: radiusOfItem(it), hue,
     }
-  }
-
-  function layout(it: GItem, pos: { x: number; y: number },
-                  depth: number, dir: number, hue: number) {
-    const node: GNode = { ...it, depth, x: pos.x, y: pos.y, r: radiusOf(it), hue }
     nodes.push(node)
     const kids = childrenOf(it.key, it.kind)
-    if (!kids.length) return
-    for (const k of kids) edges.push({ id: `${it.key}->${k.key}`, from: it.key, to: k.key })
-    layoutKids(node, kids, dir)
+    const weight = (child: GItem) => depth === 0 ? Math.sqrt(leavesOf(child)) : leavesOf(child)
+    const total = kids.reduce((sum, child) => sum + weight(child), 0)
+    let cursor = start
+    for (const [index, child] of kids.entries()) {
+      const span = (end - start) * weight(child) / total
+      edges.push({ id: `${it.key}->${child.key}`, from: it.key, to: child.key })
+      layout(child, depth + 1, cursor, cursor + span, depth === 0 ? palette[index % palette.length] : hue)
+      cursor += span
+    }
   }
-  layout(nodeItem(t), { x: 0, y: 0 }, 0, -Math.PI / 2, 0)
-  relaxLabels(nodes, edges)
+  layout(nodeItem(t), 0, -Math.PI / 2, Math.PI * 1.5, 204)
+  separateLabels(nodes)
   return { nodes, edges }
 })
 
@@ -458,15 +372,40 @@ const renderEdges = computed<{ id: string; a: Pose; b: Pose; o: number }[]>(() =
 })
 
 function pathOf(a: Pose, b: Pose): string {
-  const dx = b.x - a.x
-  const dy = b.y - a.y
-  const cx = (a.x + b.x) / 2 - dy * 0.12
-  const cy = (a.y + b.y) / 2 + dx * 0.12
-  return `M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`
+  const distance = Math.hypot(b.x - a.x, b.y - a.y)
+  if (!distance) return ''
+  const ux = (b.x - a.x) / distance
+  const uy = (b.y - a.y) / distance
+  const start = { x: a.x + ux * (a.r + 4), y: a.y + uy * (a.r + 4) }
+  const end = { x: b.x - ux * (b.r + 4), y: b.y - uy * (b.r + 4) }
+  const midRadius = (Math.hypot(a.x, a.y) + Math.hypot(b.x, b.y)) / 2
+  const angleA = Math.atan2(a.y, a.x)
+  const angleB = Math.atan2(b.y, b.x)
+  return `M ${start.x} ${start.y} C ${Math.cos(angleA) * midRadius} ${Math.sin(angleA) * midRadius}, ${Math.cos(angleB) * midRadius} ${Math.sin(angleB) * midRadius}, ${end.x} ${end.y}`
 }
 
 const txTotal = computed(() => graph.value.nodes.filter(n => n.kind === 'tx').length)
 const hoverKey = ref('')
+const activeKey = computed(() => hoverKey.value || (props.selected.size === 1 ? [...props.selected][0] : ''))
+const relatedEdges = computed(() => {
+  const result = new Set<string>()
+  const parent = new Map(graph.value.edges.map(edge => [edge.to, edge]))
+  let cursor = activeKey.value
+  while (parent.has(cursor)) {
+    const edge = parent.get(cursor)!
+    result.add(edge.id)
+    cursor = edge.from
+  }
+  for (const edge of graph.value.edges) if (edge.from === activeKey.value) result.add(edge.id)
+  return result
+})
+const relatedNodes = computed(() => {
+  const result = new Set([activeKey.value])
+  for (const edge of graph.value.edges) {
+    if (relatedEdges.value.has(edge.id)) { result.add(edge.from); result.add(edge.to) }
+  }
+  return result
+})
 /** 金额是认交易的唯一依据：一律显示。名字只在放得下时显示（少了 / 放大了 / 选中的）。 */
 const showTxName = (key: string) =>
   props.selected.has(key) || hoverKey.value === key || txTotal.value <= 24 || zoom.value >= 2.2
@@ -555,7 +494,7 @@ function zoomBy(f: number) {
   zoom.value = next
 }
 function resetCamera() {
-  animateCamera(1.15, { x: 0, y: 0 })
+  focusOn('root')
 }
 
 const VIEW_W = 1800
@@ -582,19 +521,20 @@ function focusTarget(n: GNode): { z: number; cx: number; cy: number } {
     seen.add(k)
     const item = idx.get(k)
     if (!item) continue
-    minX = Math.min(minX, item.x - item.r)
-    maxX = Math.max(maxX, item.x + item.r)
-    minY = Math.min(minY, item.y - item.r)
-    maxY = Math.max(maxY, item.y + item.r)
+    const bounds = labelBox(item)
+    minX = Math.min(minX, bounds.x0)
+    maxX = Math.max(maxX, bounds.x1)
+    minY = Math.min(minY, bounds.y0)
+    maxY = Math.max(maxY, bounds.y1)
     for (const c of kids.get(k) ?? []) stack.push(c)
   }
   const bw = Math.max(140, maxX - minX + 120)   // 给条目右侧的金额标签留余量
   const bh = Math.max(140, maxY - minY + 100)
   const fit = Math.min(VIEW_W / bw, VIEW_H / bh)
   if (n.kind === 'tx') return { z: clamp(fit, 1.2, 1.9), cx: n.x, cy: n.y }
-  if (n.key === 'root') return { z: clamp(fit, 0.6, 1.3), cx: n.x, cy: n.y }
+  if (n.key === 'root') return { z: clamp(fit, ZOOM_MIN, 1.3), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
   if (!isOpen(n)) return { z: clamp(fit, 2.1, 2.6), cx: n.x, cy: n.y }
-  return { z: clamp(fit, 0.45, 3.4), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
+  return { z: clamp(fit, ZOOM_MIN, 3.4), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
 }
 
 function focusOn(key: string) {
@@ -745,11 +685,11 @@ onBeforeUnmount(() => {
          @mousedown.middle.prevent @auxclick.prevent>
       <defs>
         <pattern id="l2gField" width="110" height="105" patternUnits="userSpaceOnUse">
-          <circle cx="16" cy="21" r="1" fill="#8cadde" opacity=".3" />
-          <circle cx="82" cy="74" r=".7" fill="#fff" opacity=".22" />
+          <circle cx="16" cy="21" r=".65" fill="#8cadde" opacity=".19" />
+          <circle cx="82" cy="74" r=".5" fill="#fff" opacity=".12" />
         </pattern>
         <radialGradient id="l2gCore">
-          <stop offset="0%" stop-color="#4d6cff" stop-opacity=".3" />
+          <stop offset="0%" stop-color="#4d6cff" stop-opacity=".19" />
           <stop offset="100%" stop-color="#0b1226" stop-opacity="0" />
         </radialGradient>
       </defs>
@@ -758,11 +698,13 @@ onBeforeUnmount(() => {
       <g ref="sceneEl" :transform="`translate(${pan.x} ${pan.y}) scale(${zoom})`">
         <circle r="230" fill="url(#l2gCore)" pointer-events="none" />
         <g class="l2g-edges" pointer-events="none">
-          <path v-for="e in renderEdges" :key="e.id" :d="pathOf(e.a, e.b)" :opacity="e.o" />
+          <path v-for="e in renderEdges" :key="e.id" :d="pathOf(e.a, e.b)" :opacity="e.o"
+                :class="{ 'is-related': relatedEdges.has(e.id), 'is-muted': activeKey && !relatedEdges.has(e.id) }" />
         </g>
         <g v-for="n in renderNodes" :key="n.key" class="l2g-node"
            :class="[`kind-${n.kind}`, `role-${n.role ?? 'none'}`, {
              root: n.key === 'root',
+             'is-muted': activeKey && !relatedNodes.has(n.key),
              selected: selected.has(n.key),
              dragging: dragging?.has(n.key) ?? false,
              'drop-target': dropTarget === n.key,
@@ -783,17 +725,17 @@ onBeforeUnmount(() => {
            支出 −¥{{ money(n.e) }} · 收入 +¥{{ money(n.i) }}
           </text>
           <template v-else>
-            <text v-if="n.kind !== 'tx'" :x="n.x >= 0 ? n.r + 8 : -(n.r + 8)"
+            <text v-if="n.kind !== 'tx'" :x="n.x >= 0 ? n.r + 12 : -(n.r + 12)"
                   :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-1" class="l2g-label">{{ clipText(n.name) }}</text>
-            <text v-if="n.kind !== 'tx' && zoom >= 1.4" :x="n.x >= 0 ? n.r + 8 : -(n.r + 8)"
+            <text v-if="n.kind !== 'tx' && zoom >= 1.4" :x="n.x >= 0 ? n.r + 12 : -(n.r + 12)"
                   :text-anchor="n.x >= 0 ? 'start' : 'end'" y="12" class="l2g-value">
               {{ valueLine(n) }}
             </text>
             <template v-if="n.kind === 'tx'">
-              <text v-if="showTxName(n.key)" :x="n.x >= 0 ? n.r + 6 : -(n.r + 6)"
+              <text v-if="showTxName(n.key)" :x="n.x >= 0 ? n.r + 10 : -(n.r + 10)"
                     :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-2" class="l2g-tx">{{ clipText(n.name) }}</text>
-              <text :x="n.x >= 0 ? n.r + 6 : -(n.r + 6)" :text-anchor="n.x >= 0 ? 'start' : 'end'"
-                    :y="showTxName(n.key) ? 10 : 3" class="l2g-tx-amt">{{ txIE(n) }}</text>
+              <text :x="n.x >= 0 ? n.r + 10 : -(n.r + 10)" :text-anchor="n.x >= 0 ? 'start' : 'end'"
+                    :y="showTxName(n.key) ? 13 : 3" class="l2g-tx-amt">{{ txIE(n) }}</text>
             </template>
           </template>
           <g v-if="n.hasChildren && n.o > 0.9" :transform="`translate(${n.r * 0.75} ${-n.r * 0.75})`"
@@ -809,7 +751,7 @@ onBeforeUnmount(() => {
     <div class="l2g-zoom">
       <button title="放大" @click="zoomBy(1.2)">＋</button>
       <button title="缩小" @click="zoomBy(1 / 1.2)">－</button>
-      <button title="回到中心" @click="resetCamera">复位</button>
+      <button title="适应全部可见节点" @click="resetCamera">复位</button>
       <span>{{ Math.round(zoom * 100) }}%</span>
     </div>
     <p class="l2g-help">滚轮缩放 · 中键拖视野 · 空白拖框选择 · 选中后按住任意条目拖动 · 双击或 ± 展开/折叠</p>
@@ -822,17 +764,20 @@ onBeforeUnmount(() => {
   position: relative; flex: 1 1 auto; min-height: 0; height: auto; overflow: hidden;
   background: #0b1226; border: 1px solid var(--color-border); border-radius: var(--radius);
 }
-.l2g-svg { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; }
-.l2g-edges path { fill: none; stroke: #5b7fc7; stroke-opacity: .26; stroke-width: 1.3; }
-.l2g-node { cursor: pointer; }
+.l2g-svg { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+.l2g-edges path { fill: none; stroke: #6888b5; stroke-opacity: .22; stroke-width: 1.05; transition: stroke-opacity .18s; }
+.l2g-edges path.is-related { stroke: #9dc9e7; stroke-opacity: .65; stroke-width: 1.5; }
+.l2g-edges path.is-muted { stroke-opacity: .055; }
+.l2g-node { cursor: pointer; transition: filter .18s; }
+.l2g-node.is-muted { filter: saturate(.6) brightness(.72); }
 .l2g-node .hit { fill: transparent; pointer-events: all; }
 /* 颜色按路径（--h）走，M 和 t 靠**形状**分开：
  *   M = 大圆盘、暗色填充 + 亮色描边（有色星体）；t = 小圆点、实心亮色（行星）。 */
-.l2g-node .halo { fill: hsl(var(--h) 80% 60%); opacity: .16; pointer-events: none; }
+.l2g-node .halo { fill: hsl(var(--h) 80% 60%); opacity: .075; pointer-events: none; }
 .l2g-node .core { fill: #16233e; stroke: hsl(var(--h) 76% 64%); stroke-width: 1.6; }
-.l2g-node.kind-node .core { fill: hsl(var(--h) 46% 26%); stroke: hsl(var(--h) 76% 64%); stroke-width: 2; }
-.l2g-node.kind-tx .core { fill: hsl(var(--h) 84% 62%); stroke: hsl(var(--h) 92% 82%); stroke-width: 1; }
-.l2g-node.kind-tx .halo { opacity: .12; }
+.l2g-node.kind-node .core { fill: hsl(var(--h) 32% 18%); stroke: hsl(var(--h) 62% 67%); stroke-width: 1.6; }
+.l2g-node.kind-tx .core { fill: hsl(var(--h) 65% 70%); stroke: hsl(var(--h) 74% 85%); stroke-width: 1; }
+.l2g-node.kind-tx .halo { opacity: .08; }
 .l2g-node.role-mirror .core {
   fill: #0b1226; stroke: hsl(var(--h) 80% 70%);
   stroke-width: 1.2; stroke-dasharray: 2 2;
@@ -843,19 +788,19 @@ onBeforeUnmount(() => {
 .l2g-node.root .core { fill: #101d3d; stroke: #8bc8ff; stroke-width: 3; }
 .l2g-node.root .halo { fill: #767de2; opacity: .35; }
 .l2g-node.selected .core { stroke: #fff; stroke-width: 3; filter: drop-shadow(0 0 8px #9fd8ff); }
-.l2g-node.selected .halo { opacity: .55; }
+.l2g-node.selected .halo { opacity: .19; }
 .l2g-node.dragging { opacity: .4; }
 .l2g-node.drop-target .core { fill: #317e7e; stroke: #ffe1ac; stroke-width: 3.5; }
 .l2g-label {
-  fill: #dbe7fb; font-size: 12px; font-weight: 620; pointer-events: none;
+  fill: #e2ebf8; font-size: 11.5px; font-weight: 620; pointer-events: none;
   paint-order: stroke; stroke: #0b1226; stroke-width: 3px; stroke-linejoin: round;
 }
-.l2g-value { fill: #8fa4c8; font-size: 10.5px; pointer-events: none; }
-.l2g-tx { fill: #e8d3b4; font-size: 10.5px; pointer-events: none; }
+.l2g-value { fill: #93a8c4; font-size: 10px; pointer-events: none; paint-order: stroke; stroke: #0b1226; stroke-width: 4px; stroke-linejoin: round; }
+.l2g-tx { fill: #b2c2d9; font-size: 10.5px; paint-order: stroke; stroke: #0b1226; stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
 .l2g-tx-amt {
-  fill: #f4d9a8; font-size: 10.5px; font-weight: 600;
+  fill: hsl(var(--h) 50% 80%); font-size: 10.5px; font-weight: 550;
   font-variant-numeric: tabular-nums; pointer-events: none;
-  paint-order: stroke; stroke: rgba(12, 18, 28, 0.72); stroke-width: 2.5px;
+  paint-order: stroke; stroke: #0b1226; stroke-width: 4px; stroke-linejoin: round;
 }
 .l2g-more { cursor: pointer; }
 .l2g-more circle { fill: #33456b; stroke: #9fb4dd; stroke-width: 1; }
@@ -866,11 +811,11 @@ onBeforeUnmount(() => {
 .l2g-root-amt {
   fill: #f4d9a8; font-size: 11px; font-weight: 600;
   font-variant-numeric: tabular-nums; pointer-events: none;
-  paint-order: stroke; stroke: rgba(12, 18, 28, 0.72); stroke-width: 2.5px;
+  paint-order: stroke; stroke: #0b1226; stroke-width: 4px; stroke-linejoin: round;
 }
 .l2g-zoom {
-  position: absolute; right: 10px; top: 10px; display: flex; align-items: center; gap: 4px;
-  background: rgba(16, 24, 40, .72); padding: 4px 6px; border-radius: 8px;
+  position: absolute; right: 16px; top: 16px; display: flex; align-items: center; gap: 4px;
+  background: rgba(17, 29, 49, .92); border: 1px solid #2b3b56; padding: 5px 7px; border-radius: 12px; box-shadow: 0 5px 20px #0002;
   color: #c9d6ef; font-size: 12px;
 }
 .l2g-zoom button {
@@ -879,8 +824,11 @@ onBeforeUnmount(() => {
 }
 .l2g-zoom button:hover { background: #22345a; }
 .l2g-help {
-  position: absolute; left: 10px; bottom: 8px; margin: 0;
-  color: #7e8faf; font-size: 11.5px; pointer-events: none;
+  position: absolute; left: 16px; bottom: 12px; right: 16px; margin: 0;
+  color: #8195b0; font-size: 11px; line-height: 1.6; pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .l2g-node, .l2g-edges path { transition: none; }
 }
 .l2g-band {
   position: fixed; border: 1px solid #7fc3e0; background: rgba(127, 195, 224, .15);
