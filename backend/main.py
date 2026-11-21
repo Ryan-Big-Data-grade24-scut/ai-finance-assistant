@@ -16,6 +16,7 @@ backend/main.py —— FastAPI 入口
 from __future__ import annotations
 
 import sys
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -26,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # 让 `python -m backend.main` 和 `uvicorn backend.main:app` 都能跑
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from backend import db, overrides, reports                    # noqa: E402
+from backend import db, overrides, reports, uploads           # noqa: E402
 from backend import overrides as overrides_mod                # noqa: E402
 from backend.importer import ImportResult, parse_file, import_file  # noqa: E402
 from backend.importer.base import ParseIssues  # noqa: E402
@@ -34,6 +35,12 @@ from backend.overrides import ForbiddenFieldError, TxNotFound  # noqa: E402
 from backend import schemas as S                              # noqa: E402
 from backend.ledger import service as ledger_service           # noqa: E402
 from backend.ledger.errors import LedgerError                 # noqa: E402
+from backend.ledger2 import api as ledger2_api                # noqa: E402
+from backend.agentcore import api as agentcore_api            # noqa: E402
+from backend.agentcore import runtime as agentcore_runtime    # noqa: E402
+from backend.agentcore import store as agentcore_store        # noqa: E402
+from backend.ledger2 import store as ledger2_store            # noqa: E402
+from backend.ledger2.errors import LedgerError as Ledger2Error  # noqa: E402
 from backend.ai import config as ai_config                    # noqa: E402
 from backend.ai import schemas as AI                           # noqa: E402
 from backend.ai import import_workflow as ai_import            # noqa: E402
@@ -89,11 +96,22 @@ def _startup() -> None:
     db.init_db()
     # 报告视图依赖 Live Ledger 的分类和有效金额投影；启动时确保投影已同步。
     ledger_service.sync_live_book()
+    with closing(db.get_conn()) as _conn:
+        ledger2_store.ensure_schema(_conn)
+        # AgentCore 的会话/动作表和只读分析视图 agentcore_tx：读工具不建表，
+        # 由可信启动过程初始化（sql_tool 用只读连接，建不了视图）。
+        agentcore_store.ensure_schema(_conn)
     # 单进程服务重启后，将遗留的 planning/running 任务标记为可恢复状态。
     # 任务恢复时仍会重新校验 Ledger 快照，不会盲目复用旧财务结果。
     ai_chat.TASK_STORE.mark_interrupted_tasks()
+    agentcore_runtime.recover_interrupted()
     # 用 [OK] 而不是 ✓：Windows 控制台默认 GBK，✓ 编不出来。
     print(f"[OK] 数据库已就绪: {db.DB_PATH}")
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await agentcore_runtime.shutdown()
 
 
 # ── 统一错误响应 ────────────────────────────────────────────
@@ -135,6 +153,18 @@ async def _ledger_error(_req, exc: LedgerError):
     return JSONResponse(status_code=exc.status, content={
         'code': exc.code, 'message': exc.message, 'detail': {},
     })
+
+
+@app.exception_handler(Ledger2Error)
+async def _ledger2_error(_req, exc: Ledger2Error):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=exc.status, content={
+        'code': exc.code, 'message': exc.message, 'detail': exc.detail or {},
+    })
+
+
+app.include_router(ledger2_api.router)
+app.include_router(agentcore_api.router)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -199,20 +229,11 @@ ALLOWED_EXTENSIONS = {".xlsx", ".csv", ".zip"}
 
 
 async def _stage_upload(file: UploadFile, target_dir: Path) -> Path:
-    name = Path((file.filename or "").replace("\\", "/")).name
-    if not name or Path(name).suffix.lower() not in ALLOWED_EXTENSIONS:
-        raise HTTPException(400, "请上传 .xlsx、.csv 或 .zip 格式的账单")
-
-    target = target_dir / name
-    size = 0
-    with target.open("wb") as stream:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                raise HTTPException(413, "账单文件超过 25 MB 限制")
-            stream.write(chunk)
-    if size == 0:
-        raise HTTPException(400, "上传文件为空")
+    # 校验实现只有一份（backend/uploads.py）；这里把本模块的上限传进去，
+    # 现有测试对 MAX_UPLOAD_BYTES 的 monkeypatch 仍然有效。
+    target, _name = await uploads.save_upload(
+        file, target_dir, max_bytes=MAX_UPLOAD_BYTES, allowed=ALLOWED_EXTENSIONS
+    )
     return target
 
 

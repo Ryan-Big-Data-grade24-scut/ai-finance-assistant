@@ -60,3 +60,46 @@ def _no_seed_install(monkeypatch):
     from backend import db
 
     monkeypatch.setattr(db, "SEED_PATH", Path("__no_seed__"), raising=False)
+
+
+@pytest.fixture
+def agentcore_paths(tmp_path, monkeypatch):
+    """AgentCore 的库、暂存、记忆、配置密钥路径都留在同一个测试目录。"""
+    from backend import db
+
+    monkeypatch.setattr(db, 'DB_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'synthetic.db')
+    monkeypatch.setattr(db, 'SEED_PATH', tmp_path / 'no_seed')
+    monkeypatch.setenv('AGENTCORE_HOME', str(tmp_path / 'agentcore'))
+    monkeypatch.setenv('AI_FINANCE_MASTER_KEY_FILE', str(tmp_path / 'unused.key'))
+    return tmp_path
+
+
+@pytest.fixture
+def agentcore_ready(agentcore_paths):
+    """工具单测走真 schema；集成测试另走应用的 startup。"""
+    from contextlib import closing
+
+    from backend import db
+    from backend.agentcore import store as agentcore_store
+    from backend.ledger2 import store as ledger_store
+
+    db.init_db()
+    with closing(db.get_conn()) as conn:
+        ledger_store.ensure_schema(conn)
+        agentcore_store.ensure_schema(conn)
+    return agentcore_paths
+
+
+def pytest_addoption(parser):
+    parser.addoption('--agentcore-evidence', type=Path, metavar='DIR',
+                     help='在 DIR 新建独立运行目录，记录 AgentCore 合成业务场景的 CSV 证据')
+
+
+@pytest.fixture(scope='session')
+def agentcore_evidence(pytestconfig):
+    root = pytestconfig.getoption('--agentcore-evidence')
+    if root is None:
+        return None
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix='run-', dir=root))

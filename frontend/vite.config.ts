@@ -18,7 +18,7 @@ export default defineConfig({
     // 如果前端硬编码 http://localhost:8000，开发能跑但部署必挂。
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: process.env.API_TARGET ?? 'http://localhost:8000',
         changeOrigin: true,
       },
     },

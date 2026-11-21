@@ -13,6 +13,7 @@ backend/importer/__init__.py —— 导入编排
 from __future__ import annotations
 
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,11 +144,11 @@ def import_rows(
     filename: str,
     issues: ParseIssues | None = None,
     batch_id: str | None = None,
+    *, conn=None,
 ) -> ImportResult:
-    """把已经解析并审核过的归一化交易全事务写入数据库。
-
-    普通 CSV/XLSX 导入和 AI 导入会话共用此入口，避免出现两套写库逻辑。
-    """
+    """写入归一化交易。默认自管事务，也可参加调用者已有的写事务。"""
+    if conn is not None and not conn.in_transaction:
+        raise ValueError("传入的连接必须已开始事务")
     if not rows:
         raise ValueError("没有可写入的有效交易行")
     issues = issues or ParseIssues()
@@ -157,7 +158,9 @@ def import_rows(
     dates = [row.date for row in rows]
     inserted = skipped = 0
 
-    conn = db.get_conn()
+    own = conn is None
+    if own:
+        conn = db.get_conn()
     try:
         existing_batch = conn.execute(
             "SELECT * FROM import_batches WHERE batch_id=?", (batch_id,)
@@ -170,7 +173,7 @@ def import_rows(
                 skipped=int(row["skipped"]), failed=int(row["failed"]),
                 first_error=issues.first_error, date_from=row["date_from"], date_to=row["date_to"],
             )
-        with db.transaction(conn) as c:
+        with (db.transaction(conn) if own else nullcontext(conn)) as c:
             ensure_platform(c, pid)
             for i, row in enumerate(rows, 1):
                 try:
@@ -191,7 +194,8 @@ def import_rows(
                  issues.failed, min(dates), max(dates)),
             )
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
     return ImportResult(
         batch_id=batch_id, platform_id=pid, platform_name=name,

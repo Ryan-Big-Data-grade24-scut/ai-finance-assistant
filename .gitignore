@@ -13,6 +13,9 @@ db/backups/
 *.zip
 !db/schema.sql
 
+# ---- 本地验收证据：含真实流水、会话与账本快照，绝不入库 ----
+/test-evidence/
+
 # 仅允许 sample_data/ 顶层的虚构 CSV/ZIP 演示样例。
 # 不允许 XLSX 或嵌套目录中的文件，以降低真实账单误提交风险。
 !sample_data/

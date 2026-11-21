@@ -32,6 +32,16 @@ const router = createRouter({
       component: () => import('@/views/StarView.vue'),
     },
     {
+      path: '/v2',
+      name: 'v2',
+      component: () => import('@/views/Ledger2View.vue'),
+    },
+    {
+      path: '/v2/assistant',
+      name: 'agentcore',
+      component: () => import('@/views/AgentCoreView.vue'),
+    },
+    {
       path: '/import',
       name: 'import',
       component: () => import('@/views/ImportView.vue'),
