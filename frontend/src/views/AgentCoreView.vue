@@ -3,6 +3,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AgentCoreChat from '@/components/AgentCoreChat.vue'
+import AtlasIcon from '@/components/AtlasIcon.vue'
 import { useAgentSession } from '@/composables/useAgentSession'
 import { buildAgentPageContext, readAgentSelection } from '@/utils/agentPageContext'
 import { TODO_LABELS, kindLabel, stateLabel } from '@/utils/agentLabels'
@@ -27,6 +28,8 @@ const password = ref('')
 const uploading = ref(false)
 const restoringStage = ref(false)
 const preparing = ref(false)
+const importBusy = computed(() => uploading.value || restoringStage.value || preparing.value)
+const isZip = computed(() => stagedFile.value?.name.toLowerCase().endsWith('.zip') ?? false)
 const uploadError = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 const deciding = ref<string | null>(null)
@@ -58,7 +61,7 @@ const {
   openSession, newSession, removeCurrent, send, stop, init,
 } = useAgentSession({
   pageContext,
-  canSend: () => !uploading.value && !restoringStage.value && !preparing.value,
+  canSend: () => !importBusy.value,
   onToolResult: (name, result) => {
     if (name === 'finance_import_commit' && result.state === 'committed'
         && result.stage_id === attachment.value?.stage_id) {
@@ -75,8 +78,12 @@ const actions = computed(() => detail.value?.actions ?? [])
 const pendingOwn = computed(() => actions.value.filter(action => action.state === 'pending'))
 const pendingExternal = computed(() => externalActions.value)
 const recentActions = computed(() => actions.value.filter(action => action.state !== 'pending').slice(0, 6))
-const hasScope = computed(() =>
-  Boolean(scope.value.date_from || scope.value.date_to || scope.value.selection.length))
+const scopeRange = computed(() => scope.value.date_from || scope.value.date_to
+  ? `${scope.value.date_from || '不限'} 至 ${scope.value.date_to || '不限'}` : '')
+const scopeLabel = computed(() => [
+  scopeRange.value,
+  scope.value.selection.length ? `已选 ${scope.value.selection.length} 项` : '',
+].filter(Boolean).join(' · '))
 
 const pretty = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2)
 
@@ -155,6 +162,7 @@ async function restoreStage() {
 function pickFile(event: Event) {
   const files = (event.target as HTMLInputElement).files
   stagedFile.value = files?.[0] ?? null
+  password.value = ''
   uploadError.value = ''
 }
 
@@ -212,92 +220,107 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="ac-shell">
+  <div class="ac-shell atlas-theme">
     <!-- 左：会话 -->
-    <aside class="ac-col ac-sessions">
+    <aside class="ac-col ac-sessions" aria-label="会话列表">
       <div class="ac-panel-head">
-        <h2>会话</h2>
-        <button class="mini" data-testid="ac-new-session" :disabled="opening || sending" @click="newSession">＋ 新对话</button>
+        <h2>会话 <span>{{ sessions.length }}</span></h2>
+        <button class="mini mini--primary ac-new" data-testid="ac-new-session" :disabled="opening || sending" @click="newSession">
+          <AtlasIcon name="plus" /> 新对话
+        </button>
       </div>
-      <ul class="ac-session-list">
+      <ul v-if="sessions.length" class="ac-session-list">
         <li v-for="session in sessions" :key="session.id">
           <button :class="['ac-session', { 'ac-session--on': session.id === currentId }]"
+                  :aria-current="session.id === currentId ? 'true' : undefined" :title="session.title || '未命名对话'"
                   :disabled="opening || sending" @click="openSession(session.id)">
-            <b>{{ session.title || '未命名对话' }}</b>
-            <small>{{ (session.updated_at ?? '').slice(0, 16) }}</small>
+            <AtlasIcon name="chat" />
+            <span>
+              <b>{{ session.title || '未命名对话' }}</b>
+              <small v-if="session.updated_at">{{ session.updated_at.slice(0, 16) }}</small>
+            </span>
           </button>
         </li>
       </ul>
-      <button v-if="currentId" class="mini mini--danger" :disabled="active || opening || sending"
-              @click="removeCurrent">删除当前会话</button>
-
-      <div v-if="hasScope" class="ac-scope">
-        <b>来自 V2 页面的上下文</b>
-        <p v-if="scope.date_from || scope.date_to">
-          范围：{{ scope.date_from || '不限' }} ~ {{ scope.date_to || '不限' }}
-        </p>
-        <p v-if="scope.selection.length">已选 {{ scope.selection.length }} 项</p>
+      <p v-else class="ac-session-empty">{{ opening ? '正在加载会话…' : '还没有会话' }}</p>
+      <div class="ac-session-foot">
+        <button v-if="currentId" class="mini mini--danger" :disabled="active || opening || sending"
+                @click="removeCurrent"><AtlasIcon name="remove" /> 删除当前会话</button>
       </div>
     </aside>
 
     <!-- 中：对话 -->
-    <AgentCoreChat class="ac-col" v-model:input="input" :items="items" :run="run" :active="active"
+    <AgentCoreChat class="ac-col ac-main-chat" :key="currentId ?? 'opening'"
+                   v-model:input="input" :items="items" :run="run" :active="active"
                    :status="detail?.status ?? ''" :step="detail?.step ?? 0" :totals="detail?.totals ?? null"
-                   :sending="sending" :stopping="stopping" :opening="opening"
+                   :ready="!!currentId" :send-blocked="importBusy" :sending="sending" :stopping="stopping" :opening="opening"
                    :reconnect-text="reconnectText" :error-banner="errorBanner" :notice="notice"
-                   :test-mode="testMode" :title="detail?.session.title || 'ATLAS'"
-                   subtitle="ATLAS 可查流水、导入账单和修改 V2。明确要求执行时会直接写入，结果以回执为准。"
+                   :test-mode="testMode" :title="detail?.session.title || 'ATLAS'" :context-label="scopeLabel"
+                   subtitle="明确要求执行时，ATLAS 会直接写入账本；结果以回执为准。"
                    @send="send" @stop="stop" />
 
-    <!-- 右：任务、导入与旧卡 -->
-    <aside class="ac-col ac-side">
+    <!-- 右：上下文、任务、导入与旧卡 -->
+    <aside class="ac-side" aria-label="账本工作区">
+      <div class="ac-work-head"><AtlasIcon name="ledger" /> <h2>账本工作区</h2></div>
+      <section v-if="scopeLabel" class="ac-panel ac-scope">
+        <h3><AtlasIcon name="ledger" /> V2 页面上下文</h3>
+        <p v-if="scopeRange" class="ac-scope-range">{{ scopeRange }}</p>
+        <p v-if="scope.selection.length" class="muted">已选 {{ scope.selection.length }} 项</p>
+      </section>
       <section v-if="todos.length" class="ac-panel" data-testid="ac-todos">
-        <h3>任务清单</h3>
-        <p class="muted">助手记录的进度；是否写入以回执为准。</p>
+        <h3><AtlasIcon name="list" /> 任务清单 <span class="ac-count">{{ todos.filter(todo => todo.status === 'completed').length }}/{{ todos.length }}</span></h3>
         <ul class="ac-todos">
           <li v-for="(todo, index) in todos" :key="index">
-            <span class="ac-tag" :class="{ 'ac-tag--ok': todo.status === 'completed' }">{{ TODO_LABELS[todo.status] }}</span>
             <span>{{ todo.content }}</span>
+            <span class="ac-tag" :class="`ac-tag--${todo.status}`">{{ TODO_LABELS[todo.status] }}</span>
           </li>
         </ul>
       </section>
-      <section class="ac-panel">
-        <h3>导入账单</h3>
-        <p class="muted">
-          文件由你选，解压密码只随这次上传提交：不进对话、不进提示词、不入库。
-          导入原始流水后仍需在 V2 里初始化，才会进入账本树。
-        </p>
+      <section class="ac-panel ac-import">
+        <h3><AtlasIcon name="file" /> 导入账单</h3>
+        <p class="muted">先解析文件，再在对话里要求导入。流水入库后，仍需在 V2 初始化才会进入账本树。</p>
         <label class="ac-file">
-          <input ref="fileInput" type="file" accept=".zip,.csv,.xlsx" :disabled="uploading || preparing"
-                 data-testid="ac-file" @change="pickFile">
+          <input ref="fileInput" type="file" accept=".zip,.csv,.xlsx" :disabled="importBusy"
+                 aria-label="选择账单文件" data-testid="ac-file" @change="pickFile">
+          <span class="ac-file-icon"><AtlasIcon name="file" /></span>
+          <span class="ac-file-text">
+            <b :title="stagedFile?.name">{{ stagedFile?.name || '选择账单文件' }}</b>
+            <small>CSV / XLSX / ZIP</small>
+          </span>
         </label>
-        <input v-model="password" type="password" class="ac-password" data-testid="ac-password"
-               placeholder="支付宝账单 ZIP 的解压密码（仅本地）">
-        <button class="mini" :disabled="!stagedFile || uploading || restoringStage || preparing"
+        <label v-if="isZip" class="ac-password-label">
+          ZIP 解压密码（如有）
+          <input v-model="password" type="password" class="ac-password" data-testid="ac-password"
+                 autocomplete="off" :disabled="importBusy" placeholder="仅随本次上传提交">
+          <small>密码不进入对话、提示词或数据库。</small>
+        </label>
+        <button class="mini ac-upload" :disabled="!stagedFile || importBusy"
                 data-testid="ac-upload" @click="doUpload">
-          {{ uploading ? '解析中…' : '上传并解析' }}
+          {{ uploading ? '解析中…' : '上传并解析' }}<AtlasIcon name="arrow" />
         </button>
-        <p v-if="restoringStage" class="muted" role="status">正在核对附件状态…</p>
-        <p v-if="uploadError" class="ac-form-error">{{ uploadError }}</p>
+        <p v-if="restoringStage" class="ac-hint" role="status">正在核对附件状态…</p>
+        <p v-if="uploadError" class="ac-form-error" role="alert">{{ uploadError }}</p>
 
         <div v-if="staged" class="ac-stage" data-testid="ac-stage">
-          <b>已解析 · {{ staged.platform_name }}</b>
-          <p>{{ staged.date_from }} ~ {{ staged.date_to }} · {{ staged.total }} 笔</p>
+          <span class="ac-tag">已解析 · 未入库</span>
+          <b>{{ staged.platform_name }} · {{ staged.total }} 笔</b>
+          <p>{{ staged.date_from }} 至 {{ staged.date_to }}</p>
           <p v-if="staged.failed" class="ac-form-error">解析失败 {{ staged.failed }} 行</p>
           <p v-for="warning in staged.warnings" :key="warning" class="muted">· {{ warning }}</p>
-          <p class="ac-hint">{{ staged.note }} 可以在左侧对话里要求导入，也可以手工处理。</p>
-          <button class="mini" :disabled="preparing || uploading || restoringStage || opening"
+          <p class="ac-hint">{{ staged.note }} 可以在对话里要求导入，也可以手工处理。</p>
+          <button class="mini" :disabled="importBusy || opening"
                   data-testid="ac-make-import" @click="makeImportCard">生成手工导入卡</button>
         </div>
-        <div v-else-if="imported" class="ac-stage" data-testid="ac-import-receipt">
-          <b>原始流水已入库</b>
+        <div v-else-if="imported" class="ac-stage ac-stage--done" data-testid="ac-import-receipt">
+          <span class="ac-tag ac-tag--ok">已入库</span>
+          <b>原始流水导入回执</b>
           <p>新增 {{ imported.inserted }} · 跳过 {{ imported.skipped }} · 失败 {{ imported.failed }}</p>
           <p class="ac-hint">批次 {{ imported.batch_id }}。V2 是否已初始化，以账本回执为准。</p>
         </div>
       </section>
 
       <section v-if="pendingOwn.length" class="ac-panel" data-testid="ac-pending">
-        <h3>历史待确认记录 · 本会话 <span class="ac-count">{{ pendingOwn.length }}</span></h3>
+        <h3><AtlasIcon name="history" /> 历史待确认 · 本会话 <span class="ac-count">{{ pendingOwn.length }}</span></h3>
         <p class="muted">来自旧版确认卡；它们不是已执行的结果，不会自动执行，也不阻塞新任务。</p>
         <article v-for="action in pendingOwn" :key="action.id" class="ac-card" :data-action-id="action.id">
           <header>
@@ -337,7 +360,7 @@ onBeforeUnmount(() => {
       </section>
 
       <section v-if="pendingExternal.length" class="ac-panel" data-testid="ac-external">
-        <h3>未认领的历史记录 <span class="ac-count">{{ pendingExternal.length }}</span></h3>
+        <h3><AtlasIcon name="history" /> 未认领的历史记录 <span class="ac-count">{{ pendingExternal.length }}</span></h3>
         <p class="muted">这些旧卡没有会话归属，可以在此手工处理；不是已执行的结果。</p>
         <article v-for="action in pendingExternal" :key="action.id" class="ac-card" :data-action-id="action.id">
           <header>
@@ -368,7 +391,7 @@ onBeforeUnmount(() => {
       <p v-if="actionError" class="ac-form-error" data-testid="ac-action-error">{{ actionError }}</p>
 
       <section v-if="recentActions.length" class="ac-panel">
-        <h3>最近处理</h3>
+        <h3><AtlasIcon name="history" /> 最近处理</h3>
         <article v-for="action in recentActions" :key="action.id" class="ac-card ac-card--done">
           <header>
             <b>{{ action.title || kindLabel(action.kind) }}</b>
@@ -386,111 +409,4 @@ onBeforeUnmount(() => {
   </div>
 </template>
 
-<style scoped>
-.ac-shell {
-  display: grid;
-  grid-template-columns: 208px minmax(0, 1fr) 344px;
-  gap: var(--space-3);
-  height: calc(100vh - 132px);
-  min-height: 520px;
-}
-.ac-col {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--color-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-}
-.ac-panel-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-}
-h2 { font-size: var(--font-md); }
-h3 { font-size: var(--font-sm); margin-bottom: var(--space-2); }
-.muted { color: var(--color-muted); line-height: 1.6; }
-
-.mini {
-  padding: 6px 10px; border: 1px solid var(--color-border); border-radius: var(--radius);
-  background: #fff; color: var(--color-text); cursor: pointer; font-size: var(--font-xs);
-}
-.mini:hover { background: #f3f6fa; }
-.mini:disabled { opacity: .5; cursor: default; }
-.mini--primary { background: #2f6fae; border-color: #2f6fae; color: #fff; }
-.mini--primary:hover { background: #285f95; }
-.mini--danger { margin: var(--space-3); color: var(--color-expense); border-color: #f0d4d5; }
-
-/* 会话 */
-.ac-session-list { list-style: none; overflow-y: auto; flex: 1; padding: var(--space-2); }
-.ac-session {
-  display: block; width: 100%; text-align: left; padding: 8px 10px;
-  border: 0; border-radius: var(--radius); background: transparent; cursor: pointer;
-}
-.ac-session b {
-  display: block; font-size: var(--font-xs);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.ac-session small { color: var(--color-muted); font-size: 10px; }
-.ac-session:hover { background: #f3f6fa; }
-.ac-session--on { background: #edf3fa; }
-.ac-scope {
-  margin: var(--space-2); padding: var(--space-2);
-  border: 1px dashed #c8d6e4; border-radius: var(--radius);
-  font-size: var(--font-xs); color: #45607a; line-height: 1.6;
-}
-
-/* 侧栏里旧卡回执的代码块（对话区的样式在 AgentCoreChat 内）。 */
-.ac-card pre {
-  margin-top: 6px; padding: 8px; border-radius: var(--radius); background: #172a3b; color: #eaf2fa;
-  overflow: auto; max-height: 220px; font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
-}
-
-/* 侧栏 */
-.ac-side { overflow-y: auto; background: transparent; border: 0; gap: var(--space-3); }
-.ac-panel {
-  background: var(--color-card); border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg); padding: var(--space-3);
-}
-.ac-panel > .muted { font-size: var(--font-xs); margin-bottom: var(--space-2); }
-.ac-todos { display: grid; gap: 6px; list-style: none; font-size: var(--font-xs); }
-.ac-todos li { display: flex; gap: var(--space-2); align-items: baseline; overflow-wrap: anywhere; }
-.ac-file { display: block; margin-bottom: var(--space-2); font-size: var(--font-xs); }
-.ac-password {
-  width: 100%; margin-bottom: var(--space-2); padding: 7px 9px; font-size: var(--font-xs);
-  border: 1px solid var(--color-border); border-radius: var(--radius);
-}
-.ac-stage {
-  margin-top: var(--space-2); padding: var(--space-2); border-radius: var(--radius);
-  background: #f7fafc; border: 1px solid #e3ebf3; font-size: var(--font-xs); line-height: 1.6;
-}
-.ac-hint { color: var(--color-muted); margin: var(--space-1) 0; }
-.ac-form-error { color: var(--color-expense); font-size: var(--font-xs); margin-top: var(--space-1); }
-.ac-card {
-  border: 1px solid var(--color-border); border-radius: var(--radius);
-  padding: var(--space-2); margin-top: var(--space-2); font-size: var(--font-xs);
-}
-.ac-card header { display: flex; justify-content: space-between; gap: var(--space-2); align-items: baseline; }
-.ac-tag { color: #56708a; background: #eef3f8; border-radius: 999px; padding: 1px 7px; font-size: 10px; white-space: nowrap; }
-.ac-tag--ok { color: #2f7d57; background: #effaf4; }
-.ac-tag--off { color: var(--color-muted); }
-.ac-preview { margin: var(--space-1) 0; line-height: 1.6; }
-.ac-preview .muted { font-size: 10px; }
-.ac-card-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
-.ac-card--done { opacity: .92; }
-.ac-count {
-  display: inline-block; min-width: 18px; text-align: center; padding: 0 5px;
-  border-radius: 999px; background: #2f6fae; color: #fff; font-size: 10px;
-}
-
-@media (max-width: 1180px) {
-  .ac-shell { grid-template-columns: 180px minmax(0, 1fr) 300px; height: auto; }
-  .ac-chat { min-height: 70vh; }
-}
-@media (max-width: 900px) {
-  .ac-shell { grid-template-columns: 1fr; }
-  .ac-sessions { max-height: 180px; }
-  .ac-side { overflow: visible; }
-}
-</style>
+<style scoped src="./AgentCoreView.css"></style>

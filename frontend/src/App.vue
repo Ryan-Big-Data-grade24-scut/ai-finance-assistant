@@ -7,6 +7,7 @@
  */
 import { useRoute } from 'vue-router'
 import FloatingLedgerAssistant from '@/components/FloatingLedgerAssistant.vue'
+import '@/styles/atlas.css'
 const route = useRoute()
 </script>
 
@@ -89,6 +90,11 @@ const route = useRoute()
   padding: 24px;
 }
 
+@media (max-width: 860px) {
+  .app-header { flex-wrap: wrap; gap: 8px 20px; }
+  .nav { min-width: 0; max-width: 100%; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+  .nav-item { white-space: nowrap; }
+}
 @media (max-width: 720px) {
   .app-header { min-height: 58px; padding: 8px 16px; }
   .brand small { display: none; }

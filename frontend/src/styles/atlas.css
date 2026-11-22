@@ -1,0 +1,26 @@
+/* ATLAS 工作台与浮窗共用；不覆盖账本和报告页的语义色。 */
+.atlas-theme {
+  --atlas-ink: #182b29;
+  --atlas-muted: #546962;
+  --atlas-paper: #fdfdf9;
+  --atlas-surface: #fff;
+  --atlas-wash: #f1f5f0;
+  --atlas-line: #dce6df;
+  --atlas-accent: #116854;
+  --atlas-strong: #0c5142;
+  --atlas-tint: #e4f3eb;
+  --atlas-alert: #923b36;
+  --atlas-alert-bg: #fff3ef;
+  --atlas-warn: #785914;
+  --atlas-warn-bg: #fcf5df;
+  --atlas-radius: 16px;
+  --atlas-shadow: 0 2px 3px rgb(23 54 44 / 3%), 0 10px 30px rgb(23 54 44 / 4%);
+  color: var(--atlas-ink);
+}
+
+.atlas-theme :is(button, a, input, textarea, summary):focus-visible {
+  outline: 2px solid var(--atlas-accent);
+  outline-offset: 2px;
+}
+
+.atlas-theme :is(button, input):disabled { cursor: default; }

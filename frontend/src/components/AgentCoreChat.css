@@ -1,0 +1,241 @@
+.ac-chat {
+  display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: hidden;
+  background: var(--atlas-surface);
+}
+.ac-chat-head {
+  position: relative; z-index: 3; flex: none; display: flex; align-items: center; gap: 12px;
+  padding: 16px clamp(14px, 2vw, 26px); border-bottom: 1px solid var(--atlas-line);
+  background: var(--atlas-paper);
+}
+.ac-brand-mark, .ac-empty-mark {
+  flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px;
+  background: var(--atlas-strong); color: #e6faee; font-size: 23px;
+}
+.ac-chat-title { flex: 1; min-width: 0; }
+.ac-eyebrow { color: var(--atlas-accent); font-size: 11px; font-weight: 700; letter-spacing: .09em; }
+.ac-eyebrow > span { opacity: .5; margin: 0 2px; }
+.ac-chat-title h2 {
+  margin-top: 3px; font-size: 19px; font-weight: 720; line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ac-context, .ac-test { font-size: 11px; color: var(--atlas-muted); }
+.ac-test { display: inline-block; margin-top: 4px; color: var(--atlas-warn); }
+.ac-run { position: relative; min-width: 0; max-width: 48%; }
+.ac-run summary {
+  display: flex; align-items: center; gap: 6px; list-style: none; cursor: pointer;
+  padding: 6px 9px; border-radius: 9px; background: var(--atlas-wash);
+  color: var(--atlas-muted); font-size: 12px; line-height: 1.3;
+}
+.ac-run summary::-webkit-details-marker, .ac-process > summary::-webkit-details-marker { display: none; }
+.ac-run .ac-run--active { background: var(--atlas-tint); color: var(--atlas-strong); }
+.ac-run-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ac-run-meta {
+  position: absolute; top: calc(100% + 8px); right: 0; width: min(230px, 65vw);
+  padding: 12px; border: 1px solid var(--atlas-line); border-radius: 10px;
+  background: var(--atlas-surface); box-shadow: var(--atlas-shadow);
+  color: var(--atlas-ink); font-size: 12px; overflow-wrap: anywhere;
+}
+.ac-run-meta small { display: block; margin-top: 5px; color: var(--atlas-muted); line-height: 1.5; }
+.ac-body { position: relative; flex: 1; min-height: 0; display: flex; }
+.ac-messages {
+  position: relative; flex: 1; min-width: 0; min-height: 0; overflow: auto;
+  overscroll-behavior-y: contain; scrollbar-width: thin;
+  padding: 20px clamp(16px, 3vw, 36px); display: flex; flex-direction: column; gap: 15px;
+}
+.ac-messages--rail { padding-left: clamp(36px, 5vw, 60px); }
+.ac-messages > * { flex-shrink: 0; width: min(100%, 720px); margin-inline: auto; }
+
+/* 空会话给可编辑的示例，不直接发出任何操作。 */
+.ac-empty { display: grid; margin-block: auto; padding-block: 16px; max-width: 620px; }
+.ac-constellation {
+  position: relative; display: grid; place-items: center; min-height: 158px; overflow: hidden;
+  background: radial-gradient(ellipse at 50% 52%, #e2f2e7, transparent 72%),
+              radial-gradient(circle, #bfd6c9 1px, transparent 1.5px) center / 18px 18px;
+  mask-image: radial-gradient(ellipse at center, black 42%, transparent 78%);
+}
+.ac-constellation > svg { position: absolute; inset: 0; width: 100%; height: 100%; color: #7eaa99; }
+.ac-constellation > svg path { stroke: currentColor; stroke-opacity: .5; }
+.ac-constellation > svg circle { fill: currentColor; }
+.ac-empty-mark {
+  z-index: 1; width: 62px; height: 62px; border-radius: 19px; font-size: 34px;
+  transform: rotate(-8deg); box-shadow: 0 10px 28px rgb(12 81 66 / 22%);
+}
+.ac-empty-mark svg { transform: rotate(8deg); }
+.ac-welcome { text-align: center; }
+.ac-welcome h3 { margin: 7px 0 9px; font-size: clamp(22px, 2.5vw, 35px); line-height: 1.25; }
+.ac-welcome p { font-size: 14px; color: var(--atlas-muted); }
+.ac-suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; }
+.ac-suggestions button {
+  min-height: 38px; display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 10px; border: 1px solid var(--atlas-line); border-radius: 9px;
+  background: var(--atlas-paper); color: var(--atlas-strong); font-size: 13px; cursor: pointer;
+}
+.ac-suggestions button:hover:not(:disabled) { background: var(--atlas-tint); }
+.ac-suggestions button:disabled { opacity: .65; }
+.ac-suggestions button > :last-child { opacity: .65; margin-left: 1px; }
+
+/* 轮次索引在左侧，点线造型小，实际点击区更大。 */
+.ac-rounds {
+  position: absolute; left: 6px; top: 50%; transform: translateY(-50%); z-index: 2;
+  max-height: calc(100% - 20px); overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; padding: 4px;
+  scrollbar-width: none;
+}
+.ac-rounds::-webkit-scrollbar { display: none; }
+.ac-round {
+  flex: none; display: grid; place-items: center; width: 23px; height: 22px;
+  border: 0; border-radius: 4px; background: transparent; cursor: pointer;
+}
+.ac-round-dash { width: 9px; height: 2px; border-radius: 999px; background: #a8bdb3; }
+.ac-round:hover .ac-round-dash, .ac-round--hover .ac-round-dash { width: 13px; background: var(--atlas-muted); }
+.ac-round--on .ac-round-dash { width: 15px; height: 3px; background: var(--atlas-accent); }
+.ac-round-card {
+  position: fixed; z-index: 120; padding: 12px 14px;
+  border: 1px solid var(--atlas-line); border-radius: 11px; background: var(--atlas-surface);
+  box-shadow: 0 12px 30px rgb(23 54 44 / 14%); pointer-events: none;
+}
+.ac-round-card .ac-round-card-no { display: block; color: var(--atlas-accent); font-weight: 700; margin-bottom: 4px; }
+.ac-round-card b {
+  display: block; font-size: 13px; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ac-round-card p {
+  margin: 5px 0 6px; color: var(--atlas-muted); font-size: 12px; line-height: 1.55;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.ac-round-card small { color: var(--atlas-muted); font-size: 11px; }
+.ac-msg { display: flex; min-width: 0; }
+.ac-msg--user { justify-content: flex-end; }
+.ac-msg--user .ac-bubble {
+  max-width: 87%; padding: 10px 14px; border: 1px solid #d7e9e0; border-radius: 14px 14px 4px 14px;
+  background: var(--atlas-tint); color: var(--atlas-ink); white-space: pre-wrap;
+}
+.ac-msg--assistant { flex-direction: column; gap: 7px; }
+.ac-answer-head {
+  display: flex; align-items: center; gap: 6px; color: var(--atlas-accent);
+  font-size: 11px; font-weight: 750; letter-spacing: .09em;
+}
+.ac-answer-head svg { font-size: 16px; }
+.ac-bubble { min-width: 0; max-width: 100%; font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
+.ac-terminal {
+  color: var(--atlas-muted); font-size: 12px; padding-top: 8px; border-top: 1px solid var(--atlas-line);
+  overflow-wrap: anywhere;
+}
+
+/* 过程摘要独立于正文，运行时仍默认展开。 */
+.ac-process > summary {
+  display: flex; align-items: center; gap: 7px; width: fit-content; list-style: none;
+  padding: 6px 9px; border: 1px solid var(--atlas-line); border-radius: 8px;
+  cursor: pointer; user-select: none; color: var(--atlas-muted); font-size: 12px;
+}
+.ac-process > summary:hover, .ac-process[open] > summary { background: var(--atlas-wash); }
+.ac-process--live > summary { background: var(--atlas-tint); color: var(--atlas-strong); }
+.ac-chevron { margin-left: 2px; }
+.ac-process[open] > summary .ac-chevron { transform: rotate(180deg); }
+.ac-process-steps {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 8px 0 2px 8px; padding-left: 12px; border-left: 2px solid var(--atlas-line);
+}
+.ac-process-steps .ac-bubble { font-size: 13px; color: var(--atlas-muted); }
+.ac-tool-result {
+  min-width: 0; color: var(--atlas-muted); background: var(--atlas-wash); border: 1px solid var(--atlas-line);
+  border-radius: 8px; font-size: 12px; overflow-wrap: anywhere;
+}
+.ac-tool-result summary { cursor: pointer; padding: 7px 9px; }
+.ac-tool-result summary:hover { color: var(--atlas-accent); }
+.ac-tool-result pre {
+  margin: 0 6px 6px; padding: 9px; border-radius: 6px; background: #17332e; color: #e3f5eb;
+  overflow: auto; max-height: 220px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ac-tool-result--error summary { color: var(--atlas-alert); }
+.ac-status { display: flex; align-items: center; gap: 8px; color: var(--atlas-accent); font-size: 13px; }
+.ac-warning { color: var(--atlas-warn); font-size: 12px; }
+.ac-banner {
+  margin: 8px 16px 0; padding: 9px 11px; border-radius: 10px;
+  background: var(--atlas-alert-bg); border: 1px solid #f1dbd5; color: var(--atlas-alert); font-size: 13px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px;
+  overflow-wrap: anywhere;
+}
+.ac-banner-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: inherit; font-weight: 650; text-decoration: underline; text-underline-offset: 3px;
+}
+.ac-notice { margin: 6px 16px 0; color: var(--atlas-accent); font-size: 12px; }
+.ac-composer { flex: none; padding: 10px clamp(12px, 2vw, 24px) 13px; background: var(--atlas-surface); }
+.ac-composer-box {
+  max-width: 720px; margin-inline: auto; padding: 9px 10px 8px;
+  border: 1px solid var(--atlas-line); border-radius: 14px;
+  background: var(--atlas-paper); box-shadow: 0 3px 10px rgb(23 54 44 / 5%);
+}
+.ac-composer-box:focus-within { border-color: var(--atlas-accent); }
+.ac-composer textarea {
+  display: block; width: 100%; min-width: 0; resize: none; border: 0; padding: 4px 5px;
+  background: transparent; color: var(--atlas-ink); font-size: 15px; line-height: 1.5; outline: none;
+}
+.ac-composer textarea:focus-visible { outline: none; }
+.ac-composer textarea::placeholder { color: var(--atlas-muted); }
+.ac-composer-actions { display: flex; align-items: center; gap: 8px; padding: 2px 0 0 5px; }
+.ac-keys, .ac-composer-note { color: var(--atlas-muted); font-size: 11px; }
+.ac-keys kbd { font: inherit; font-weight: 650; }
+.ac-composer-note { max-width: 720px; margin: 8px auto 0; text-align: center; line-height: 1.45; }
+.ac-send {
+  margin-left: auto; min-height: 36px; padding: 6px 12px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 9px;
+  background: var(--atlas-accent); color: #fff; cursor: pointer; font-size: 13px; font-weight: 680;
+}
+.ac-send:hover:not(:disabled) { background: var(--atlas-strong); }
+.ac-send:disabled { background: var(--atlas-wash); color: var(--atlas-muted); }
+.ac-send--stop, .ac-send--stop:hover:not(:disabled) { background: var(--atlas-alert); }
+
+/* 浮窗减少留白，给上下文和正文留空间。 */
+.ac-chat--compact .ac-messages { padding: 12px 15px; gap: 10px; }
+.ac-chat--compact .ac-messages--rail { padding-left: 36px; }
+.ac-chat--compact .ac-rounds { left: 2px; }
+.ac-chat--compact .ac-bubble { font-size: 14px; }
+.ac-chat--compact .ac-constellation { min-height: 88px; }
+.ac-chat--compact .ac-empty-mark { width: 44px; height: 44px; border-radius: 13px; font-size: 26px; }
+.ac-chat--compact .ac-welcome h3 { font-size: 22px; }
+.ac-chat--compact .ac-welcome p { font-size: 13px; }
+.ac-chat--compact .ac-suggestions { margin-top: 12px; }
+/* 浮窗把输入和主要操作排在同一行，避免下方留出空白按钮栏。 */
+.ac-chat--compact .ac-composer { padding: 9px 11px 11px; border-top: 1px solid var(--atlas-line); }
+.ac-chat--compact .ac-composer-box { display: flex; align-items: flex-end; gap: 6px; padding: 6px; }
+.ac-chat--compact .ac-composer textarea { align-self: center; padding: 4px 6px; }
+.ac-chat--compact .ac-composer-actions { flex: none; padding: 0; }
+.ac-chat--compact .ac-keys { display: none; }
+.ac-chat--compact .ac-send { min-width: 68px; min-height: 40px; border: 1px solid transparent; border-radius: 9px; }
+.ac-chat--compact .ac-send:disabled { border-color: var(--atlas-line); }
+.ac-chat--compact .ac-send--stop { background: var(--atlas-alert-bg); border-color: #efcec7; color: var(--atlas-alert); }
+.ac-chat--compact .ac-send--stop:hover:not(:disabled) { background: #fbe6df; }
+
+/* Markdown：表格和代码独立滚动，不撑宽聊天区。 */
+.md :deep(p) { margin: 0 0 10px; }
+.md :deep(p:last-child) { margin-bottom: 0; }
+.md :deep(h1), .md :deep(h2), .md :deep(h3), .md :deep(h4) { margin: 10px 0 6px; line-height: 1.4; }
+.md :deep(h1:first-child), .md :deep(h2:first-child), .md :deep(h3:first-child) { margin-top: 0; }
+.md :deep(h2) { font-size: 18px; }
+.md :deep(h3), .md :deep(h4) { font-size: 16px; }
+.md :deep(ul), .md :deep(ol) { margin: 5px 0 9px; padding-left: 20px; }
+.md :deep(li) { margin: 3px 0; }
+.md :deep(code) { padding: 1px 4px; border-radius: 5px; background: var(--atlas-wash); font-family: ui-monospace, Consolas, monospace; font-size: .92em; }
+.md :deep(pre) { overflow-x: auto; margin: 8px 0; padding: 10px; border-radius: 9px; background: #17332e; color: #e3f5eb; }
+.md :deep(pre code) { padding: 0; background: transparent; color: inherit; }
+.md :deep(table) { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.md :deep(th), .md :deep(td) { padding: 6px 10px; border: 1px solid var(--atlas-line); text-align: left; }
+.md :deep(th) { background: var(--atlas-wash); }
+.md :deep(blockquote) { margin: 6px 0; padding-left: 10px; border-left: 2px solid var(--atlas-line); color: var(--atlas-muted); }
+.md :deep(hr) { border: 0; border-bottom: 1px solid var(--atlas-line); margin: 12px 0; }
+.md :deep(a) { color: var(--atlas-accent); }
+
+@media (max-width: 620px) {
+  .ac-chat-head { padding: 11px 12px; gap: 8px; }
+  .ac-brand-mark { width: 34px; height: 34px; font-size: 19px; }
+  .ac-chat-title h2 { font-size: 16px; }
+  .ac-messages { padding-block: 13px; }
+  .ac-constellation { min-height: 108px; }
+  .ac-empty-mark { width: 48px; height: 48px; font-size: 28px; border-radius: 15px; }
+  .ac-suggestions { margin-top: 12px; }
+  .ac-composer textarea { font-size: 16px; }
+  .ac-keys { display: none; }
+}

@@ -8,9 +8,10 @@
  * 公仔可以拖到视口任意位置，位置和形象都记在 localStorage；面板跟着公仔走，
  * 也可以按住面板标题单独拖动。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AgentCoreChat from '@/components/AgentCoreChat.vue'
+import AtlasIcon from '@/components/AtlasIcon.vue'
 import AtlasMascot from '@/components/AtlasMascot.vue'
 import { useAgentSession } from '@/composables/useAgentSession'
 import { buildAgentPageContext } from '@/utils/agentPageContext'
@@ -19,9 +20,11 @@ import { agentPageState } from '@/utils/agentPageState'
 const route = useRoute()
 const open = ref(false)
 const started = ref(false)
+const petButton = ref<HTMLButtonElement | null>(null)
+const closeButton = ref<HTMLButtonElement | null>(null)
 
 const {
-  input, detail, opening, sending, stopping, reconnectText, errorBanner, notice,
+  input, detail, currentId, opening, sending, stopping, reconnectText, errorBanner, notice,
   run, active, items, send, stop, init,
 } = useAgentSession({
   pageContext: () => buildAgentPageContext({
@@ -36,8 +39,8 @@ const {
 
 const contextLabel = computed(() => {
   const parts: string[] = []
-  if (agentPageState.dateFrom && agentPageState.dateTo) {
-    parts.push(`${agentPageState.dateFrom} ~ ${agentPageState.dateTo}`)
+  if (agentPageState.dateFrom || agentPageState.dateTo) {
+    parts.push(`${agentPageState.dateFrom || '不限'} 至 ${agentPageState.dateTo || '不限'}`)
   }
   if (agentPageState.selection.length) parts.push(`已选 ${agentPageState.selection.length} 项`)
   return parts.join(' · ')
@@ -45,34 +48,68 @@ const contextLabel = computed(() => {
 
 // ── 公仔形象 ─────────────────────────────────────────────────────────────
 
-const VARIANT_NAMES = ['星仪', '账灵', '夜枭']
+const VARIANTS = [
+  { name: '科技少年', style: '帅气' },
+  { name: '星光少女', style: '可爱' },
+]
 const variant = ref(restoreVariant())
+const lookOpen = ref(false)
+const lookControl = ref<HTMLElement | null>(null)
+const lookButton = ref<HTMLButtonElement | null>(null)
+const looks = ref<HTMLElement | null>(null)
 
 function restoreVariant(): number {
   try {
     const raw = Number(localStorage.getItem('atlas.mascot'))
-    return Number.isInteger(raw) && raw >= 0 && raw < VARIANT_NAMES.length ? raw : 0
+    return Number.isInteger(raw) && raw >= 0 && raw < VARIANTS.length ? raw : 0
   } catch {
     return 0
   }
 }
-function cycleVariant() {
-  variant.value = (variant.value + 1) % VARIANT_NAMES.length
-  try { localStorage.setItem('atlas.mascot', String(variant.value)) } catch { /* 隐私模式 */ }
+function closeLook(restoreFocus = false) {
+  if (!lookOpen.value) return
+  lookOpen.value = false
+  if (restoreFocus) lookButton.value?.focus({ preventScroll: true })
+}
+function selectVariant(index: number) {
+  variant.value = index
+  try { localStorage.setItem('atlas.mascot', String(index)) } catch { /* 隐私模式 */ }
+  closeLook(true)
+}
+async function toggleLook() {
+  if (lookOpen.value) {
+    closeLook()
+    return
+  }
+  lookOpen.value = true
+  await nextTick()
+  looks.value?.querySelector<HTMLElement>('[aria-pressed="true"]')?.focus({ preventScroll: true })
+}
+function onLookOutside(event: Event) {
+  if (event.target instanceof Node && !lookControl.value?.contains(event.target)
+      && !looks.value?.contains(event.target)) closeLook()
+}
+function onLookKeys(event: KeyboardEvent) {
+  const buttons = Array.from(looks.value?.querySelectorAll('button') ?? [])
+  const index = buttons.findIndex(button => button === document.activeElement)
+  const offset = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0
+  if (!buttons.length || !offset) return
+  event.preventDefault()
+  buttons[(index + offset + buttons.length) % buttons.length]?.focus()
 }
 
 const petState = computed(() => active.value ? 'thinking' : open.value ? 'open' : 'idle')
 
 // ── 位置：公仔与面板 ─────────────────────────────────────────────────────
 
-const PET_W = 78
-const PET_H = 104
+const PET_W = 96
+const PET_H = 106
 const PET_KEY = 'atlas.position'
 const PANEL_KEY = 'atlas.panel'
 
 const viewport = ref({ w: window.innerWidth, h: window.innerHeight })
-const panelW = computed(() => Math.min(392, viewport.value.w - 24))
-const panelH = computed(() => Math.min(560, Math.round(viewport.value.h * 0.72)))
+const panelW = computed(() => Math.min(416, viewport.value.w - 24))
+const panelH = computed(() => Math.min(590, viewport.value.h - 24, Math.max(318, Math.round(viewport.value.h * 0.73))))
 const pos = ref(restorePet())
 const panelPos = ref<{ left: number; top: number } | null>(restorePanel())
 
@@ -100,7 +137,7 @@ function restorePet(): { left: number; top: number } {
   if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
     return clampPet(Number(saved.left), Number(saved.top))
   }
-  return clampPet(window.innerWidth - PET_W - 22, window.innerHeight - PET_H - 20)
+  return clampPet(window.innerWidth - PET_W - 22, window.innerHeight - PET_H - 18)
 }
 function restorePanel(): { left: number; top: number } | null {
   try {
@@ -131,10 +168,12 @@ const anchoredPanel = computed(() => {
   let top = pos.value.top - panelH.value - 10
   if (top < 6) top = pos.value.top + PET_H + 8
   if (top + panelH.value > vh - 6) {
-    // 公仔贴底时上下都放不下面板：改为左右并排，避免面板盖住公仔（公仔仍可拖动）。
+    // 上下都放不下时，优先在公仔旁边打开。
     top = pos.value.top + PET_H / 2 - panelH.value / 2
     left = rightHalf ? pos.value.left - panelW.value - 12 : pos.value.left + PET_W + 12
   }
+  // 窄屏给面板两侧留相同的边距，单独拖动时仍以用户的位置为准。
+  if (vw <= 440) left = (vw - panelW.value) / 2
   return clampPanel(left, top)
 })
 const panelPlacement = computed(() => panelPos.value ?? anchoredPanel.value)
@@ -183,6 +222,7 @@ function petUp(event: PointerEvent) {
   draggingPet.value = false
   if (moved) {
     savePet()
+    savePanel()
     suppressClick = true
     window.setTimeout(() => { suppressClick = false }, 0)
   }
@@ -194,7 +234,7 @@ function onPetClick() {
 
 function headDown(event: PointerEvent) {
   if (event.button !== 0) return
-  if ((event.target as Element).closest('button, a')) return
+  if ((event.target as Element).closest('button, a, .fa-looks')) return
   const start = panelPlacement.value
   panelDrag = { id: event.pointerId, sx: event.clientX, sy: event.clientY, left: start.left, top: start.top, moved: false }
   draggingPanel.value = true
@@ -221,42 +261,88 @@ function onResize() {
   if (panelPos.value) panelPos.value = clampPanel(panelPos.value.left, panelPos.value.top)
 }
 
+function closePanel() {
+  closeLook()
+  open.value = false
+  petButton.value?.focus({ preventScroll: true })
+}
+
 async function toggle() {
-  open.value = !open.value
-  if (open.value && !started.value) {
-    started.value = true
-    await init()
+  if (open.value) {
+    closePanel()
+    return
   }
+  open.value = true
+  if (!started.value) {
+    started.value = true
+    void init()
+  }
+  await nextTick()
+  if (open.value && document.activeElement === petButton.value) closeButton.value?.focus({ preventScroll: true })
 }
 
 function closeOnEscape(event: KeyboardEvent) {
-  if (event.key === 'Escape') open.value = false
+  if (event.key !== 'Escape' || event.isComposing || !open.value) return
+  if (lookOpen.value) {
+    closeLook(true)
+    return
+  }
+  closePanel()
 }
-window.addEventListener('keydown', closeOnEscape)
-window.addEventListener('resize', onResize)
-onMounted(() => { onResize() })
+onMounted(() => {
+  onResize()
+  window.addEventListener('keydown', closeOnEscape)
+  window.addEventListener('pointerdown', onLookOutside, true)
+  window.addEventListener('focusin', onLookOutside)
+  window.addEventListener('resize', onResize)
+})
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', closeOnEscape)
+  window.removeEventListener('pointerdown', onLookOutside, true)
+  window.removeEventListener('focusin', onLookOutside)
   window.removeEventListener('resize', onResize)
 })
 </script>
 
 <template>
-  <div class="fa">
-    <section v-if="open" class="fa-panel" :style="panelStyle" :class="{ 'fa-panel--drag': draggingPanel }"
+  <div class="fa atlas-theme">
+    <section v-if="open" id="atlas-floating-panel" class="fa-panel" :style="panelStyle"
+             :class="{ 'fa-panel--drag': draggingPanel }"
              data-testid="floating-assistant" aria-label="ATLAS 账本助手浮窗">
       <header class="fa-head" @pointerdown="headDown" @pointermove="headMove"
               @pointerup="headUp" @pointercancel="headUp">
         <div class="fa-title">
-          <b>ATLAS</b>
-          <small v-if="contextLabel" data-testid="floating-context">{{ contextLabel }}</small>
+          <span class="fa-mark"><AtlasMascot :variant="variant" :state="petState" /></span>
+          <span><b>ATLAS</b><small role="status">{{ active ? '正在处理' : '账本助手' }}</small></span>
         </div>
-        <button class="fa-look" title="换个形象" data-testid="floating-look" @click="cycleVariant">
-          ↻ {{ VARIANT_NAMES[variant] }}
-        </button>
-        <RouterLink to="/v2/assistant" class="fa-link" data-testid="floating-full">完整页面</RouterLink>
-        <button class="fa-close" aria-label="收起助手" data-testid="floating-close" @click="open = false">×</button>
+        <div class="fa-actions">
+          <div ref="lookControl" class="fa-look-control">
+            <button ref="lookButton" class="fa-action fa-look" type="button"
+                    :aria-label="`外观，当前：${VARIANTS[variant].name}`" :aria-expanded="lookOpen"
+                    :aria-controls="lookOpen ? 'atlas-looks' : undefined" data-testid="floating-look" @click="toggleLook">
+              <AtlasIcon name="palette" /><span>外观</span>
+            </button>
+            <div v-if="lookOpen" ref="looks" id="atlas-looks" class="fa-looks" role="group"
+                 aria-label="选择 ATLAS 外观" @keydown="onLookKeys">
+              <p>助手外观</p>
+              <button v-for="(look, index) in VARIANTS" :key="look.name" type="button" class="fa-look-option"
+                      :aria-pressed="variant === index" @click="selectVariant(index)">
+                <span class="fa-preview"><AtlasMascot :variant="index" /></span>
+                <span class="fa-look-label"><b>{{ look.name }}</b><small>{{ look.style }}</small></span>
+                <AtlasIcon v-if="variant === index" name="check" />
+              </button>
+            </div>
+          </div>
+          <RouterLink to="/v2/assistant" class="fa-action fa-full" aria-label="打开完整页面" data-testid="floating-full">
+            <span>完整页面</span><AtlasIcon name="expand" />
+          </RouterLink>
+          <button ref="closeButton" type="button" class="fa-action fa-close" aria-label="收起助手" title="收起助手"
+                  data-testid="floating-close" @click="closePanel"><AtlasIcon name="minus" /></button>
+        </div>
       </header>
+      <div v-if="contextLabel" class="fa-context" data-testid="floating-context">
+        <AtlasIcon name="ledger" /><b>V2 上下文</b><span>{{ contextLabel }}</span>
+      </div>
       <AgentCoreChat
         class="fa-chat"
         compact
@@ -265,100 +351,36 @@ onBeforeUnmount(() => {
         :items="items"
         :run="run"
         :active="active"
+        :ready="!!currentId"
         :status="detail?.status ?? ''"
         :step="detail?.step ?? 0"
-        :totals="detail?.totals ?? null"
         :sending="sending"
         :stopping="stopping"
         :opening="opening"
         :reconnect-text="reconnectText"
         :error-banner="errorBanner"
         :notice="notice"
-        placeholder="问流水，或让它按当前范围改 V2…"
+        placeholder="查账、核对支出，或整理账本…"
+        subtitle="明确要求执行时会写入账本；结果以回执为准。"
         @send="send"
         @stop="stop"
-      />
+      >
+        <template #welcome-art>
+          <div class="fa-welcome-character"><AtlasMascot :variant="variant" /></div>
+        </template>
+      </AgentCoreChat>
     </section>
 
-    <button class="fa-pet" :class="{ 'fa-pet--on': open, 'fa-pet--drag': draggingPet }"
-            :style="{ left: `${pos.left}px`, top: `${pos.top}px` }"
-            data-testid="floating-toggle" :aria-expanded="open"
-            aria-label="ATLAS 账本助手（拖动可移动，点击打开）"
+    <button ref="petButton" type="button" class="fa-pet" :class="{ 'fa-pet--drag': draggingPet }"
+            :style="{ left: `${pos.left}px`, top: `${pos.top}px`, width: `${PET_W}px`, height: `${PET_H}px` }"
+            :title="open ? '收起 ATLAS' : '打开 ATLAS'"
+            data-testid="floating-toggle" :aria-expanded="open" :aria-controls="open ? 'atlas-floating-panel' : undefined"
+            :aria-label="`ATLAS 账本助手（拖动可移动，点击${open ? '收起' : '打开'}${active ? '，正在运行' : ''}）`"
             @pointerdown="petDown" @pointermove="petMove"
             @pointerup="petUp" @pointercancel="petUp" @click="onPetClick">
-      <span class="fa-figure"><AtlasMascot :variant="variant" :state="petState" /></span>
-      <span class="fa-name">ATLAS</span>
-      <span v-if="active" class="fa-dot" aria-label="正在运行" />
+      <AtlasMascot :variant="variant" :state="petState" />
     </button>
   </div>
 </template>
 
-<style scoped>
-.fa { position: static; z-index: 50; }
-
-/* 公仔：整块都是拖动区，点击（没有拖动）时开合面板。 */
-.fa-pet {
-  position: fixed; z-index: 51;
-  width: 78px; height: 104px; padding: 0 5px 4px;
-  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
-  border: 0; background: transparent; cursor: grab; touch-action: none; user-select: none;
-  filter: drop-shadow(0 10px 18px rgba(28, 66, 108, .22));
-  transition: transform .16s ease;
-}
-.fa-pet:hover { transform: translateY(-2px); }
-.fa-pet--drag { cursor: grabbing; transform: scale(1.03); }
-.fa-pet--on { filter: drop-shadow(0 10px 24px rgba(28, 66, 108, .34)); }
-.fa-figure { width: 68px; height: 82px; }
-.fa-name {
-  margin-top: 1px; padding: 1px 9px; border-radius: 999px;
-  background: linear-gradient(145deg, #2f67a3, #5a90cc); color: #fff;
-  font-size: 10px; font-weight: 700; letter-spacing: .08em;
-  box-shadow: 0 3px 8px rgba(47, 103, 163, .28);
-}
-.fa-dot {
-  position: absolute; right: 9px; top: 10px;
-  width: 9px; height: 9px; border-radius: 50%; background: #46d68c;
-  box-shadow: 0 0 0 3px rgba(70, 214, 140, .25);
-  animation: fa-pulse 1.4s ease-in-out infinite;
-}
-@keyframes fa-pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.35); }
-}
-
-.fa-panel {
-  position: fixed; z-index: 50;
-  display: flex; flex-direction: column; overflow: hidden;
-  background: #fff; border: 1px solid var(--color-border); border-radius: 16px;
-  box-shadow: 0 18px 46px rgba(25, 58, 93, .22);
-}
-.fa-panel--drag { box-shadow: 0 22px 56px rgba(25, 58, 93, .3); }
-.fa-head {
-  flex: none; display: flex; align-items: center; gap: 8px;
-  padding: 9px 11px; border-bottom: 1px solid var(--color-border); background: #fbfdff;
-  cursor: move; touch-action: none;
-}
-.fa-title { flex: 1; min-width: 0; }
-.fa-title b { font-size: 13px; letter-spacing: .06em; }
-.fa-title small {
-  display: block; margin-top: 2px; color: var(--color-muted); font-size: 10px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.fa-look {
-  flex: none; padding: 3px 8px; border: 1px solid #dbe6f2; border-radius: 999px;
-  background: #f4f8fd; color: #40628a; font-size: 10px; cursor: pointer;
-}
-.fa-look:hover { background: #e8f1fb; }
-.fa-link { color: #2f6fae; font-size: 11px; text-decoration: none; white-space: nowrap; }
-.fa-close {
-  width: 24px; height: 24px; border: 0; border-radius: 50%; cursor: pointer;
-  background: transparent; color: var(--color-muted); font-size: 18px; line-height: 1;
-}
-.fa-close:hover { background: #eef4fa; color: var(--color-text); }
-.fa-chat { flex: 1; min-height: 0; }
-
-@media (max-width: 560px) {
-  .fa-name { display: none; }
-  .fa-look { display: none; }
-}
-</style>
+<style scoped src="./FloatingLedgerAssistant.css"></style>

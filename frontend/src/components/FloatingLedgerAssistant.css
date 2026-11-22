@@ -1,0 +1,84 @@
+/* 重叠时优先面板，公仔仍可在面板外拖动。 */
+.fa-pet {
+  position: fixed; z-index: 50; display: block; padding: 0;
+  border: 0; border-radius: 12px; background: transparent;
+  cursor: grab; touch-action: none; user-select: none;
+  transition: transform .18s ease;
+}
+.fa-pet:hover { transform: translateY(-3px); }
+.fa-pet--drag { cursor: grabbing; transform: scale(1.04); }
+.fa-panel {
+  position: fixed; z-index: 51; container-type: inline-size;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--atlas-surface); border: 1px solid var(--atlas-line); border-radius: 18px;
+  box-shadow: 0 6px 15px rgb(23 54 44 / 9%), 0 24px 60px rgb(23 54 44 / 16%);
+}
+.fa-panel--drag { box-shadow: 0 22px 56px rgb(23 54 44 / 30%); }
+.fa-head {
+  position: relative; z-index: 3; flex: none;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px; border-bottom: 1px solid var(--atlas-line); background: var(--atlas-paper);
+  cursor: grab; touch-action: none; user-select: none;
+}
+.fa-panel--drag .fa-head { cursor: grabbing; }
+.fa-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.fa-mark { flex: none; width: 38px; height: 38px; }
+.fa-title b { display: block; font-size: 14px; letter-spacing: .11em; line-height: 1.2; }
+.fa-title small { display: block; margin-top: 3px; color: var(--atlas-muted); font-size: 11px; white-space: nowrap; }
+.fa-actions { display: flex; flex: none; align-items: center; gap: 6px; }
+.fa-action {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-height: 36px; padding: 0 9px; border: 1px solid transparent; border-radius: 9px;
+  color: var(--atlas-strong); background: transparent; font-size: 12px; line-height: 1; font-weight: 650;
+  text-decoration: none; white-space: nowrap; cursor: pointer;
+}
+.fa-action svg { font-size: 14px; }
+.fa-look { border-color: var(--atlas-line); background: var(--atlas-surface); }
+.fa-look:hover, .fa-look[aria-expanded="true"] { background: var(--atlas-wash); border-color: #a9c2b5; }
+.fa-full { background: var(--atlas-tint); }
+.fa-full:hover { background: #d1eadc; }
+.fa-close { width: 36px; padding: 0; color: var(--atlas-muted); }
+.fa-close:hover { background: var(--atlas-wash); color: var(--atlas-ink); }
+.fa-close svg { font-size: 17px; }
+.fa-looks {
+  position: absolute; top: calc(100% + 6px); right: 10px;
+  width: 236px; max-width: calc(100% - 20px); padding: 8px;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;
+  border: 1px solid var(--atlas-line); border-radius: 13px; background: var(--atlas-surface);
+  box-shadow: 0 4px 10px rgb(23 54 44 / 7%), 0 14px 32px rgb(23 54 44 / 11%);
+  cursor: default;
+}
+.fa-looks > p { grid-column: 1 / -1; padding: 2px 4px; color: var(--atlas-muted); font-size: 12px; font-weight: 650; }
+.fa-look-option {
+  position: relative; display: grid; justify-items: center; gap: 3px; padding: 6px 6px 8px;
+  border: 1px solid var(--atlas-line); border-radius: 10px; background: var(--atlas-paper);
+  text-align: center; color: var(--atlas-ink); cursor: pointer;
+}
+.fa-look-option:hover { background: var(--atlas-wash); }
+.fa-look-option[aria-pressed="true"] { background: var(--atlas-tint); border-color: #9ccbb7; }
+.fa-preview { display: block; width: 84px; max-width: 100%; height: 88px; }
+.fa-look-label { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: center; gap: 3px 5px; }
+.fa-look-label b { font-size: 13px; }
+.fa-look-label small { color: var(--atlas-muted); font-size: 11px; }
+.fa-look-option > svg { position: absolute; top: 5px; right: 5px; color: var(--atlas-accent); font-size: 14px; }
+.fa-context {
+  display: flex; flex: none; align-items: baseline; flex-wrap: wrap; gap: 3px 7px;
+  padding: 7px 12px; border-bottom: 1px solid var(--atlas-line); background: var(--atlas-wash);
+  color: var(--atlas-muted); font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums;
+}
+.fa-context svg { align-self: center; color: var(--atlas-accent); }
+.fa-context b { color: var(--atlas-strong); }
+.fa-chat { flex: 1; min-height: 0; }
+.fa-welcome-character { width: 100%; height: clamp(73px, 13vh, 112px); margin-bottom: 12px; }
+
+@container (max-width: 320px) {
+  .fa-head { padding: 10px 8px; }
+  .fa-title { gap: 5px; }
+  .fa-mark { width: 30px; height: 30px; }
+  .fa-actions { gap: 3px; }
+  .fa-action { min-height: 38px; padding-inline: 7px; }
+  .fa-close { width: 34px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fa-pet { transition: none; }
+}

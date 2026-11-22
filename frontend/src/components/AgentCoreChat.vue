@@ -6,6 +6,7 @@
  * 这样完整页面和跨页面浮窗能共用同一个 session。
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import AtlasIcon from '@/components/AtlasIcon.vue'
 import { renderMarkdown } from '@/utils/markdown'
 import { stateLabel } from '@/utils/agentLabels'
 import type { AgentChatItem, AgentRun, AgentTerminal, AgentToolCall } from '@/api/agentCore'
@@ -16,6 +17,8 @@ const props = withDefaults(defineProps<{
   active: boolean
   status?: string
   step?: number
+  ready?: boolean
+  sendBlocked?: boolean
   totals?: Record<string, number> | null
   sending?: boolean
   stopping?: boolean
@@ -45,7 +48,7 @@ const props = withDefaults(defineProps<{
   title: 'ATLAS',
   subtitle: '',
   contextLabel: '',
-  placeholder: '例如：导入右侧账单，把这批新增流水初始化到「旅行」，再核对净额。',
+  placeholder: '例如：核对十一月的出行支出，按类别列出。',
   compact: false,
   showHeader: true,
 })
@@ -55,6 +58,19 @@ const emit = defineEmits<{ send: []; stop: [] }>()
 
 const composing = ref(false)
 const scrollArea = ref<HTMLElement | null>(null)
+const composerInput = ref<HTMLTextAreaElement | null>(null)
+const suggestions = computed(() => [
+  { icon: 'ledger' as const, label: '核对支出', prompt: '帮我按类别汇总支出，列出金额和笔数，不修改账本。' },
+  { icon: 'list' as const, label: '查找交易', prompt: '列出最近 5 笔支出，注明日期、分类和金额。' },
+  ...(!props.compact ? [
+    { icon: 'file' as const, label: '检查账单附件', prompt: '先检查已解析的附件，告诉我日期范围和笔数，暂不导入。' },
+  ] : []),
+])
+
+function useSuggestion(prompt: string) {
+  input.value = prompt
+  composerInput.value?.focus()
+}
 
 const needsSettings = computed(() =>
   props.errorBanner?.code === 'NOT_CONFIGURED' || props.errorBanner?.code === 'NOT_AUTHORIZED')
@@ -261,6 +277,7 @@ const activeRoundId = ref<number | null>(null)
 const hoveredRound = ref<RoundEntry | null>(null)
 const cardPos = ref({ left: 0, top: 0 })
 const CARD_W = 272
+const tooltipWidth = ref(CARD_W)
 let scrollQueued = false
 
 function roundAnchor(id: number) {
@@ -292,49 +309,94 @@ function jumpToRound(id: number) {
   const host = scrollArea.value
   const target = roundAnchor(id)
   if (!host || !target) return
-  host.scrollTo({ top: Math.max(0, target.offsetTop - 10), behavior: 'smooth' })
+  const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+  host.scrollTo({ top: Math.max(0, target.offsetTop - 10), behavior })
   activeRoundId.value = id
 }
 
 function showRoundCard(round: RoundEntry, event: Event) {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
   hoveredRound.value = round
+  tooltipWidth.value = Math.min(CARD_W, window.innerWidth - 16)
+  const left = rect.right + 10 + tooltipWidth.value <= window.innerWidth - 8
+    ? rect.right + 10 : rect.left - tooltipWidth.value - 10
   cardPos.value = {
-    left: Math.max(8, Math.min(rect.right + 10, window.innerWidth - CARD_W - 10)),
-    top: Math.max(8, Math.min(rect.top - 12, window.innerHeight - 150)),
+    left: Math.max(8, left),
+    top: Math.max(8, Math.min(rect.top - 12, window.innerHeight - 158)),
   }
 }
 
-onMounted(trackActiveRound)
+onMounted(scrollToBottom)
+
+const canSubmit = computed(() => props.ready && !props.sendBlocked && !props.active
+  && !props.opening && !props.sending && !!input.value.trim())
 
 function submit() {
-  if (!input.value.trim()) return
-  emit('send')
+  if (canSubmit.value) emit('send')
+}
+
+function enter(event: KeyboardEvent) {
+  if (composing.value || event.isComposing) return
+  event.preventDefault()
+  submit()
 }
 </script>
 
 <template>
-  <section class="ac-chat" :class="{ 'ac-chat--compact': compact }">
+  <section class="ac-chat atlas-theme" :class="{ 'ac-chat--compact': compact }" aria-label="ATLAS 对话">
     <header v-if="showHeader" class="ac-chat-head">
+      <span class="ac-brand-mark"><AtlasIcon name="atlas" /></span>
       <div class="ac-chat-title">
-        <h2>{{ title }}</h2>
-        <p v-if="subtitle" class="muted">{{ subtitle }}</p>
-        <p v-if="testMode" class="ac-warning" data-testid="ac-test-mode">测试模式 · 虚构账单 / 脚本化模型</p>
+        <span class="ac-eyebrow">ATLAS <span aria-hidden="true">/</span> 账本助手</span>
+        <h2 :title="title">{{ title }}</h2>
+        <span v-if="testMode" class="ac-test" data-testid="ac-test-mode">测试模式 · 虚构账单</span>
         <p v-if="contextLabel" class="ac-context" data-testid="ac-context">{{ contextLabel }}</p>
       </div>
-      <div v-if="run" class="ac-run" data-testid="ac-run">
-        <b>{{ run.model }}</b>
-        <span>{{ stateLabel(run.state) }}<template v-if="!compact"> · 第 {{ step ?? 0 }} 步</template></span>
-        <small v-if="totals && !compact" class="ac-usage">
-          输入 {{ totals.input_tokens ?? 0 }} / 输出 {{ totals.output_tokens ?? 0 }}<br>
-          缓存读 {{ totals.cache_read_tokens ?? 0 }} / 写 {{ totals.cache_write_tokens ?? 0 }}
-        </small>
-      </div>
+      <details v-if="run" class="ac-run" data-testid="ac-run">
+        <summary :class="{ 'ac-run--active': active }">
+          <span class="ac-run-dot" aria-hidden="true" />
+          {{ stateLabel(run.state) }}<template v-if="active && step"> · 第 {{ step }} 步</template>
+          <AtlasIcon name="chevron" />
+        </summary>
+        <div class="ac-run-meta">
+          <b>{{ run.model }}</b>
+          <small v-if="totals">
+            输入 {{ totals.input_tokens ?? 0 }} / 输出 {{ totals.output_tokens ?? 0 }}<br>
+            缓存读 {{ totals.cache_read_tokens ?? 0 }} / 写 {{ totals.cache_write_tokens ?? 0 }}
+          </small>
+        </div>
+      </details>
     </header>
 
     <div class="ac-body">
       <div ref="scrollArea" class="ac-messages" :class="{ 'ac-messages--rail': rounds.length > 1 }"
            data-testid="ac-messages" @scroll="trackActiveRound">
+        <div v-if="!blocks.length && !active && !errorBanner" class="ac-empty">
+          <p v-if="opening" class="ac-status" role="status">正在打开对话…</p>
+          <template v-else>
+            <slot name="welcome-art">
+              <div class="ac-constellation" aria-hidden="true">
+                <svg viewBox="0 0 520 180" preserveAspectRatio="xMidYMid slice" fill="none">
+                  <path d="M85 120 148 75 214 100 262 61 326 111 396 74 450 102M148 75 165 40M326 111 356 145" />
+                  <circle v-for="[x, y] in [[85, 120], [148, 75], [165, 40], [214, 100], [262, 61], [326, 111], [356, 145], [396, 74], [450, 102]]"
+                          :key="x" :cx="x" :cy="y" r="3" />
+                </svg>
+                <span class="ac-empty-mark"><AtlasIcon name="atlas" /></span>
+              </div>
+            </slot>
+            <div class="ac-welcome">
+              <span class="ac-eyebrow">ATLAS <span aria-hidden="true">/</span> 账本工作台</span>
+              <h3>今天想核对哪笔账？</h3>
+              <p>查流水、核对收支，或整理账本 V2。</p>
+              <div class="ac-suggestions" aria-label="示例问题">
+                <button v-for="example in suggestions" :key="example.label" type="button"
+                        :disabled="!!input.trim() || !ready || sending" @click="useSuggestion(example.prompt)">
+                  <AtlasIcon :name="example.icon" />{{ example.label }}<AtlasIcon name="arrow" />
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
         <template v-for="block in blocks" :key="block.key">
           <article v-if="block.kind === 'user'" class="ac-msg ac-msg--user" :data-item-id="block.item.id">
             <div class="ac-bubble">{{ block.item.text }}</div>
@@ -345,7 +407,9 @@ function submit() {
                    :class="{ 'ac-process--live': block.live }"
                    :open="processOpen(block.key, block.live)">
             <summary @click="toggleProcess(block.key, block.live, $event)">
+              <AtlasIcon :name="block.live ? 'list' : 'history'" />
               <span>{{ block.label }}</span>
+              <AtlasIcon class="ac-chevron" name="chevron" />
             </summary>
             <div class="ac-process-steps">
               <template v-for="item in block.items" :key="item.id">
@@ -374,6 +438,7 @@ function submit() {
           </details>
 
           <article v-else-if="block.kind === 'assistant'" class="ac-msg ac-msg--assistant">
+            <div class="ac-answer-head"><AtlasIcon name="atlas" /> ATLAS</div>
             <div class="ac-bubble md" v-html="renderMarkdown(block.item.text)"></div>
           </article>
 
@@ -383,7 +448,9 @@ function submit() {
           </p>
         </template>
 
-        <p v-if="active" class="ac-status" data-testid="ac-status" role="status">{{ status || '等待下一步…' }}</p>
+        <p v-if="active" class="ac-status" data-testid="ac-status" role="status">
+          <span class="ac-run-dot" aria-hidden="true" />{{ status || '等待下一步…' }}
+        </p>
         <p v-if="reconnectText" class="ac-warning" role="status">{{ reconnectText }}</p>
       </div>
 
@@ -406,8 +473,8 @@ function submit() {
     </div>
 
     <Teleport to="body">
-      <div v-if="hoveredRound" class="ac-round-card" role="tooltip"
-           :style="{ left: `${cardPos.left}px`, top: `${cardPos.top}px`, width: `${CARD_W}px` }">
+      <div v-if="hoveredRound" class="ac-round-card atlas-theme" role="tooltip"
+           :style="{ left: `${cardPos.left}px`, top: `${cardPos.top}px`, width: `${tooltipWidth}px` }">
         <small class="ac-round-card-no">第 {{ hoveredRound.index }} 轮</small>
         <b>{{ hoveredRound.title }}</b>
         <p>{{ hoveredRound.snippet || '还没有回复' }}</p>
@@ -415,182 +482,33 @@ function submit() {
       </div>
     </Teleport>
 
-    <div v-if="errorBanner" class="ac-banner" data-testid="ac-error">
+    <div v-if="errorBanner" class="ac-banner" data-testid="ac-error" role="alert">
       <span>{{ errorBanner.message }}</span>
-      <RouterLink v-if="needsSettings" to="/ai/settings" class="ac-banner-link">去 AI 设置 →</RouterLink>
+      <RouterLink v-if="needsSettings" to="/ai/settings" class="ac-banner-link">去 AI 设置 <AtlasIcon name="arrow" /></RouterLink>
     </div>
-    <p v-if="notice" class="ac-notice">{{ notice }}</p>
+    <p v-if="notice" class="ac-notice" role="status">{{ notice }}</p>
 
     <div class="ac-composer">
-      <textarea v-model="input" rows="2" data-testid="ac-input" :placeholder="placeholder"
-                @compositionstart="composing = true"
-                @compositionend="composing = false"
-                @keydown.enter.exact.prevent="!composing && submit()"></textarea>
-      <button v-if="!active" class="ac-send" data-testid="ac-send"
-              :disabled="!run || !input.trim() || opening || sending"
-              @click="submit">
-        {{ sending ? '启动中…' : '发送' }}
-      </button>
-      <button v-else class="ac-send ac-send--stop" data-testid="ac-stop"
-              :disabled="stopping || run?.state === 'stopping'" @click="emit('stop')">
-        {{ stopping || run?.state === 'stopping' ? '正在停止…' : '停止' }}
-      </button>
+      <div class="ac-composer-box">
+        <textarea ref="composerInput" v-model="input" rows="2" data-testid="ac-input"
+                  aria-label="给 ATLAS 的消息" :placeholder="placeholder"
+                  @compositionstart="composing = true" @compositionend="composing = false"
+                  @keydown.enter.exact="enter"></textarea>
+        <div class="ac-composer-actions">
+          <span class="ac-keys"><kbd>Enter</kbd> 发送 <span aria-hidden="true">·</span> <kbd>Shift + Enter</kbd> 换行</span>
+          <button v-if="!active" class="ac-send" data-testid="ac-send" type="button"
+                  :disabled="!canSubmit" @click="submit">
+            <AtlasIcon name="send" />{{ sending ? '启动中…' : '发送' }}
+          </button>
+          <button v-else class="ac-send ac-send--stop" data-testid="ac-stop" type="button"
+                  :disabled="stopping || run?.state === 'stopping'" @click="emit('stop')">
+            <AtlasIcon name="stop" />{{ stopping || run?.state === 'stopping' ? '正在停止…' : '停止' }}
+          </button>
+        </div>
+      </div>
+      <p v-if="subtitle" class="ac-composer-note">{{ subtitle }}</p>
     </div>
   </section>
 </template>
 
-<style scoped>
-.ac-chat {
-  display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: hidden;
-  background: linear-gradient(180deg, #fbfdff, #ffffff);
-}
-.ac-chat-head {
-  flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2);
-  padding: var(--space-3); border-bottom: 1px solid var(--color-border);
-}
-.ac-chat-title { min-width: 0; }
-h2 { font-size: var(--font-md); }
-.ac-chat-head p { margin-top: 2px; font-size: var(--font-xs); }
-.muted { color: var(--color-muted); line-height: 1.6; }
-.ac-context { color: #45607a; }
-.ac-run {
-  flex: 0 1 42%; min-width: 0; display: grid; gap: 3px; text-align: right;
-  color: #45607a; font-size: var(--font-xs); overflow-wrap: anywhere;
-}
-.ac-usage { color: var(--color-muted); font-size: 10px; }
-.ac-body { position: relative; flex: 1; min-height: 0; display: flex; }
-.ac-messages {
-  position: relative; flex: 1; min-width: 0; min-height: 0; overflow-y: auto;
-  padding: var(--space-3); display: flex; flex-direction: column; gap: 10px;
-}
-.ac-messages--rail { padding-left: calc(var(--space-3) + 16px); }
-/* 轮次索引：左侧一列短线，一条一轮；滚动时高亮当前轮。 */
-.ac-rounds {
-  position: absolute; left: 4px; top: 50%; transform: translateY(-50%); z-index: 2;
-  max-height: calc(100% - 20px); overflow-y: auto; overscroll-behavior: contain;
-  display: flex; flex-direction: column; gap: 9px; padding: 4px 3px;
-  scrollbar-width: none;
-}
-.ac-rounds::-webkit-scrollbar { display: none; }
-.ac-round {
-  flex: none; display: flex; align-items: center; justify-content: center;
-  width: 12px; height: 8px; padding: 0; border: 0; background: transparent; cursor: pointer;
-}
-.ac-round-dash {
-  display: block; width: 8px; height: 2px; border-radius: 999px; background: #cdd8e3;
-  transition: width .15s ease, background .15s ease;
-}
-.ac-round:hover .ac-round-dash, .ac-round--hover .ac-round-dash { width: 11px; background: #8aa8c4; }
-.ac-round--on .ac-round-dash { width: 12px; background: #2f6fae; }
-.ac-round:focus-visible { outline: 2px solid #8db4d9; outline-offset: 1px; border-radius: 3px; }
-/* 悬停预览卡（Teleport 到 body，避免被滚动容器裁掉）。 */
-.ac-round-card {
-  position: fixed; z-index: 120; padding: 10px 12px;
-  border: 1px solid #dbe6f2; border-radius: 10px; background: #fff;
-  box-shadow: 0 12px 30px rgba(25, 58, 93, .16); pointer-events: none;
-}
-.ac-round-card .ac-round-card-no {
-  display: block; color: #2f6fae; font-size: 10px; font-weight: 600; margin-bottom: 3px;
-}
-.ac-round-card b {
-  display: block; font-size: 13px; line-height: 1.4;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.ac-round-card p {
-  margin: 5px 0 6px; color: #4a637a; font-size: 12px; line-height: 1.55;
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-  overflow: hidden; overflow-wrap: anywhere;
-}
-.ac-round-card small { color: var(--color-muted); font-size: 11px; }
-.ac-msg { display: flex; }
-.ac-msg--user { justify-content: flex-end; }
-.ac-bubble {
-  max-width: 78%; padding: 9px 12px; border-radius: 13px; line-height: 1.7;
-  overflow-wrap: anywhere; font-size: var(--font-sm);
-}
-.ac-msg--user .ac-bubble { background: #2f6fae; color: #fff; border-bottom-right-radius: 4px; }
-.ac-msg--assistant .ac-bubble { background: #f3f7fb; border: 1px solid #e3ebf3; border-bottom-left-radius: 4px; }
-.ac-tool-result {
-  padding: 7px 10px; border-radius: var(--radius); background: #f7fafc;
-  border: 1px solid #e3ebf3; font-size: var(--font-xs); color: #45607a;
-}
-.ac-terminal {
-  padding: 7px 0; border-top: 1px solid var(--color-border);
-  font-size: var(--font-xs); color: var(--color-muted);
-}
-.ac-tool-result summary { cursor: pointer; }
-.ac-tool-result pre {
-  margin-top: 6px; padding: 8px; border-radius: var(--radius); background: #172a3b; color: #eaf2fa;
-  overflow: auto; max-height: 220px; font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
-}
-.ac-tool-result--error summary { color: var(--color-expense); }
-
-/* 一轮的过程组：默认只显示一条「共用时 X」，展开后是各步骤。 */
-.ac-process { border-bottom: 1px dashed #dfe6ee; padding-bottom: 4px; }
-.ac-process > summary {
-  list-style: none; display: flex; align-items: center; gap: 6px;
-  padding: 5px 0 6px; cursor: pointer; user-select: none;
-  color: var(--color-muted); font-size: var(--font-xs);
-}
-.ac-process > summary::-webkit-details-marker { display: none; }
-.ac-process > summary::after {
-  content: '⌄'; font-size: 12px; line-height: 1; transition: transform .15s ease;
-}
-.ac-process[open] > summary::after { transform: rotate(180deg); }
-.ac-process--live > summary { color: #2f6fae; }
-.ac-process-steps { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 4px; }
-.ac-process .ac-tool-result { background: transparent; border: 0; padding: 0; }
-.ac-process .ac-tool-result > summary { color: var(--color-muted); }
-.ac-process .ac-tool-result > summary:hover { color: #2f6fae; }
-.ac-process .ac-tool-result > pre { margin-top: 5px; }
-.ac-status { color: var(--color-muted); font-size: var(--font-xs); }
-.ac-warning { color: #9a6b00; font-size: var(--font-xs); }
-.ac-banner {
-  margin: 0 var(--space-3); padding: 9px 11px; border-radius: var(--radius);
-  background: #fdf3f3; border: 1px solid #f2d6d7; color: #8c2f33; font-size: var(--font-xs);
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
-}
-.ac-banner-link { color: #2f6fae; font-weight: 600; text-decoration: none; white-space: nowrap; }
-.ac-notice { margin: 6px var(--space-3) 0; color: #2f7d57; font-size: var(--font-xs); }
-.ac-composer {
-  flex: none; display: flex; gap: var(--space-2); padding: var(--space-3);
-  border-top: 1px solid var(--color-border); background: #fff;
-}
-.ac-composer textarea {
-  flex: 1; resize: none; border: 1px solid var(--color-border); border-radius: var(--radius);
-  padding: 9px 11px; font-size: var(--font-sm); line-height: 1.5; outline: none;
-}
-.ac-composer textarea:focus { border-color: #8db4d9; box-shadow: 0 0 0 3px rgba(54, 121, 237, .12); }
-.ac-send {
-  align-self: flex-end; padding: 10px 16px; border: 0; border-radius: var(--radius);
-  background: #2f6fae; color: #fff; cursor: pointer; font-weight: 600;
-}
-.ac-send:disabled { opacity: .45; cursor: default; }
-.ac-send--stop { background: #8c2f33; }
-
-/* 浮窗里更紧凑，但消息和输入框保持同样行为。 */
-.ac-chat--compact .ac-chat-head { padding: 10px 12px; }
-.ac-chat--compact .ac-chat-head h2 { font-size: 14px; }
-.ac-chat--compact .ac-messages { padding: 10px 12px; gap: 8px; }
-.ac-chat--compact .ac-messages--rail { padding-left: 26px; }
-.ac-chat--compact .ac-rounds { gap: 7px; }
-.ac-chat--compact .ac-bubble { max-width: 92%; font-size: 13px; padding: 8px 10px; }
-.ac-chat--compact .ac-composer { padding: 10px 12px; }
-.ac-chat--compact .ac-run { flex-basis: 50%; font-size: 10px; }
-
-/* Markdown */
-.md :deep(p) { margin: 0 0 8px; }
-.md :deep(p:last-child) { margin-bottom: 0; }
-.md :deep(h1), .md :deep(h2), .md :deep(h3), .md :deep(h4) { margin: 10px 0 6px; line-height: 1.4; }
-.md :deep(h2) { font-size: 15px; }
-.md :deep(h3), .md :deep(h4) { font-size: 14px; }
-.md :deep(ul), .md :deep(ol) { margin: 5px 0 9px; padding-left: 19px; }
-.md :deep(li) { margin: 3px 0; }
-.md :deep(code) { padding: 1px 4px; border-radius: 5px; background: #e9f0f7; font-family: ui-monospace, Consolas, monospace; font-size: .92em; }
-.md :deep(pre) { overflow-x: auto; margin: 8px 0; padding: 10px; border-radius: 9px; background: #172a3b; color: #eaf2fa; }
-.md :deep(pre code) { padding: 0; background: transparent; color: inherit; }
-.md :deep(table) { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 11px; }
-.md :deep(th), .md :deep(td) { padding: 5px 7px; border: 1px solid #e2eaf1; text-align: left; }
-.md :deep(th) { background: #f1f6fb; }
-.md :deep(a) { color: #2c75b4; }
-</style>
+<style scoped src="./AgentCoreChat.css"></style>
