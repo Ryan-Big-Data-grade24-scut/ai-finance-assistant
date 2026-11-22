@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { getActiveLibrary } from '@/api/libraries'
 import { commitImport, getImportHistory, previewImport } from '@/api/imports'
 import {
   analyzeAIImport, calibrateAIImport, commitAIImport, getAISettings,
@@ -9,6 +10,8 @@ import {
 } from '@/api/ai'
 import type { ImportBatch, ImportCommitResp, ImportPreviewResp } from '@/types/import'
 
+/** AI 建议导入暂时从前端下线；代码保留，需要时改回 true 即可恢复。 */
+const SHOW_AI_IMPORT = false
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 const file = ref<File | null>(null)
 const alipayPassword = ref('')
@@ -31,6 +34,7 @@ const approvedCategoryPaths = ref<string[]>([])
 const approvedRowIndices = ref<number[]>([])
 const rememberRuleRowIndices = ref<number[]>([])
 const history = ref<ImportBatch[]>([])
+const libraryName = ref('')
 const busy = ref<'preview' | 'commit' | null>(null)
 const chatBusy = ref(false)
 const error = ref('')
@@ -52,6 +56,10 @@ const readyToCommit = computed(() => Boolean(
   (!lowConfidence.value || confirmedLowConfidence.value),
 ))
 const selectedRowsCount = computed(() => approvedRowIndices.value.length)
+const imported = computed(() => result.value ?? aiCommitResult.value)
+const successVisible = computed(() => Boolean(imported.value))
+const successInserted = computed(() => imported.value?.inserted ?? 0)
+const successSkipped = computed(() => imported.value?.skipped ?? 0)
 
 function resetForChange() {
   previewController?.abort()
@@ -203,6 +211,11 @@ async function loadAISettings() {
   catch { aiSettings.value = null }
 }
 
+async function loadLibraryState() {
+  try { libraryName.value = (await getActiveLibrary()).name }
+  catch { libraryName.value = '' }
+}
+
 async function startPreview(forceLegacy = false) {
   const selected = file.value
   if (!selected || busy.value) return
@@ -223,7 +236,7 @@ async function startPreview(forceLegacy = false) {
   busy.value = 'preview'
   confirmedLowConfidence.value = false
   try {
-    if (aiSettings.value?.configured && aiSettings.value.allow_external_processing && !forceLegacy) {
+    if (SHOW_AI_IMPORT && aiSettings.value?.configured && aiSettings.value.allow_external_processing && !forceLegacy) {
       const response = await analyzeAIImport(selected, password, controller.signal)
       if (previewController !== controller || file.value !== selected || alipayPassword.value !== password) return
       aiSessionId.value = response.session_id
@@ -312,26 +325,33 @@ async function commit() {
   } finally { busy.value = null }
 }
 
-onMounted(async () => { await Promise.all([loadHistory(), loadAISettings(), loadPendingProposals()]) })
+onMounted(async () => {
+  const tasks = [loadHistory(), loadLibraryState()]
+  if (SHOW_AI_IMPORT) tasks.push(loadAISettings(), loadPendingProposals())
+  await Promise.all(tasks)
+})
 </script>
 
 <template>
-  <div class="import-view">
+  <div class="import-view has-aside">
+    <div class="import-main">
     <section class="card">
       <h2>导入账单</h2>
-      <p class="hint">支持微信支付 XLSX、支付宝 CSV / ZIP。配置 AI 后，系统会先分析整批交易并生成分类建议，再由你审核导入。</p>
-      <div class="ai-config-banner" v-if="aiSettings?.configured && aiSettings.allow_external_processing">
-        <span class="ai-dot"></span><span>AI 已配置：{{ aiSettings.provider_label }} · {{ aiSettings.model }}</span>
-        <RouterLink to="/ai/settings">模型设置</RouterLink>
-      </div>
-      <div class="ai-config-banner needs-config" v-else-if="aiSettings?.configured">
-        <span>模型已保存，但尚未授权将必要交易字段发送到模型接口。当前仍可普通导入。</span>
-        <RouterLink to="/ai/settings">查看数据授权</RouterLink>
-      </div>
-      <div class="ai-config-banner needs-config" v-else>
-        <span>尚未配置 AI 模型。你仍可按原方式导入账单。</span>
-        <RouterLink to="/ai/settings">配置网页 AI</RouterLink>
-      </div>
+      <p class="hint">支持微信支付 XLSX、支付宝 CSV / ZIP。文件会先预览解析结果，确认后再写入当前账本。</p>
+      <template v-if="SHOW_AI_IMPORT">
+        <div class="ai-config-banner" v-if="aiSettings?.configured && aiSettings.allow_external_processing">
+          <span class="ai-dot"></span><span>AI 已配置：{{ aiSettings.provider_label }} · {{ aiSettings.model }}</span>
+          <RouterLink to="/ai/settings">模型设置</RouterLink>
+        </div>
+        <div class="ai-config-banner needs-config" v-else-if="aiSettings?.configured">
+          <span>模型已保存，但尚未授权将必要交易字段发送到模型接口。当前仍可普通导入。</span>
+          <RouterLink to="/ai/settings">查看数据授权</RouterLink>
+        </div>
+        <div class="ai-config-banner needs-config" v-else>
+          <span>尚未配置 AI 模型。你仍可按原方式导入账单。</span>
+          <RouterLink to="/ai/settings">配置网页 AI</RouterLink>
+        </div>
+      </template>
 
       <label class="input-label" for="bill-file">账单文件</label>
       <input ref="fileInput" id="bill-file" class="file-input" type="file" accept=".xlsx,.csv,.zip" :disabled="busy === 'commit'" @change="onFile" />
@@ -363,7 +383,7 @@ onMounted(async () => { await Promise.all([loadHistory(), loadAISettings(), load
       <button class="primary" type="button" :disabled="!file || !!busy" @click="startPreview()">
         {{ busy === 'preview' ? '正在解析…' : '预览账单' }}
       </button>
-      <button v-if="aiSettings?.configured && aiSettings.allow_external_processing" class="secondary legacy-preview" type="button" :disabled="!file || !!busy" @click="startPreview(true)">
+      <button v-if="SHOW_AI_IMPORT && aiSettings?.configured && aiSettings.allow_external_processing" class="secondary legacy-preview" type="button" :disabled="!file || !!busy" @click="startPreview(true)">
         不使用 AI，按普通模式预览
       </button>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
@@ -401,7 +421,7 @@ onMounted(async () => { await Promise.all([loadHistory(), loadAISettings(), load
           </table>
         </div>
       </details>
-      <section v-if="aiAnalysis && aiSessionId && !aiCommitResult" class="ai-analysis-panel">
+      <section v-if="SHOW_AI_IMPORT && aiAnalysis && aiSessionId && !aiCommitResult" class="ai-analysis-panel">
         <div class="ai-panel-heading">
           <div><p class="ai-kicker">AI BATCH ANALYSIS</p><h3>整批智能分类结果</h3><p class="hint">{{ aiAnalysis.summary }}</p></div>
           <span class="ai-count">{{ aiAnalysis.suggestions.length }} 条建议</span>
@@ -467,10 +487,10 @@ onMounted(async () => { await Promise.all([loadHistory(), loadAISettings(), load
       <button class="primary" type="button" :disabled="!readyToCommit" @click="commit">
         {{ busy === 'commit' ? '正在写入数据库…' : (aiSessionId ? '确认导入并应用已选分类' : '确认导入数据库') }}
       </button>
-      <p class="hint">AI 模式会使用本次暂存会话提交，不会重新上传文件；重复交易会跳过，不会修改原始交易记录。</p>
+      <p class="hint">{{ SHOW_AI_IMPORT ? 'AI 模式会使用本次暂存会话提交，不会重新上传文件；' : '' }}重复交易会跳过，不会修改原始交易记录。</p>
     </section>
 
-    <section v-if="aiCommitResult" class="card ai-result-card" aria-live="polite">
+    <section v-if="SHOW_AI_IMPORT && aiCommitResult" class="card ai-result-card" aria-live="polite">
       <h3>AI 智能导入完成</h3>
       <div class="result-grid">
         <div><strong>{{ aiCommitResult.inserted }}</strong><span>新增交易</span></div>
@@ -485,7 +505,7 @@ onMounted(async () => { await Promise.all([loadHistory(), loadAISettings(), load
       </div>
     </section>
 
-    <section v-if="pendingProposals.length" class="card review-workspace">
+    <section v-if="SHOW_AI_IMPORT && pendingProposals.length" class="card review-workspace">
       <div class="history-title"><div><h3>待审核分类</h3><p class="hint">低置信度建议和需要澄清的交易会保留在这里，不会自动落账。</p></div><button class="secondary" type="button" :disabled="reviewBusy" @click="loadPendingProposals">刷新</button></div>
       <div class="proposal-list">
         <button v-for="proposal in pendingProposals" :key="proposal.id" class="proposal-item" :class="{ active: activeProposal?.id === proposal.id }" type="button" @click="openProposal(proposal.id)">
@@ -570,11 +590,50 @@ onMounted(async () => { await Promise.all([loadHistory(), loadAISettings(), load
         </table>
       </div>
     </section>
+    </div>
+
+    <aside class="import-aside" aria-label="导入提示">
+      <section v-if="successVisible" class="side-card side-success" data-testid="import-success" aria-live="polite">
+        <span class="side-badge" aria-hidden="true">✓</span>
+        <h2>导入完成</h2>
+        <p v-if="successInserted">
+          新增 {{ successInserted.toLocaleString('zh-CN') }} 笔流水<template v-if="successSkipped">，跳过 {{ successSkipped.toLocaleString('zh-CN') }} 笔重复</template>。
+        </p>
+        <p v-else>这次没有新增流水，{{ successSkipped.toLocaleString('zh-CN') }} 笔记录已经存在。</p>
+        <RouterLink class="side-primary" to="/bill">返回账单报告</RouterLink>
+        <RouterLink class="side-link" to="/v2">去账本代数整理分类</RouterLink>
+      </section>
+      <section class="side-card">
+        <span class="side-kicker">当前账本</span>
+        <b class="side-name">{{ libraryName || '当前账本' }}</b>
+        <p>导入的流水会写进这本账本。想换账本，点左上角的账本名。</p>
+        <RouterLink class="side-link" to="/bill">查看账单报告</RouterLink>
+        <RouterLink class="side-link" to="/v2/assistant">询问 ATLAS</RouterLink>
+      </section>
+    </aside>
   </div>
 </template>
 
 <style scoped>
 .import-view { max-width: 1060px; margin: 0 auto; }
+.import-main { min-width: 0; }
+.import-aside { display: flex; flex-direction: column; gap: 14px; }
+@media (min-width: 1000px) { .import-view.has-aside { display: grid; grid-template-columns: minmax(0, 1fr) 258px; gap: 18px; align-items: start; } }
+.side-card { padding: 18px 17px; border: 1px solid #e6edf6; border-radius: 18px; background: #fff; box-shadow: 0 10px 28px rgba(59, 73, 96, .06); }
+.side-card h2 { font-size: 15px; margin: 10px 0 7px; }
+.side-card p { margin-bottom: 13px; color: #7d899a; font-size: 12px; line-height: 1.7; }
+.side-kicker { color: #8b96a7; font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.side-name { display: block; margin-top: 7px; font-size: 16px; overflow-wrap: anywhere; }
+.side-primary, .side-link { display: block; padding: 9px 12px; border-radius: 10px; text-align: center; text-decoration: none; font-size: 12px; font-weight: 650; }
+.side-primary { margin-bottom: 7px; background: #3d74b0; color: #fff; box-shadow: 0 7px 17px rgba(61, 116, 176, .18); }
+.side-primary:hover { background: #35679d; }
+.side-link { margin-top: 7px; background: #f2f7fd; color: #3c6fa6; }
+.side-link:hover { background: #e6f0fb; }
+.side-success { border-color: #cfe8da; background: linear-gradient(180deg, #f2fbf6, #fff); animation: side-pop .3s ease-out; }
+.side-badge { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; background: #ddf3e7; color: #23855b; font-size: 17px; font-weight: 800; }
+@keyframes side-pop { from { opacity: 0; transform: translateY(9px); } }
+@media (max-width: 999px) { .import-aside { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 16px; } }
+@media (prefers-reduced-motion: reduce) { .side-success { animation: none; } }
 .ai-config-banner { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin:12px 0; padding:10px 12px; border-radius:9px; background:#edf8f1; color:#246847; font-size:13px; }
 .ai-config-banner a { margin-left:auto; color:#286cae; text-decoration:none; font-weight:650; }.ai-config-banner.needs-config { background:#f4f6f9; color:#687487; }.ai-dot { width:8px; height:8px; border-radius:50%; background:#20a366; }
 .ai-analysis-panel { margin:20px 0; padding:18px; border:1px solid #d9e5f1; border-radius:13px; background:#fbfdff; }

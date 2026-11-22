@@ -55,6 +55,8 @@ export function getTransactions(
   filters: {
     category?: string
     subcat?: string
+    ledger_category?: string
+    ledger_subcat?: string
     pay_method?: string
     date_from?: string
     date_to?: string

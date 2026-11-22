@@ -1,14 +1,19 @@
 <script setup lang="ts">
 import * as echarts from 'echarts'
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { getActiveLibrary, type LedgerLibrary } from '@/api/libraries'
 import { getReportBundle, getTransactions } from '@/api/reports'
-import type { CalendarResp, CategoryResp, IncomeRankResp, MethodResp, PaginatedResp, Period, ReportParams, SummaryResp, TrendResp, TxItem, TxType } from '@/types/report'
+import { useLibraries } from '@/composables/useLibraries'
+import type { CalendarResp, CategoryResp, IncomeRankResp, MajorGroup, MethodResp, MinorGroup, PaginatedResp, Period, ReportParams, SummaryResp, TrendResp, TxItem, TxType } from '@/types/report'
 
 const props = defineProps<{ type: string; period: string; value: string; tab: string }>()
 const router = useRouter()
+const { revision } = useLibraries()
 const loading = ref(true)
 const error = ref('')
+const libraryState = ref<LedgerLibrary | null>(null)
+const libraryLoaded = ref(false)
 const activePane = ref<'overview' | 'category'>(props.tab === 'category' ? 'category' : 'overview')
 const summary = ref<SummaryResp>({ period: '', total: 0, prev: 0, delta: 0, rate: null, count: 0 })
 const calendar = ref<CalendarResp>({ days: [] })
@@ -38,6 +43,16 @@ const pickerMode = ref<Period>(currentPeriod.value)
 const pickerCursor = ref(new Date())
 const reportParams = computed<ReportParams>(() => ({ type: currentType.value, period: currentPeriod.value, value: props.value }))
 const isIncome = computed(() => currentType.value === 'income')
+const reportEmpty = computed(() =>
+  libraryLoaded.value
+  && libraryState.value !== null
+  && libraryState.value.stats.readable
+  && libraryState.value.stats.transactions === 0,
+)
+const asideVisible = computed(() =>
+  libraryLoaded.value && libraryState.value !== null && !reportEmpty.value && !loading.value && !error.value,
+)
+const uninitializedCount = computed(() => libraryState.value?.stats.uninitialized ?? 0)
 const topCategory = computed(() => categories.value.majors[0])
 const selectedMajor = computed(() => categories.value.majors.find(item => item.major === selectedCategory.value) || topCategory.value)
 const maxMethod = computed(() => Math.max(...methods.value.groups.map(item => item.amount), 1))
@@ -240,6 +255,16 @@ function selectCategory(name: string) {
 function goTransactions(filters: Record<string, string | number | undefined> = {}) {
   router.push({ name: 'transactions', query: { ...reportParams.value, ...filters } })
 }
+function categoryFilters(major: MajorGroup, minor?: MinorGroup): Record<string, string> {
+  if (major.ledger) {
+    return minor
+      ? { ledger_category: major.major, ledger_subcat: minor.minor }
+      : { ledger_category: major.major }
+  }
+  return minor
+    ? { category: major.major, subcat: minor.minor }
+    : { category: major.major }
+}
 async function openDetails(title: string, filters: { category?: string; pay_method?: string } = {}) {
   detailOpen.value = true; detailLoading.value = true; detailTitle.value = title; detailItems.value = []
   try { detailItems.value = (await getTransactions(reportParams.value, { ...filters, size: 100 })).items }
@@ -247,6 +272,16 @@ async function openDetails(title: string, filters: { category?: string; pay_meth
   finally { detailLoading.value = false }
 }
 function closeDetails() { detailOpen.value = false }
+
+async function loadLibraryState() {
+  try {
+    libraryState.value = await getActiveLibrary()
+  } catch {
+    libraryState.value = null
+  } finally {
+    libraryLoaded.value = true
+  }
+}
 
 function renderCharts() {
   if (trendEl.value) {
@@ -314,6 +349,11 @@ async function loadReport() {
 }
 function onResize() { trendChart?.resize(); categoryChart?.resize() }
 watch(() => [props.type, props.period, props.value], loadReport, { immediate: true })
+watch(revision, async () => {
+  libraryLoaded.value = false
+  await Promise.all([loadLibraryState(), loadReport()])
+})
+onMounted(() => { loadLibraryState() })
 watch(activePane, async () => { await nextTick(); renderCharts() })
 watch([trendView, categoryView], async () => { await nextTick(); renderCharts() })
 window.addEventListener('resize', onResize)
@@ -321,7 +361,17 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
 </script>
 
 <template>
-  <div class="report-page">
+  <div class="report-page" :class="{ 'has-aside': asideVisible }">
+    <section v-if="reportEmpty" class="report-empty" data-testid="report-empty">
+      <span class="empty-mark" aria-hidden="true">∑</span>
+      <h1>还没有流水导入</h1>
+      <p>请前往导入账单，或询问 ATLAS。</p>
+      <div class="empty-actions">
+        <RouterLink class="primary" to="/import">前往导入账单</RouterLink>
+        <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
+      </div>
+    </section>
+    <template v-else>
     <header class="report-controls">
       <div class="period-tabs" aria-label="报告周期">
         <button v-for="item in periodTabs" :key="item.key" :class="{ active: currentPeriod === item.key }" @click="openPeriodPicker(item.key)">{{ item.label }}<small>▼</small></button>
@@ -356,6 +406,8 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
       </div>
     </header>
 
+    <div class="report-shell">
+    <div class="report-main">
     <div v-if="error" class="status-card error-card"><b>报告暂时无法加载</b><span>{{ error }}</span><button @click="loadReport">重新加载</button></div>
     <div v-else-if="loading" class="loading-grid" aria-label="正在加载"><div v-for="n in 4" :key="n" class="skeleton" /></div>
     <template v-else>
@@ -403,7 +455,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
         <section class="report-card category-list-card">
           <div class="category-group" v-for="(major, index) in categories.majors" :key="major.major">
             <button class="category-summary" @click="selectAndToggleCategory(major.major)"><span class="rank-number">{{ index + 1 }}</span><span class="category-avatar">{{ categoryIcon(major.major) }}</span><span class="category-name"><b>{{ major.major }}</b><small>{{ major.count }} 笔 · {{ major.pct.toFixed(1) }}%</small></span><strong>¥{{ money(major.amount) }}</strong><span class="chevron" :class="{ open: expandedCategories.has(major.major) }">⌄</span></button>
-            <div v-if="expandedCategories.has(major.major)" class="minor-list"><button v-if="!major.minors.length" @click="goTransactions({ category: major.major })"><span>查看该分类全部交易</span><b>{{ major.count }} 笔 ›</b></button><button v-for="minor in major.minors" :key="minor.minor" @click="goTransactions({ category: major.major, subcat: minor.minor })"><span>{{ minor.minor }}</span><b>¥{{ money(minor.amount) }} · {{ minor.count }}笔 ›</b></button></div>
+            <div v-if="expandedCategories.has(major.major)" class="minor-list"><button v-if="!major.minors.length" @click="goTransactions(categoryFilters(major))"><span>查看该分类全部交易</span><b>{{ major.count }} 笔 ›</b></button><button v-for="minor in major.minors" :key="minor.minor" @click="goTransactions(categoryFilters(major, minor))"><span>{{ minor.minor }}</span><b>¥{{ money(minor.amount) }} · {{ minor.count }}笔 ›</b></button></div>
           </div>
           <div v-if="!categories.majors.length" class="empty-state">本期没有支出分类数据</div>
         </section>
@@ -420,6 +472,36 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
           <div v-if="!incomeRank.items.length" class="empty-state">本期没有收入记录</div>
         </section>
       </template>
+    </template>
+    </div>
+
+    <aside v-if="asideVisible" class="report-aside" aria-label="报告提示">
+      <section v-if="uninitializedCount > 0" class="hint-card hint-init" data-testid="hint-initialize">
+        <span class="hint-mark" aria-hidden="true">∑</span>
+        <h2>账本还没整理完</h2>
+        <p>还有 {{ uninitializedCount }} 笔流水没有进入账本树，分类暂时沿用平台分类。整理后这里会按你的账本重新归类。</p>
+        <div class="hint-actions">
+          <RouterLink to="/v2">去账本代数整理</RouterLink>
+          <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
+        </div>
+      </section>
+      <section v-else class="hint-card" data-testid="hint-import">
+        <h2>还有未导入的流水？</h2>
+        <p>把新账单放进导入页，或者直接告诉 ATLAS 你要补哪一段。</p>
+        <div class="hint-actions">
+          <RouterLink to="/import">去导入账单</RouterLink>
+          <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
+        </div>
+        <hr />
+        <h2>分类不准确？</h2>
+        <p>在账本代数里调整账本树，这份报告会跟着变。</p>
+        <div class="hint-actions">
+          <RouterLink to="/v2">调整账本分类</RouterLink>
+          <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
+        </div>
+      </section>
+    </aside>
+    </div>
     </template>
 
     <Teleport to="body"><div v-if="detailOpen" class="detail-backdrop" @click.self="closeDetails"><aside class="detail-sheet" aria-modal="true" role="dialog"><header><div><span>逐笔可追溯</span><h2>{{ detailTitle }}</h2></div><button aria-label="关闭" @click="closeDetails">×</button></header><div v-if="detailLoading" class="empty-state">正在加载明细…</div><div v-else-if="detailItems.length" class="detail-list"><button v-for="item in detailItems" :key="item.id" @click="router.push(`/tx?id=${item.id}`)"><span class="category-avatar">{{ categoryIcon(item.category) }}</span><span class="transaction-main"><b>{{ item.counterparty || item.item || item.category }}</b><small>{{ item.tx_time }} · {{ item.source }} · {{ item.pay_method }}</small></span><strong>{{ item.direction === 'income' ? '+' : '-' }}¥{{ money(item.amount) }}</strong></button></div><div v-else class="empty-state">没有符合条件的交易</div></aside></div></Teleport>
@@ -441,5 +523,32 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
 .report-page{max-width:100%;overflow-x:clip}.filter-row,.date-switcher{min-width:0}.type-toggle{flex:none}
 @media(max-width:720px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.report-card,.hero-card{max-width:100%;overflow:hidden}}
 .period-tabs button small{margin-left:4px;color:#9aa4b3;font-size:8px}.period-picker{position:absolute;z-index:40;top:58px;left:50%;width:min(410px,calc(100% - 32px));padding:16px 18px 15px;border:1px solid #dce5ef;border-radius:20px;background:rgba(255,255,255,.98);box-shadow:0 22px 55px rgba(43,61,88,.2);transform:translateX(-50%)}.period-picker-header,.picker-nav{display:flex;align-items:center;justify-content:space-between}.period-picker-header{padding-bottom:10px}.period-picker-header>b{font-size:15px}.period-picker-header>button,.picker-nav>button{border:0;background:transparent;color:#7c8999;cursor:pointer}.period-picker-header>button{width:32px;height:32px;border-radius:50%;font-size:22px}.period-picker-header>button:hover,.picker-nav>button:hover{background:#f0f4f9}.picker-nav{padding:6px 0 13px}.picker-nav>strong{font-size:17px}.picker-nav>button{width:34px;height:34px;border-radius:10px;font-size:24px}.picker-weekdays,.picker-calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}.picker-weekdays{padding-bottom:6px;color:#909baa;text-align:center;font-size:11px}.picker-day{position:relative;min-height:38px;border:0;border-radius:9px;background:#f7f9fc;color:#566479;font:inherit;cursor:pointer}.picker-day.blank{visibility:hidden}.picker-day:hover{background:#e9f2ff;color:#2f6fbe}.picker-day.selected{background:#dcecff;color:#275f9f;border-radius:4px}.picker-day.today{box-shadow:inset 0 0 0 2px #6b9bd4}.picker-day.has-record:after{content:'';position:absolute;left:50%;bottom:4px;width:4px;height:4px;border-radius:50%;background:#3f83ee;transform:translateX(-50%)}.picker-day.selected.has-record:after{background:#275f9f}.picker-help{margin:10px 0 0;color:#8994a4;font-size:11px;text-align:center}.picker-option-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.picker-option-grid button{min-height:43px;padding:9px 7px;border:0;border-radius:11px;background:#f4f7fb;color:#59677b;font:inherit;cursor:pointer}.picker-option-grid button:hover{background:#e9f2ff;color:#2f6fbe}.picker-option-grid button.selected{background:#397ceb;color:#fff;font-weight:700}.heading-actions{display:flex;align-items:center;gap:9px}.chart-switch{display:flex;padding:3px;border-radius:10px;background:#edf2f8}.chart-switch button{padding:6px 10px;border:0;border-radius:8px;background:transparent;color:#748094;font-size:12px;cursor:pointer}.chart-switch button.active{background:#fff;color:#2f6fbe;font-weight:700;box-shadow:0 3px 9px rgba(55,77,110,.1)}.calendar-cell{border:0;font-family:inherit;cursor:pointer}.calendar-cell:disabled{cursor:default}.calendar-grid.heatmap .calendar-cell{transition:background .2s,color .2s}.category-legend button.active{background:#eaf2fd;color:#285f9f}.category-legend button.active b{color:#2f73c8}
+.report-shell{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-items:start}
+.report-main{min-width:0}
+.report-aside{display:flex;flex-direction:column;gap:14px}
+@media(min-width:1024px){.report-page.has-aside .report-shell{grid-template-columns:minmax(0,1fr) 248px}}
+.report-aside .hint-card{padding:18px 17px;border:1px solid #e6edf6;border-radius:18px;background:#fff;box-shadow:0 10px 28px rgba(59,73,96,.06)}
+.report-aside .hint-card h2{font-size:14px;line-height:1.35;letter-spacing:-.1px}
+.report-aside .hint-card p{margin-top:8px;color:#7d899a;font-size:12px;line-height:1.75}
+.report-aside .hint-card hr{margin:15px 0 14px;border:0;border-top:1px solid #eef2f7}
+.report-aside .hint-actions{display:flex;flex-direction:column;gap:7px;margin-top:13px}
+.report-aside .hint-actions a{display:block;padding:8px 11px;border-radius:9px;background:#f2f7fd;color:#366ea9;font-size:12px;font-weight:650;text-decoration:none;transition:background .16s}
+.report-aside .hint-actions a:hover{background:#e6f0fb}
+.report-aside .hint-actions a:first-child{background:#3d74b0;color:#fff}
+.report-aside .hint-actions a:first-child:hover{background:#35679d}
+.report-aside .hint-card.hint-init{border-color:#f0dfb4;background:linear-gradient(180deg,#fffaf0,#fff)}
+.report-aside .hint-card.hint-init .hint-actions a:first-child{background:#b98422}
+.report-aside .hint-card.hint-init .hint-actions a:first-child:hover{background:#a4741b}
+.hint-mark{display:grid;place-items:center;width:34px;height:34px;margin-bottom:11px;border-radius:11px;background:#fdf1d6;color:#a77a1f;font-size:17px;font-weight:800}
+.report-empty{max-width:540px;margin:max(40px,8vh) auto 0;padding:52px 34px 46px;border:1px solid #e9eff6;border-radius:28px;background:#fff;box-shadow:0 20px 55px rgba(52,73,104,.08);text-align:center}
+.empty-mark{display:grid;place-items:center;width:66px;height:66px;margin:0 auto 20px;border-radius:21px;background:linear-gradient(145deg,#eef5fd,#e2eefb);color:#4a7db3;font-size:30px;font-weight:800}
+.report-empty h1{font-size:clamp(22px,4vw,28px);letter-spacing:-.5px}
+.report-empty p{margin:11px 0 26px;color:#7c8798;font-size:14px;line-height:1.7}
+.empty-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:10px}
+.empty-actions a{padding:11px 19px;border:1px solid #dbe5f0;border-radius:12px;background:#fff;color:#4a6484;font-size:13px;font-weight:650;text-decoration:none}
+.empty-actions a:hover{background:#f4f8fd}
+.empty-actions a.primary{border-color:transparent;background:#3d74b0;color:#fff;box-shadow:0 8px 20px rgba(61,116,176,.22)}
+.empty-actions a.primary:hover{background:#35679d}
+@media(max-width:720px){.report-empty{margin-top:18px;padding:38px 20px 34px;border-radius:22px}.report-aside{order:-1}.report-aside .hint-card{padding:15px 16px}}
 @media(max-width:720px){.period-picker{top:52px;width:min(390px,calc(100% - 20px));padding:14px}.picker-day{min-height:36px}.heading-actions{align-items:flex-end;flex-direction:column}.average-pill{display:none}.chart-switch button{padding:6px 9px}.category-overview .section-heading{align-items:center}.category-overview .data-badge{display:none}}
 </style>

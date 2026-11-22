@@ -71,6 +71,20 @@ h2 { font-size: 15px; }
 .ac-scope { background: var(--atlas-paper); }
 .ac-scope-range { font-size: 13px; font-variant-numeric: tabular-nums; }
 .ac-scope > .muted { margin-block: 3px 0; }
+/* AI 模型：未配置时给设置入口；已配置时提示可以更换。 */
+.ac-model { background: var(--atlas-wash); }
+.ac-model-name { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.ac-model-name b { color: var(--atlas-strong); }
+.ac-model .muted { margin-bottom: 9px; }
+.ac-model-link {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  padding: 5px 9px; border: 1px solid var(--atlas-line); border-radius: 8px;
+  background: var(--atlas-surface); color: var(--atlas-accent);
+  font-size: 12px; font-weight: 650; text-decoration: none; overflow-wrap: anywhere;
+}
+.ac-model-link:hover { background: var(--atlas-tint); }
+.ac-model-link--primary { border-color: var(--atlas-accent); background: var(--atlas-accent); color: #fff; }
+.ac-model-link--primary:hover { background: var(--atlas-strong); }
 .ac-count, .ac-tag {
   width: fit-content; border-radius: 6px; padding: 2px 6px;
   background: var(--atlas-wash); color: var(--atlas-muted); font-size: 11px; line-height: 1.35; white-space: nowrap;

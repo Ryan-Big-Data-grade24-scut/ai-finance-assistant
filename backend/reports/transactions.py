@@ -13,6 +13,7 @@ from __future__ import annotations
 from .. import db
 from ..schemas import PaginatedResp, PendingResp
 from ._common import direction_of, period_bounds, row_to_tx_item, type_of
+from .ledger_categories import ledger_ready, placement_clause
 
 PENDING_CAP = 50   # 待分类清单是「待办」不是全量导出，服务端硬收口
 
@@ -52,11 +53,20 @@ def query_transactions(q) -> PaginatedResp:
     if not q.include_exempt:
         w.append("is_exempt = 0")
 
-    where = " AND ".join(w)
     offset = (q.page - 1) * q.size
 
     conn = db.get_conn()
     try:
+        if q.ledger_category:
+            # 点击账本树的分类时，筛选也必须走同一棵树；否则节点名和平台分类名
+            # 对不上，明细页会显示错误结果。
+            if ledger_ready(conn):
+                clause, ledger_params = placement_clause(q.ledger_category, q.ledger_subcat)
+                w.append(clause)
+                p.update(ledger_params)
+            else:
+                w.append("1=0")
+        where = " AND ".join(w)
         total = conn.execute(
             f"SELECT COUNT(*) AS n FROM v_tx WHERE {where}", p
         ).fetchone()["n"]

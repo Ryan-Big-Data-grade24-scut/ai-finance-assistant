@@ -119,7 +119,7 @@ const treeEl = ref<HTMLElement | null>(null)
 const rowEls = new Map<string, HTMLElement>()
 
 const OP_LABELS: Record<string, string> = {
-  init: '初始化', uninstall: '卸载', create_node: '新建分组', move: '移动', join: '加入净额组',
+  init: '导入账本', uninstall: '移出账本', create_node: '新建分组', move: '移动', join: '加入净额组',
   create_group: '新建净额组', dissolve: '解散', split: '生成镜像', unsplit: '取消镜像',
   update: '改名/备注', create_net_group: '新建净额组', add_group_member: '加入净额组',
   remove_group_member: '移出净额组', dissolve_node: '解散', dissolve_group: '解散',
@@ -900,7 +900,7 @@ const doSplit = () => selList.value.length && send({ type: 'split', items: selLi
 const doDissolve = () => selList.value.length && send({ type: 'dissolve', items: selList.value }, '已解散')
 const doUnsplit = () => selList.value.length && send({ type: 'unsplit', items: selList.value }, '已取消镜像')
 
-// ── 初始化（常驻入口 + 两步弹层）──────────────────────────────────────────
+// ── 将原始流水导入账本（常驻入口 + 两步弹层）──────────────────────────────
 
 type InitMode = 'platform' | 'root' | 'new_node' | 'target' | 'assistant'
 const initOpen = ref(false)
@@ -950,7 +950,7 @@ async function loadInitCandidates() {
     initSelected.value = new Set(res.ids)
     if (full) initNodes.value = flattenNodeOptions(full.tree)
   } catch (e) {
-    initError.value = e instanceof Ledger2Error ? e.message : '读取未初始化交易失败。'
+    initError.value = e instanceof Ledger2Error ? e.message : '读取待导入账本的流水失败。'
   } finally {
     initLoading.value = false
   }
@@ -1020,10 +1020,10 @@ async function confirmInit() {
   else if (initMode.value === 'new_node') op.new_node = { name }
   else if (initMode.value === 'target') op.target = initTarget.value
   const targetLabel = initNodeOptions.value.find(o => o.id === initTarget.value)?.label.trim() || initTarget.value
-  const ok = initMode.value === 'platform' ? `已按平台分类初始化 ${count} 笔`
-    : initMode.value === 'new_node' ? `已初始化 ${count} 笔到「${name}」`
-    : initMode.value === 'target' ? `已初始化 ${count} 笔到「${targetLabel}」`
-    : `已初始化 ${count} 笔到总账`
+  const ok = initMode.value === 'platform' ? `已按平台分类将 ${count} 笔原始流水导入账本`
+    : initMode.value === 'new_node' ? `已将 ${count} 笔原始流水导入「${name}」`
+    : initMode.value === 'target' ? `已将 ${count} 笔原始流水导入「${targetLabel}」`
+    : `已将 ${count} 笔原始流水导入总账`
   initBusy.value = true
   initOpen.value = false
   selected.value = new Set()
@@ -1034,7 +1034,7 @@ async function confirmInit() {
   }
 }
 
-// ── 卸载（只撤账本归属，原始流水不动）────────────────────────────────────
+// ── 移出账本（只撤账本归属，原始流水不动）────────────────────────────────
 
 const uninstallOpen = ref(false)
 
@@ -1076,7 +1076,7 @@ async function confirmUninstall() {
   if (!ids.length) return
   uninstallOpen.value = false
   selected.value = new Set()
-  await send({ type: 'uninstall', tx_ids: ids }, `已卸载 ${ids.length} 笔（原始流水未删除）`)
+  await send({ type: 'uninstall', tx_ids: ids }, `已移出账本 ${ids.length} 笔（原始流水未删除）`)
 }
 
 // ── 改名 / 备注 ──────────────────────────────────────────────────────────
@@ -1265,9 +1265,9 @@ onMounted(() => {
             · 范围内 {{ data.scope.tx_in_scope }} / 共 {{ data.scope.tx_total }} 笔
           </p>
           <button class="btn--init" :disabled="loading || initCount === 0" data-testid="init"
-                  :title="initCount ? `把 ${initCount} 笔未初始化的交易放进账本（可撤销）` : '当前没有未初始化的交易'"
+                  :title="initCount ? `将 ${initCount} 笔原始流水导入账本（可撤销）` : '当前没有待导入账本的流水'"
                   @click="openInit">
-            初始化{{ initCount ? ` ${initCount} 笔` : '' }}
+            将原始流水导入账本{{ initCount ? ` · ${initCount} 笔` : '' }}
           </button>
           <button class="btn--ask" data-testid="ask-assistant"
                   :title="`把当前范围和 ${selList.length} 项选择带到 ATLAS`" @click="askAssistant">
@@ -1340,7 +1340,7 @@ onMounted(() => {
             <button :disabled="loading || !selList.length" data-testid="split" @click="doSplit">生成镜像</button>
             <button :disabled="loading || !selList.length" data-testid="dissolve" @click="doDissolve">解散</button>
             <button :disabled="loading || !selList.length" data-testid="unsplit" @click="doUnsplit">取消镜像</button>
-            <button :disabled="!canUninstall" data-testid="uninstall" @click="openUninstall">卸载所选</button>
+            <button :disabled="!canUninstall" data-testid="uninstall" @click="openUninstall">移出账本</button>
           </div>
           <div class="op-line">
             <select v-model="moveTarget" data-testid="move-target" title="移动到的目标分组">
@@ -1450,10 +1450,10 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 初始化：两步弹层 -->
+    <!-- 将原始流水导入账本：两步弹层 -->
     <div v-if="initOpen" class="modal-mask" @mousedown.self="closeInit">
       <div class="modal modal--wide" data-testid="init-dialog">
-        <h3>初始化账本</h3>
+        <h3>将原始流水导入账本</h3>
         <p v-if="initStep === 1" class="muted">
           有 {{ initCount }} 笔交易还没有放进账本。先挑交易，再选放置方式，下一步确认。
         </p>
@@ -1466,7 +1466,7 @@ onMounted(() => {
               <button class="link" :disabled="initLoading || !initIds.length" @click="selectAllInit(false)">全不选</button>
               <button class="link" :disabled="initLoading || !initIds.length" @click="invertInit">反选</button>
             </div>
-            <p v-if="initLoading" class="muted">读取未初始化交易…</p>
+            <p v-if="initLoading" class="muted">读取待导入账本的流水…</p>
             <p v-else-if="initError" class="init-error">
               {{ initError }}
               <button class="link" @click="loadInitCandidates">重试</button>
@@ -1524,7 +1524,7 @@ onMounted(() => {
         </template>
         <template v-else>
           <p class="init-summary" data-testid="init-summary">
-            将 <b>{{ initSelectedCount }} 笔</b>未初始化的交易
+            将 <b>{{ initSelectedCount }} 笔</b>原始流水
             <template v-if="initMode === 'platform'">按平台分类放入账本。</template>
             <template v-else-if="initMode === 'root'">全部放入总账根。</template>
             <template v-else-if="initMode === 'target'">
@@ -1544,23 +1544,23 @@ onMounted(() => {
             {{ initMode === 'assistant' ? '交给 ATLAS' : '下一步' }}
           </button>
           <button v-else class="btn--primary" :disabled="initBusy || initSelectedCount === 0"
-                  data-testid="init-confirm" @click="confirmInit">确认初始化 {{ initSelectedCount }} 笔</button>
+                  data-testid="init-confirm" @click="confirmInit">将 {{ initSelectedCount }} 笔导入账本</button>
         </div>
       </div>
     </div>
 
-    <!-- 卸载确认 -->
+    <!-- 移出账本确认 -->
     <div v-if="uninstallOpen" class="modal-mask" @mousedown.self="uninstallOpen = false">
       <div class="modal" data-testid="uninstall-dialog">
-        <h3>卸载所选</h3>
+        <h3>移出账本</h3>
         <p>
           将 <b>{{ uninstallIds.length }} 笔</b>交易移出账本：撤销它们的归属、人工命名/备注和生成的镜像交易。
         </p>
-        <p class="muted">原始流水不会被删除；之后还可以重新初始化。这个操作可撤销。</p>
+        <p class="muted">原始流水不会被删除；之后还可以重新导入账本。这个操作可撤销。</p>
         <div class="modal-actions">
           <button @click="uninstallOpen = false">取消</button>
           <button class="btn--danger" :disabled="!uninstallIds.length" data-testid="uninstall-confirm"
-                  @click="confirmUninstall">卸载 {{ uninstallIds.length }} 笔</button>
+                  @click="confirmUninstall">移出账本 {{ uninstallIds.length }} 笔</button>
         </div>
       </div>
     </div>
@@ -1642,7 +1642,7 @@ onMounted(() => {
 .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px; }
 .mini-grid button, .op-line button { width: 100%; }
 .scope-line { margin: 8px 0 0; line-height: 1.5; }
-.btn--init { margin-top: 6px; width: 100%; border-color: #1d5fa8; color: #1d5fa8; }
+.btn--init { margin-top: 6px; width: 100%; border-color: #1d5fa8; color: #1d5fa8; line-height: 1.35; }
 .btn--ask { margin-top: 6px; width: 100%; }
 
 

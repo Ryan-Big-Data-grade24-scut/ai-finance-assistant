@@ -13,7 +13,11 @@ import BillView from '@/views/BillView.vue'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/bill' },
+    {
+      path: '/',
+      name: 'home',
+      component: () => import('@/views/HomeView.vue'),
+    },
     {
       path: '/bill',
       name: 'bill',
@@ -58,8 +62,11 @@ const router = createRouter({
     {
       path: '/tx',
       name: 'tx',
-      component: () => import('@/views/TxEditView.vue'),
-      props: route => ({ id: route.query.id }),
+      redirect: ({ query }) => {
+        const { id, ...filters } = query
+        const validId = typeof id === 'string' && /^\d+$/.test(id) && Number.isSafeInteger(Number(id)) && Number(id) > 0
+        return { name: 'transactions', query: validId ? { ...filters, id } : filters }
+      },
     },
     {
       path: '/transactions',

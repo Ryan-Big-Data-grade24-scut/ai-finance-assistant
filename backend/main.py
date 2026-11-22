@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend import db, overrides, reports, uploads           # noqa: E402
+from backend import libraries                                # noqa: E402
 from backend import overrides as overrides_mod                # noqa: E402
 from backend.importer import ImportResult, parse_file, import_file  # noqa: E402
 from backend.importer.base import ParseIssues  # noqa: E402
@@ -93,6 +94,8 @@ def health() -> dict:
 
 @app.on_event("startup")
 def _startup() -> None:
+    # 先恢复「当前账本」，再按这个库做建表与同步。
+    libraries.bootstrap()
     db.init_db()
     # 报告视图依赖 Live Ledger 的分类和有效金额投影；启动时确保投影已同步。
     ledger_service.sync_live_book()
@@ -165,6 +168,7 @@ async def _ledger2_error(_req, exc: Ledger2Error):
 
 app.include_router(ledger2_api.router)
 app.include_router(agentcore_api.router)
+app.include_router(libraries.router)
 
 
 # ═══════════════════════════════════════════════════════════

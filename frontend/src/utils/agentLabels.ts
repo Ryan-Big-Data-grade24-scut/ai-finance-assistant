@@ -1,7 +1,7 @@
 /** 账本助手共用的界面用词：页面与浮窗必须说同一套话。 */
 
 export const KIND_LABELS: Record<string, string> = {
-  init: '初始化', uninstall: '卸载', move: '移动', create_node: '新建分组', join: '加入净额组',
+  init: '导入账本', uninstall: '移出账本', move: '移动', create_node: '新建分组', join: '加入净额组',
   create_group: '新建净额组', dissolve: '解散', dissolve_group: '解散净额组',
   split: '生成镜像', unsplit: '取消镜像', update: '改名/备注', undo: '撤销', redo: '重做', import: '导入账单',
 }

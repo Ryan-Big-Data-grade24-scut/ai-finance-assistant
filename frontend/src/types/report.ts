@@ -52,6 +52,8 @@ export interface MajorGroup {
   pct: number
   count: number
   minors: MinorGroup[]
+  /** true = 来自账本树节点；false = 尚未初始化的流水，按平台分类兜底 */
+  ledger: boolean
 }
 
 export interface CategoryResp {

@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import AgentCoreChat from '@/components/AgentCoreChat.vue'
 import AtlasIcon from '@/components/AtlasIcon.vue'
 import { useAgentSession } from '@/composables/useAgentSession'
+import { getAISettings, type AISettings } from '@/api/ai'
 import { buildAgentPageContext, readAgentSelection } from '@/utils/agentPageContext'
 import { TODO_LABELS, kindLabel, stateLabel } from '@/utils/agentLabels'
 import {
@@ -39,6 +40,23 @@ const testMode = import.meta.env.VITE_AGENTCORE_TEST_MODE === '1'
 const stageKey = 'agentcore.stage'
 let gone = false
 let stageToken = 0
+
+// ── AI 模型状态：未配置时给设置入口；已配置时提示可以更换 ────────────────────
+const aiSettings = ref<AISettings | null>(null)
+const aiSettingsLoading = ref(true)
+const aiSettingsError = ref('')
+
+async function loadAISettings() {
+  aiSettingsLoading.value = true
+  aiSettingsError.value = ''
+  try {
+    aiSettings.value = await getAISettings()
+  } catch (error) {
+    aiSettingsError.value = error instanceof Error ? error.message : '暂时无法读取 AI 设置'
+  } finally {
+    aiSettingsLoading.value = false
+  }
+}
 
 function pageContext(): Record<string, unknown> {
   const stage = staged.value
@@ -212,6 +230,7 @@ onMounted(() => {
   }
   void restoreStage()
   void refreshExternal()
+  void loadAISettings()
   void init()
 })
 onBeforeUnmount(() => {
@@ -262,6 +281,29 @@ onBeforeUnmount(() => {
     <!-- 右：上下文、任务、导入与旧卡 -->
     <aside class="ac-side" aria-label="账本工作区">
       <div class="ac-work-head"><AtlasIcon name="ledger" /> <h2>账本工作区</h2></div>
+      <section class="ac-panel ac-model" data-testid="ac-ai-model">
+        <h3><AtlasIcon name="atlas" /> AI 模型</h3>
+        <p v-if="aiSettingsLoading" class="muted">正在读取 AI 设置…</p>
+        <template v-else-if="aiSettings?.configured">
+          <p class="ac-model-name"><b>{{ aiSettings.provider_label }}</b> · {{ aiSettings.model }}</p>
+          <p class="muted">
+            {{ aiSettings.ai_ready ? '已就绪，可以处理账本任务。' : '模型已保存，但还没有授权发送交易字段。' }}
+          </p>
+          <RouterLink to="/ai/settings" class="ac-model-link">
+            更改 AI 模型 <AtlasIcon name="arrow" />
+          </RouterLink>
+        </template>
+        <template v-else-if="aiSettings">
+          <p class="muted">还没有设置 AI 模型。设置后 ATLAS 才能按你的指令处理账本。</p>
+          <RouterLink to="/ai/settings" class="ac-model-link ac-model-link--primary">
+            去设置 AI 模型 <AtlasIcon name="arrow" />
+          </RouterLink>
+        </template>
+        <template v-else>
+          <p class="muted">{{ aiSettingsError || '暂时无法读取 AI 设置。' }}</p>
+          <RouterLink to="/ai/settings" class="ac-model-link">打开 AI 设置 <AtlasIcon name="arrow" /></RouterLink>
+        </template>
+      </section>
       <section v-if="scopeLabel" class="ac-panel ac-scope">
         <h3><AtlasIcon name="ledger" /> V2 页面上下文</h3>
         <p v-if="scopeRange" class="ac-scope-range">{{ scopeRange }}</p>
@@ -278,7 +320,7 @@ onBeforeUnmount(() => {
       </section>
       <section class="ac-panel ac-import">
         <h3><AtlasIcon name="file" /> 导入账单</h3>
-        <p class="muted">先解析文件，再在对话里要求导入。流水入库后，仍需在 V2 初始化才会进入账本树。</p>
+        <p class="muted">先解析文件，再在对话里要求导入。流水入库后，仍需在 V2 导入账本才会进入账本树。</p>
         <label class="ac-file">
           <input ref="fileInput" type="file" accept=".zip,.csv,.xlsx" :disabled="importBusy"
                  aria-label="选择账单文件" data-testid="ac-file" @change="pickFile">
@@ -315,7 +357,7 @@ onBeforeUnmount(() => {
           <span class="ac-tag ac-tag--ok">已入库</span>
           <b>原始流水导入回执</b>
           <p>新增 {{ imported.inserted }} · 跳过 {{ imported.skipped }} · 失败 {{ imported.failed }}</p>
-          <p class="ac-hint">批次 {{ imported.batch_id }}。V2 是否已初始化，以账本回执为准。</p>
+          <p class="ac-hint">批次 {{ imported.batch_id }}。V2 是否已导入账本，以账本回执为准。</p>
         </div>
       </section>
 

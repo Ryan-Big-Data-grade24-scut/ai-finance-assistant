@@ -166,6 +166,11 @@ class MajorGroup(BaseModel):
     minors: list[MinorGroup] = Field(
         description="小类，按 amount 降序。无小类时为空列表，不是 null"
     )
+    ledger: bool = Field(
+        default=False,
+        description="true 表示本组来自账本树节点，明细筛选应使用 ledger_category / ledger_subcat；"
+                    "false 表示平台分类兜底（尚未初始化的流水），用 category / subcat 筛选",
+    )
 
 
 class CategoryResp(BaseModel):
@@ -230,6 +235,12 @@ class TxQuery(BaseModel):
 
     category: str | None = Field(default=None, description="按大类过滤")
     subcat: str | None = Field(default=None, description="按小类过滤")
+    ledger_category: str | None = Field(
+        default=None, description="按账本树大类节点名过滤（优先于 category）"
+    )
+    ledger_subcat: str | None = Field(
+        default=None, description="按账本树根以下完整路径过滤，例如 '餐饮 / 外卖'"
+    )
     pay_method: str | None = Field(default=None, description="按支付方式精确匹配")
     source: str | None = Field(default=None, description="按来源平台过滤")
     keyword: str | None = Field(
