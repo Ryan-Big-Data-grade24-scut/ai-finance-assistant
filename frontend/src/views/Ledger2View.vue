@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 账本代数 V2 —— 表格视图 / 星云视图 + 主控台。
+ * 账本工作台 —— 表格视图 / 星云视图 + 主控台。
  *
  * 选择 ⇒ 操作 是这套引擎的核心：移动 / 加入 / 新建 / 生成镜像 / 解散 / 取消镜像都有一个「已选集合」。
  * - 单击条目 = 选择（Ctrl/⌘ 单击 = 加选 / 取消）；空白处 / 未选中条目上拖动 = 框选；
@@ -1676,7 +1676,7 @@ onMounted(() => {
 .panel--hist li.undone { opacity: .5; text-decoration: line-through; }
 .panel--hist small { display: block; }
 
-/* 账本代数 V2 的视觉增强：只影响中间表格，不触碰账本计算或操作逻辑。 */
+/* 账本工作台的视觉增强：只影响中间表格，不触碰账本计算或操作逻辑。 */
 .l2-tree {
   flex: 1;
   min-height: 0;

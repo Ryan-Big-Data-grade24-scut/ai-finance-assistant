@@ -341,7 +341,7 @@ onBeforeUnmount(() => {
         </div>
       </header>
       <div v-if="contextLabel" class="fa-context" data-testid="floating-context">
-        <AtlasIcon name="ledger" /><b>V2 上下文</b><span>{{ contextLabel }}</span>
+        <AtlasIcon name="ledger" /><b>账本工作台上下文</b><span>{{ contextLabel }}</span>
       </div>
       <AgentCoreChat
         class="fa-chat"

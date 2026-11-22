@@ -601,7 +601,7 @@ onMounted(async () => {
         </p>
         <p v-else>这次没有新增流水，{{ successSkipped.toLocaleString('zh-CN') }} 笔记录已经存在。</p>
         <RouterLink class="side-primary" to="/bill">返回账单报告</RouterLink>
-        <RouterLink class="side-link" to="/v2">去账本代数整理分类</RouterLink>
+        <RouterLink class="side-link" to="/v2">去账本工作台整理分类</RouterLink>
       </section>
       <section class="side-card">
         <span class="side-kicker">当前账本</span>

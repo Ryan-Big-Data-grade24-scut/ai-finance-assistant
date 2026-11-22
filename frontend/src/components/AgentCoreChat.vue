@@ -87,7 +87,7 @@ function resultLabel(item: Extract<AgentChatItem, { type: 'tool' }>) {
     if (error?.code === 'RECEIPT_UNAVAILABLE' || error?.code === 'RECEIPT_MISSING') return '回执缺失 · 待核对'
     return '失败'
   }
-  if (item.name === 'finance_ledger_apply' && result?.state === 'executed') return 'V2 已执行'
+  if (item.name === 'finance_ledger_apply' && result?.state === 'executed') return '账本工作台已执行'
   if (item.name === 'finance_import_commit' && result?.state === 'committed') return '已入库'
   return '结果'
 }
@@ -387,7 +387,7 @@ function enter(event: KeyboardEvent) {
             <div class="ac-welcome">
               <span class="ac-eyebrow">ATLAS <span aria-hidden="true">/</span> 账本工作台</span>
               <h3>今天想核对哪笔账？</h3>
-              <p>查流水、核对收支，或整理账本 V2。</p>
+              <p>查流水、核对收支，或在账本工作台整理分类。</p>
               <div class="ac-suggestions" aria-label="示例问题">
                 <button v-for="example in suggestions" :key="example.label" type="button"
                         :disabled="!!input.trim() || !ready || sending" @click="useSuggestion(example.prompt)">

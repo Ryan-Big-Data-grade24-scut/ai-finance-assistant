@@ -160,7 +160,7 @@ onBeforeUnmount(() => {
 
       <nav v-if="!isHome" class="nav">
         <RouterLink to="/bill" class="nav-item">账单报告</RouterLink>
-        <RouterLink to="/v2" class="nav-item">∑ 账本代数 V2</RouterLink>
+        <RouterLink to="/v2" class="nav-item">账本工作台</RouterLink>
         <RouterLink to="/v2/assistant" class="nav-item">✎ ATLAS</RouterLink>
         <RouterLink to="/import" class="nav-item">导入账单</RouterLink>
         <RouterLink to="/ai/settings" class="nav-item">AI 设置</RouterLink>

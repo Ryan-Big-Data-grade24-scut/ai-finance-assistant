@@ -481,7 +481,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
         <h2>账本还没整理完</h2>
         <p>还有 {{ uninitializedCount }} 笔流水没有进入账本树，分类暂时沿用平台分类。整理后这里会按你的账本重新归类。</p>
         <div class="hint-actions">
-          <RouterLink to="/v2">去账本代数整理</RouterLink>
+          <RouterLink to="/v2">去账本工作台整理</RouterLink>
           <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
         </div>
       </section>
@@ -494,7 +494,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
         </div>
         <hr />
         <h2>分类不准确？</h2>
-        <p>在账本代数里调整账本树，这份报告会跟着变。</p>
+        <p>在账本工作台里调整账本树，这份报告会跟着变。</p>
         <div class="hint-actions">
           <RouterLink to="/v2">调整账本分类</RouterLink>
           <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>

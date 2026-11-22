@@ -140,7 +140,7 @@ async function decide(action: AgentAction, approve: boolean) {
     if (gone) return
     if (detail.value === view) {
       notice.value = approve
-        ? (action.kind === 'import' ? '导入已执行，回执见卡片。' : '旧卡已确认，V2 操作已执行。')
+        ? (action.kind === 'import' ? '导入已执行，回执见卡片。' : '旧卡已确认，账本工作台操作已执行。')
         : '已拒绝，旧卡没有执行。已另行提交的操作不会撤销。'
     }
     if (action.kind === 'import') await restoreStage()
@@ -305,7 +305,7 @@ onBeforeUnmount(() => {
         </template>
       </section>
       <section v-if="scopeLabel" class="ac-panel ac-scope">
-        <h3><AtlasIcon name="ledger" /> V2 页面上下文</h3>
+        <h3><AtlasIcon name="ledger" /> 账本工作台页面上下文</h3>
         <p v-if="scopeRange" class="ac-scope-range">{{ scopeRange }}</p>
         <p v-if="scope.selection.length" class="muted">已选 {{ scope.selection.length }} 项</p>
       </section>
@@ -320,7 +320,7 @@ onBeforeUnmount(() => {
       </section>
       <section class="ac-panel ac-import">
         <h3><AtlasIcon name="file" /> 导入账单</h3>
-        <p class="muted">先解析文件，再在对话里要求导入。流水入库后，仍需在 V2 导入账本才会进入账本树。</p>
+        <p class="muted">先解析文件，再在对话里要求导入。流水入库后，仍需在账本工作台导入账本才会进入账本树。</p>
         <label class="ac-file">
           <input ref="fileInput" type="file" accept=".zip,.csv,.xlsx" :disabled="importBusy"
                  aria-label="选择账单文件" data-testid="ac-file" @change="pickFile">
@@ -357,7 +357,7 @@ onBeforeUnmount(() => {
           <span class="ac-tag ac-tag--ok">已入库</span>
           <b>原始流水导入回执</b>
           <p>新增 {{ imported.inserted }} · 跳过 {{ imported.skipped }} · 失败 {{ imported.failed }}</p>
-          <p class="ac-hint">批次 {{ imported.batch_id }}。V2 是否已导入账本，以账本回执为准。</p>
+          <p class="ac-hint">批次 {{ imported.batch_id }}。账本工作台是否已导入账本，以账本回执为准。</p>
         </div>
       </section>
 
