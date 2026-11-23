@@ -1,6 +1,7 @@
 """HTTP/未来 MCP 共用的唯一账本服务。独立于第一轮报告口径。"""
 from __future__ import annotations
 import json
+from pathlib import Path
 from uuid import uuid4
 from .. import db
 from . import loader, ops, store
@@ -147,14 +148,14 @@ def _assign_new_rows(state: dict, rows: list[dict], book_id: str) -> None:
         state['placements'][str(tx_id)] = minor_id
 
 
-def sync_live_book() -> dict:
+def sync_live_book(db_path: Path | None = None) -> dict:
     """Idempotently initialize/synchronize the sole automatic star map book.
 
     Uses the same store and invariant checks as manual operations. Existing moved
     records and user-defined groups are preserved. Never mutates transactions_raw,
     tx_overrides, or the legacy report layer.
     """
-    conn = db.get_conn()
+    conn = db.get_conn(db_path) if db_path is not None else db.get_conn()
     try:
         conn.execute('BEGIN IMMEDIATE')
         rows = _source_rows(conn)

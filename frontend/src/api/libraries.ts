@@ -14,6 +14,7 @@ export interface LedgerLibrary {
   name: string
   active: boolean
   saved_active: boolean
+  can_delete: boolean
   created_at: string
   stats: LibraryStats
 }
@@ -50,5 +51,11 @@ export async function createLibrary(name: string): Promise<LedgerLibrary> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
+  }))
+}
+
+export async function deleteLibrary(id: string): Promise<LibrariesResp> {
+  return parse<LibrariesResp>(await fetch(`/api/libraries/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
   }))
 }

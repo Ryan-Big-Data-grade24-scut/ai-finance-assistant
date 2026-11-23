@@ -9,6 +9,7 @@ import math
 import os
 import re
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import AsyncIterator
@@ -112,6 +113,7 @@ class _Run:
 
 _RUNNING: dict[str, _Run] = {}
 _STARTING: set[asyncio.Task] = set()
+_switching_library = False
 
 
 def now_text() -> str:
@@ -465,6 +467,8 @@ async def _start(session_id: str, text: str, page: dict | None) -> dict:
 
 
 async def start_turn(session_id: str, text: str, page: dict | None = None) -> dict:
+    if _switching_library:
+        raise AgentcoreError('LIBRARY_SWITCHING', '正在切换账本，请稍后再试。', status=409)
     # 一旦开始落盘，就要把 worker 接上；POST 断线不应留下无人执行的 active 行。
     start = asyncio.create_task(_start(session_id, text, page))
     _STARTING.add(start)
@@ -491,6 +495,18 @@ async def shutdown() -> None:
     for run in runs:
         run.stop.set()
     await asyncio.gather(*(r.task for r in runs if r.task is not None), return_exceptions=True)
+
+
+@asynccontextmanager
+async def pause_for_library_switch() -> AsyncIterator[None]:
+    """等旧账本的写入收尾，切换完成前不接收新一轮。"""
+    global _switching_library
+    _switching_library = True
+    try:
+        await shutdown()
+        yield
+    finally:
+        _switching_library = False
 
 
 async def subscribe(session_id: str, run_id: str, after: int = 0) -> AsyncIterator[dict | None]:

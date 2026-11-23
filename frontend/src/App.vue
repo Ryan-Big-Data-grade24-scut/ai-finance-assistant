@@ -15,7 +15,7 @@ import '@/styles/workspace.css'
 
 const route = useRoute()
 const router = useRouter()
-const { libraries, active, refresh, choose } = useLibraries()
+const { libraries, active, refresh, choose, mutating } = useLibraries()
 
 const menuOpen = ref(false)
 const menuBusy = ref('')
@@ -60,7 +60,7 @@ async function goHome() {
   await router.push({ name: 'home' })
 }
 async function pick(item: LedgerLibrary) {
-  if (menuBusy.value) return
+  if (menuBusy.value || mutating.value) return
   menuBusy.value = item.id
   menuError.value = ''
   try {
@@ -139,7 +139,7 @@ onBeforeUnmount(() => {
             role="menuitem"
             class="menu-ledger"
             :class="{ active: item.active }"
-            :disabled="!!menuBusy"
+            :disabled="!!menuBusy || mutating"
             @click="pick(item)"
           >
             <span class="menu-dot" aria-hidden="true" />
