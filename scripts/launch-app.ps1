@@ -1,129 +1,92 @@
 param(
-    [int]$BackendPort = 8000,
-    [int]$FrontendPort = 5173,
+    [ValidateRange(1, 65535)][int]$BackendPort = 8000,
+    [ValidateRange(1, 65535)][int]$FrontendPort = 5173,
     [switch]$NoBrowser
 )
 
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $root '.venv\Scripts\python.exe'
-$frontendDir = Join-Path $root 'frontend'
-$runtimeDir = Join-Path $root '.runtime'
-$statePath = Join-Path $runtimeDir 'processes.json'
+. "$PSScriptRoot/app-processes.ps1"
 
-function Test-Endpoint([string]$Url) {
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2
-        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
-    } catch {
-        return $false
-    }
+function Start-AppProcess([string]$Name, [string]$Executable, [string[]]$Arguments, [string]$Directory) {
+    $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WorkingDirectory $Directory `
+        -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtimeDir "$Name.log") `
+        -RedirectStandardError (Join-Path $runtimeDir "$Name-error.log")
+    $record = @{ id = $process.Id; started = $process.StartTime.ToFileTimeUtc() }
+    $started[$Name] = $record
+    $record | ConvertTo-Json | Set-Content -LiteralPath (Get-RecordPath $Name) -Encoding UTF8
+    return $process
 }
 
-function Wait-Endpoint([string]$Name, [string]$Url, $Process, [int]$Seconds = 30) {
-    for ($i = 0; $i -lt $Seconds; $i++) {
-        if (Test-Endpoint $Url) {
-            Write-Host "  [OK] $Name is ready" -ForegroundColor Green
-            return $true
+function Wait-App([string]$Name, [int]$Port, [string]$Path, $Process) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        if ($Process.HasExited) { break }
+        $response = $null
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port$Path" -TimeoutSec 2
+        } catch {
+            # The service is not ready yet.
         }
-        if ($null -ne $Process -and $Process.HasExited) {
-            return $false
+        if ($response.StatusCode -eq 200) {
+            $listener = Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort $Port -ErrorAction SilentlyContinue
+            if ($listener.OwningProcess -eq $Process.Id) { return }
+            # On Windows, the venv Python executable launches the real Python as a child.
+            if ($Name -eq 'backend' -and $listener -and -not $Process.HasExited) {
+                $child = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)"
+                if ($child.ParentProcessId -eq $Process.Id -and $child.CreationDate -ge $Process.StartTime) {
+                    return
+                }
+            }
+            throw "Port $Port is not listening for the $Name process we started."
         }
-        Start-Sleep -Seconds 1
-    }
-    return $false
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "$Name did not start on port $Port. See .runtime\$Name-error.log."
 }
 
-function Show-LogTail([string]$Path) {
-    if (Test-Path $Path) {
-        Write-Host "`n  Recent log: $Path" -ForegroundColor Yellow
-        Get-Content -LiteralPath $Path -Tail 30
-    }
-}
-
-function Stop-StartedProcess($Process) {
-    if ($null -ne $Process -and -not $Process.HasExited) {
-        & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
-    }
-}
-
-if (-not (Test-Path $python)) {
-    throw 'Missing .venv. Run scripts\setup.ps1 first.'
-}
-if (-not (Test-Path (Join-Path $frontendDir 'node_modules'))) {
-    throw 'Missing frontend dependencies. Run scripts\setup.ps1 first.'
-}
-
-$npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
-if (-not $npm) {
-    throw 'npm.cmd was not found. Install Node.js and try again.'
-}
-
-New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$backendOut = Join-Path $runtimeDir "backend-$stamp.log"
-$backendErr = Join-Path $runtimeDir "backend-$stamp-error.log"
-$frontendOut = Join-Path $runtimeDir "frontend-$stamp.log"
-$frontendErr = Join-Path $runtimeDir "frontend-$stamp-error.log"
-$backendProcess = $null
-$frontendProcess = $null
-
+$lock = $null
+$started = @{}
+$frontendUrl = "http://127.0.0.1:$FrontendPort"
 try {
-    Write-Host ''
-    Write-Host 'Starting AI Finance Assistant...' -ForegroundColor Cyan
-
-    if (Test-Endpoint "http://127.0.0.1:$BackendPort/health") {
-        Write-Host "  [OK] Backend is already running on port $BackendPort" -ForegroundColor Green
-    } else {
-        Write-Host '  Starting backend...' -ForegroundColor Cyan
-        $backendProcess = Start-Process -FilePath $python `
-            -ArgumentList @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$BackendPort") `
-            -WorkingDirectory $root -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput $backendOut -RedirectStandardError $backendErr
-        if (-not (Wait-Endpoint 'Backend' "http://127.0.0.1:$BackendPort/health" $backendProcess)) {
-            Show-LogTail $backendErr
-            throw 'Backend failed to start.'
+    $lock = Lock-App
+    if ($BackendPort -eq $FrontendPort) { throw 'Backend and frontend ports must be different.' }
+    foreach ($name in 'backend', 'frontend') {
+        if (Get-RecordedProcess (Read-AppRecord $name)) {
+            throw "$name is already running from this directory. Use the one-click stop file first."
         }
     }
-
-    if (Test-Endpoint "http://127.0.0.1:$FrontendPort") {
-        Write-Host "  [OK] Frontend is already running on port $FrontendPort" -ForegroundColor Green
-    } else {
-        Write-Host '  Starting frontend...' -ForegroundColor Cyan
-        $frontendProcess = Start-Process -FilePath $npm.Source `
-            -ArgumentList @('run', 'dev', '--', '--host', '127.0.0.1', '--port', "$FrontendPort") `
-            -WorkingDirectory $frontendDir -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput $frontendOut -RedirectStandardError $frontendErr
-        if (-not (Wait-Endpoint 'Frontend' "http://127.0.0.1:$FrontendPort" $frontendProcess)) {
-            Show-LogTail $frontendErr
-            Show-LogTail $frontendOut
-            throw 'Frontend failed to start.'
-        }
+    $ports = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners().Port
+    foreach ($port in $BackendPort, $FrontendPort) {
+        if ($port -in $ports) { throw "Port $port is already in use; no existing process was stopped." }
     }
 
-    [ordered]@{
-        backend_pid = if ($backendProcess) { $backendProcess.Id } else { $null }
-        frontend_pid = if ($frontendProcess) { $frontendProcess.Id } else { $null }
-        backend_port = $BackendPort
-        frontend_port = $FrontendPort
-        started_at = (Get-Date).ToString('s')
-        backend_log = $backendErr
-        frontend_log = $frontendErr
-    } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
-
-    Write-Host ''
-    Write-Host "Started successfully: http://127.0.0.1:$FrontendPort" -ForegroundColor Green
-    Write-Host "Runtime logs: $runtimeDir" -ForegroundColor DarkGray
-    Write-Host 'Use the one-click stop CMD file to stop the app.' -ForegroundColor DarkGray
-
-    if (-not $NoBrowser) {
-        Start-Process "http://127.0.0.1:$FrontendPort"
+    $python = Join-Path $root '.venv\Scripts\python.exe'
+    $frontendDir = Join-Path $root 'frontend'
+    $vite = 'node_modules/vite/bin/vite.js'
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $frontendDir $vite) -PathType Leaf)) {
+        throw 'Missing dependencies. Run scripts\setup.ps1 first.'
     }
+    $node = (Get-Command node.exe -CommandType Application).Source
+    $backend = Start-AppProcess 'backend' $python @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', $BackendPort) $root
+    Wait-App 'backend' $BackendPort '/health' $backend
+
+    $env:API_TARGET = "http://127.0.0.1:$BackendPort"
+    $frontend = Start-AppProcess 'frontend' $node @($vite, '--host', '127.0.0.1', '--port', $FrontendPort, '--strictPort') $frontendDir
+    Wait-App 'frontend' $FrontendPort '/' $frontend
 } catch {
-    Stop-StartedProcess $frontendProcess
-    Stop-StartedProcess $backendProcess
-    Write-Host ''
     Write-Host "Startup failed: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "Log folder: $runtimeDir" -ForegroundColor Yellow
+    foreach ($name in 'frontend', 'backend') {
+        if ($started.ContainsKey($name)) {
+            try { Stop-AppProcess $name $started[$name] } catch { Write-Warning $_.Exception.Message }
+        }
+    }
     exit 1
+} finally {
+    if ($lock) { $lock.Dispose() }
+}
+
+Write-Host "Started: $frontendUrl (logs: $runtimeDir)" -ForegroundColor Green
+if (-not $NoBrowser) {
+    try { Start-Process $frontendUrl } catch { Write-Warning "Open $frontendUrl in your browser." }
 }

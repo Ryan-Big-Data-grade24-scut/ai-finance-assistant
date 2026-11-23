@@ -1,18 +1,22 @@
-$ErrorActionPreference = 'Continue'
-$root = Split-Path -Parent $PSScriptRoot
-$statePath = Join-Path $root '.runtime\processes.json'
+$ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/app-processes.ps1"
 
-if (-not (Test-Path $statePath)) {
-    Write-Host 'No runtime state was found. The app may already be stopped.' -ForegroundColor Yellow
-    exit 0
-}
-
-$state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-foreach ($pidValue in @($state.frontend_pid, $state.backend_pid)) {
-    if ($null -ne $pidValue -and (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)) {
-        & taskkill.exe /PID $pidValue /T /F 2>$null | Out-Null
+$lock = $null
+$failed = $false
+try {
+    $lock = Lock-App
+    foreach ($name in 'frontend', 'backend') {
+        try { Stop-AppProcess $name (Read-AppRecord $name) } catch {
+            Write-Warning $_.Exception.Message
+            $failed = $true
+        }
     }
+} catch {
+    Write-Warning $_.Exception.Message
+    $failed = $true
+} finally {
+    if ($lock) { $lock.Dispose() }
 }
 
-Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
-Write-Host 'AI Finance Assistant has stopped.' -ForegroundColor Green
+if ($failed) { exit 1 }
+Write-Host 'No one-click app processes remain in this directory.' -ForegroundColor Green
