@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import shutil
+import sqlite3
 import tempfile
 from decimal import Decimal
 from pathlib import Path
@@ -52,13 +54,47 @@ def _ledger_totals(report: dict) -> dict[str, Decimal]:
     return totals
 
 
-def check(dataset: Path, out_csv: Path | None = None) -> dict:
+def _book_evidence(db_path: Path) -> dict:
+    """一本书的体检：库文件完整、行数、时间跨度、内容指纹。
+
+    指纹按 tx_no|amount|tx_time 逐行哈希，两本账（平台分类本 / 答案层本）
+    应当逐行一致——因为它们记的是同一批流水，只是分类不同。
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        rows = conn.execute(
+            "SELECT tx_no, amount, tx_time FROM transactions_raw ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    digest = hashlib.sha256()
+    for tx_no, amount, tx_time in rows:
+        digest.update(f"{tx_no or ''}|{amount:.2f}|{tx_time}\n".encode("utf-8"))
+    times = sorted(row[2] for row in rows)
+    return {
+        "file": db_path.name,
+        "sqlite_integrity": integrity,
+        "raw_rows": len(rows),
+        "earliest": times[0] if times else "",
+        "latest": times[-1] if times else "",
+        "raw_tx_no_amount_time_sha256": digest.hexdigest(),
+        "status": "PASS" if integrity == "ok" else "FAIL",
+    }
+
+
+def check(dataset: Path, out_csv: Path | None = None,
+          books_csv: Path | None = None) -> dict:
     dataset = Path(dataset).resolve()
     answer = _answer_totals(dataset)
     workdir = Path(tempfile.mkdtemp(prefix="backend-check-"))
     try:
         report = build_report(dataset, workdir / "out")
         ledger = _ledger_totals(report)
+        books = [
+            _book_evidence(Path(book["db"]))
+            for book in (report["noisy"], report["truth"])
+        ]
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -94,6 +130,16 @@ def check(dataset: Path, out_csv: Path | None = None) -> dict:
             writer = csv.DictWriter(fh, fieldnames=["bucket", "expected", "actual", "diff", "status"])
             writer.writeheader()
             writer.writerows(rows)
+    if books_csv:
+        books_csv = Path(books_csv)
+        books_csv.parent.mkdir(parents=True, exist_ok=True)
+        fields = ["file", "sqlite_integrity", "raw_rows", "earliest", "latest",
+                  "raw_tx_no_amount_time_sha256", "status"]
+        with books_csv.open("w", encoding="utf-8-sig", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(books)
+    summary["books"] = books
     return summary
 
 
@@ -101,12 +147,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--out", default=None, help="结果 CSV 路径")
+    parser.add_argument("--books", default=None, help="两本账体检结果 CSV 路径")
     args = parser.parse_args()
-    summary = check(Path(args.dataset), Path(args.out) if args.out else None)
+    summary = check(Path(args.dataset), Path(args.out) if args.out else None,
+                    Path(args.books) if args.books else None)
     for row in summary["rows"]:
         print(f"{row['bucket']}: 答案 {row['expected']} / 账本 {row['actual']} "
               f"（差 {row['diff']}） {row['status']}")
     print(f"导入 {summary['imported_rows']} 笔，初始化 {summary['ledger_initialized']} 笔")
+    for book in summary["books"]:
+        print(f"{book['file']}: {book['raw_rows']} 行 "
+              f"{book['earliest']} ~ {book['latest']} "
+              f"指纹 {book['raw_tx_no_amount_time_sha256'][:12]} {book['status']}")
     print("平台分类错误率：{:.2%}".format(summary["platform_mismatch"]["rate"]))
     if not summary["ok"]:
         raise SystemExit("账本复算与答案层不一致")

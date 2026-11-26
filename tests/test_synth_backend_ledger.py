@@ -123,3 +123,12 @@ def test_backend_check_reproduces_answer_totals(tmp_path):
     for row in summary["rows"]:
         assert row["status"] == "PASS", row
     assert summary["imported_rows"] > 0
+
+    # 两本隔离账记的是同一批流水：行数相同、内容指纹一致。
+    books = summary["books"]
+    assert [b["file"] for b in books] == ["noisy.db", "truth.db"]
+    assert books[0]["raw_rows"] == books[1]["raw_rows"] == summary["imported_rows"]
+    assert books[0]["raw_tx_no_amount_time_sha256"] == books[1]["raw_tx_no_amount_time_sha256"]
+    for book in books:
+        assert book["sqlite_integrity"] == "ok"
+        assert book["status"] == "PASS"
