@@ -17,7 +17,7 @@ from typing import AsyncIterator
 from backend.ai import config as ai_config
 from backend.ai import privacy
 
-from . import adapter, compact, prompt, registry, session, truncate
+from . import adapter, compact, prompt, registry, session, skills, truncate
 from .registry import ToolContext
 from .store import new_id
 
@@ -450,15 +450,27 @@ def _report_crash(task: asyncio.Task) -> None:
         log.error('AgentCore run could not persist its terminal state', exc_info=exc)
 
 
-async def _start(session_id: str, text: str, page: dict | None) -> dict:
+async def _start(session_id: str, text: str, page: dict | None, skill_id: str | None) -> dict:
     cfg = await asyncio.to_thread(ai_config.get_secret_config)
     if cfg is None:
         raise AgentcoreError('NOT_CONFIGURED', '还没有配置可用的模型。请先到「AI 设置」填写接口、模型和 API Key。')
     if not cfg.allow_external_processing:
         raise AgentcoreError('NOT_AUTHORIZED', '尚未允许把账单数据发送给外部模型。请在「AI 设置」里打开外部处理开关。', status=403)
+    selected = None
+    skill_content = ''
+    if skill_id is not None:
+        try:
+            summary, loaded = await asyncio.to_thread(skills.load_selected, skill_id)
+        except KeyError as exc:
+            raise AgentcoreError('SKILL_NOT_FOUND', '该技能已不可用，请重新选择。', status=404) from exc
+        except (OSError, UnicodeError) as exc:
+            raise AgentcoreError('SKILL_UNAVAILABLE', '无法读取技能，请稍后再试。', status=503) from exc
+        selected = {'id': summary.name, 'label': summary.label}
+        skill_content = loaded['content']
     system = prompt.system_prompt()
     tools = adapter.for_provider(cfg)
-    snapshot = prompt.context_snapshot(now_text=now_text(), page=page, memory_text=prompt.memory_block())
+    snapshot = prompt.context_snapshot(now_text=now_text(), page=page, memory_text=prompt.memory_block(),
+                                       skill_content=skill_content)
     # 先登记 stop 事件。若另一个标签页在 SQLite 提交后、worker 启动前请求停止，也不会丢失。
     run_id = new_id('run')
     run = _Run({'id': run_id, 'session_id': session_id})
@@ -466,7 +478,7 @@ async def _start(session_id: str, text: str, page: dict | None) -> dict:
     try:
         run.info = await asyncio.to_thread(session.begin_run, session_id, provider=cfg.provider, model=cfg.model,
                                           system=system, tools=tools, digest=prompt.prefix_fingerprint(system, tools),
-                                          snapshot=snapshot, text=text, run_id=run_id)
+                                          snapshot=snapshot, text=text, run_id=run_id, skill=selected)
     except KeyError as exc:
         raise AgentcoreError('SESSION_NOT_FOUND', '会话不存在。', status=404) from exc
     except session.RunActive as exc:
@@ -479,11 +491,11 @@ async def _start(session_id: str, text: str, page: dict | None) -> dict:
     return run.info
 
 
-async def start_turn(session_id: str, text: str, page: dict | None = None) -> dict:
+async def start_turn(session_id: str, text: str, page: dict | None = None, *, skill_id: str | None = None) -> dict:
     if _switching_library:
         raise AgentcoreError('LIBRARY_SWITCHING', '正在切换账本，请稍后再试。', status=409)
     # 一旦开始落盘，就要把 worker 接上；POST 断线不应留下无人执行的 active 行。
-    start = asyncio.create_task(_start(session_id, text, page))
+    start = asyncio.create_task(_start(session_id, text, page, skill_id))
     _STARTING.add(start)
     start.add_done_callback(_STARTING.discard)
     try:

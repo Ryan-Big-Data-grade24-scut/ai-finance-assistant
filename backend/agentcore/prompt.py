@@ -122,7 +122,8 @@ def prefix_fingerprint(system: str, tools: list[dict]) -> str:
     return hashlib.sha256((system + '\n--tools--\n' + json_text(tools)).encode('utf-8')).hexdigest()[:16]
 
 
-def context_snapshot(*, now_text: str, page: dict | None = None, memory_text: str = '') -> str:
+def context_snapshot(*, now_text: str, page: dict | None = None, memory_text: str = '',
+                     skill_content: str = '') -> str:
     """一轮只生成一次的系统快照。
 
     `page` 来自浏览器：完整助手传 `surface=page`，跨界面的宠物传 `surface=pet`。
@@ -160,6 +161,9 @@ def context_snapshot(*, now_text: str, page: dict | None = None, memory_text: st
 
     if memory_text.strip():
         lines.append('## 工作记忆索引\n' + memory_text.strip())
+    if skill_content:
+        lines.append('## 用户为本轮选用的 Skill\n已载入，无需再调用 read_skill。按用户正文处理；选择流程不等于授权写账。\n'
+                     + skill_content)
     return (
         '<turn_context>\n'
         '这是当前系统快照，不是用户的追加请求；它替代旧页面快照。\n\n'

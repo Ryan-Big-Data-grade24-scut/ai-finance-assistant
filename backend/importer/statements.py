@@ -18,6 +18,7 @@ backend/importer/statements.py —— 银行卡 / 电商 / 投资 三类账单�
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 from typing import Iterator
 
@@ -113,6 +114,17 @@ def _row_value(row: dict[str, str], *names: str) -> str:
     return ""
 
 
+def _card_tail(value: str) -> str:
+    """卡号只保留后四位；非数字的说明原样保留。"""
+    value = clean(value)
+    if not value:
+        return ""
+    digits = re.sub(r"\D", "", value)
+    if len(digits) >= 4:
+        return f"尾号{digits[-4:]}"
+    return value
+
+
 def _combine_date_time(date_text: str, time_text: str) -> str | None:
     date_text = clean(date_text)
     time_text = clean(time_text)
@@ -173,7 +185,9 @@ def parse_bank_debit(path: Path, platform_id: str = "bank_generic",
             tx_type=_row_value(row, "交易类型", "业务类型"),
             status=status or "交易成功",
             tx_no=_row_value(row, "交易流水号", "流水号", "交易流水"),
-            remark=_row_value(row, "对方账号", "对方账户"),
+            # 对方账号是账号，不进 remark —— remark 会原样发给模型，
+            # 账号只留在 raw 里，由隐私层在出站时按字段名抹掉。
+            remark=_row_value(row, "备注", "说明"),
             raw=dict(row),
         )
 
@@ -220,7 +234,8 @@ def parse_bank_credit(path: Path, platform_id: str = "bank_credit",
             status=status or "交易成功",
             tx_no=_row_value(row, "交易流水号", "流水号"),
             merchant_no=_row_value(row, "商户编号", "商户号"),
-            remark=_row_value(row, "卡号后四位", "卡号"),
+            # 卡号只留后四位：remark 会原样发给模型，完整卡号不能出去。
+            remark=_card_tail(_row_value(row, "卡号后四位", "卡号")),
             raw=dict(row),
         )
 

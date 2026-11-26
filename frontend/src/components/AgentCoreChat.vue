@@ -6,13 +6,18 @@
  * 这样完整页面和跨页面浮窗能共用同一个 session。
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import type { JSONContent } from '@tiptap/core'
+import AgentCoreComposer from '@/components/AgentCoreComposer.vue'
 import AtlasIcon from '@/components/AtlasIcon.vue'
+import { readDraft, textDraft } from '@/utils/agentDraft'
 import { renderMarkdown } from '@/utils/markdown'
 import { stateLabel } from '@/utils/agentLabels'
-import type { AgentChatItem, AgentRun, AgentTerminal, AgentToolCall } from '@/api/agentCore'
+import type { AgentChatItem, AgentRun, AgentSkill, AgentTerminal, AgentToolCall } from '@/api/agentCore'
 
 const props = withDefaults(defineProps<{
   items: AgentChatItem[]
+  skills: AgentSkill[]
+  skillStatus: 'loading' | 'ready' | 'error'
   run: AgentRun | null
   active: boolean
   status?: string
@@ -53,12 +58,11 @@ const props = withDefaults(defineProps<{
   showHeader: true,
 })
 
-const input = defineModel<string>('input', { default: '' })
-const emit = defineEmits<{ send: []; stop: [] }>()
+const draft = defineModel<JSONContent>('draft', { required: true })
+const emit = defineEmits<{ send: []; stop: []; refreshSkills: [] }>()
 
-const composing = ref(false)
 const scrollArea = ref<HTMLElement | null>(null)
-const composerInput = ref<HTMLTextAreaElement | null>(null)
+const composerInput = ref<InstanceType<typeof AgentCoreComposer> | null>(null)
 const suggestions = computed(() => [
   { icon: 'ledger' as const, label: '核对支出', prompt: '帮我按类别汇总支出，列出金额和笔数，不修改账本。' },
   { icon: 'list' as const, label: '查找交易', prompt: '列出最近 5 笔支出，注明日期、分类和金额。' },
@@ -68,8 +72,8 @@ const suggestions = computed(() => [
 ])
 
 function useSuggestion(prompt: string) {
-  input.value = prompt
-  composerInput.value?.focus()
+  draft.value = textDraft(prompt)
+  nextTick(() => composerInput.value?.focus())
 }
 
 const needsSettings = computed(() =>
@@ -95,7 +99,7 @@ function resultLabel(item: Extract<AgentChatItem, { type: 'tool' }>) {
 // ── 工具调用与中间过程：整轮收进一条「共用时」摘要，运行中展开、结束后折叠 ──
 // 手动点开/收起优先于默认值；历史轮次打开会话时保持折叠。
 
-interface UserItem { id: number; type: 'user'; text: string; at?: string }
+type UserItem = Extract<AgentChatItem, { type: 'user' }>
 interface AnswerItem { id: number; type: 'assistant'; text: string; calls: AgentToolCall[]; step: number | null; at?: string }
 
 interface ProcessBlock {
@@ -133,10 +137,8 @@ const blocks = computed<ChatBlock[]>(() => {
   for (const item of props.items) {
     if (item.type === 'user') {
       flush()
-      // user 与 compaction 共用同一个联合成员，判别式是联合类型，这里明确收窄。
-      const message = item as UserItem
-      user = message
-      out.push({ kind: 'user', key: `u:${message.id}`, item: message })
+      user = item
+      out.push({ kind: 'user', key: `u:${item.id}`, item })
       continue
     }
     turn.push(item)
@@ -328,17 +330,12 @@ function showRoundCard(round: RoundEntry, event: Event) {
 
 onMounted(scrollToBottom)
 
+const draftParts = computed(() => readDraft(draft.value))
 const canSubmit = computed(() => props.ready && !props.sendBlocked && !props.active
-  && !props.opening && !props.sending && !!input.value.trim())
+  && !props.opening && !props.sending && !!draftParts.value.text.trim())
 
 function submit() {
   if (canSubmit.value) emit('send')
-}
-
-function enter(event: KeyboardEvent) {
-  if (composing.value || event.isComposing) return
-  event.preventDefault()
-  submit()
 }
 </script>
 
@@ -390,7 +387,7 @@ function enter(event: KeyboardEvent) {
               <p>查流水、核对收支，或在账本工作台整理分类。</p>
               <div class="ac-suggestions" aria-label="示例问题">
                 <button v-for="example in suggestions" :key="example.label" type="button"
-                        :disabled="!!input.trim() || !ready || sending" @click="useSuggestion(example.prompt)">
+                        :disabled="!!draftParts.text.trim() || !!draftParts.skillId || !ready || sending" @click="useSuggestion(example.prompt)">
                   <AtlasIcon :name="example.icon" />{{ example.label }}<AtlasIcon name="arrow" />
                 </button>
               </div>
@@ -399,7 +396,8 @@ function enter(event: KeyboardEvent) {
         </div>
         <template v-for="block in blocks" :key="block.key">
           <article v-if="block.kind === 'user'" class="ac-msg ac-msg--user" :data-item-id="block.item.id">
-            <div class="ac-bubble">{{ block.item.text }}</div>
+            <div class="ac-bubble"><span v-if="block.item.skill" class="ac-history-skill"
+                 data-testid="ac-history-skill"><AtlasIcon name="list" />{{ block.item.skill.label }}</span><span>{{ block.item.text }}</span></div>
           </article>
 
           <!-- 一轮的全部工具调用与中间输出收进一条摘要；运行中展开，结束后只剩「共用时」。 -->
@@ -490,11 +488,11 @@ function enter(event: KeyboardEvent) {
 
     <div class="ac-composer">
       <div class="ac-composer-box">
-        <textarea ref="composerInput" v-model="input" rows="2" data-testid="ac-input"
-                  aria-label="给 ATLAS 的消息" :placeholder="placeholder"
-                  @compositionstart="composing = true" @compositionend="composing = false"
-                  @keydown.enter.exact="enter"></textarea>
+        <AgentCoreComposer ref="composerInput" v-model="draft" :placeholder="placeholder"
+                           :skills="skills" :skill-status="skillStatus"
+                           @send="submit" @refresh-skills="emit('refreshSkills')" />
         <div class="ac-composer-actions">
+          <span class="ac-skill-hint"><kbd>/</kbd> 选择技能</span>
           <span class="ac-keys"><kbd>Enter</kbd> 发送 <span aria-hidden="true">·</span> <kbd>Shift + Enter</kbd> 换行</span>
           <button v-if="!active" class="ac-send" data-testid="ac-send" type="button"
                   :disabled="!canSubmit" @click="submit">

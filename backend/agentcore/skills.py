@@ -1,4 +1,4 @@
-"""Skill：目录只放摘要，正文靠工具载入。
+"""Skill：目录只放摘要，正文在用户选用或模型按需调用时载入。
 
 为什么不做成"把四份 Skill 全文塞进系统提示词"：
 - 四份正文加起来会占掉大量前缀，而多数轮次只需要其中一份；
@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .truncate import approx_tokens
+from .truncate import CHARS_PER_TOKEN, approx_tokens
 
 SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / '.claude' / 'skills'
 MAX_SKILL_TOKENS = 5_000
@@ -31,6 +31,7 @@ _FRONTMATTER = re.compile(r'^---\s*\n(.*?)\n---\s*\n', re.DOTALL)
 @dataclass(frozen=True)
 class SkillSummary:
     name: str
+    label: str
     description: str
     when_to_use: str
     path: Path
@@ -55,10 +56,12 @@ def catalog() -> list[SkillSummary]:
         return []
     out: list[SkillSummary] = []
     for skill_md in sorted(SKILLS_DIR.glob('*/SKILL.md')):
-        meta, _body = _parse(skill_md)
+        meta, body = _parse(skill_md)
         name = meta.get('name') or skill_md.parent.name
+        title = re.search(r'^# +(.+)$', body, re.MULTILINE)
         out.append(SkillSummary(
             name=name,
+            label=title[1].strip() if title else name,
             description=meta.get('description') or '',
             when_to_use=meta.get('when_to_use') or meta.get('whenToUse') or '',
             path=skill_md,
@@ -81,6 +84,10 @@ def catalog_text() -> str:
 
 
 def load(skill_id: str) -> dict:
+    return load_selected(skill_id)[1]
+
+
+def load_selected(skill_id: str) -> tuple[SkillSummary, dict]:
     skill_id = (skill_id or '').strip()
     skills = {s.name: s for s in catalog()}
     if skill_id not in skills:
@@ -89,15 +96,22 @@ def load(skill_id: str) -> dict:
     meta, body = _parse(skill.path)
     if meta.get('description') and meta['description'] not in body[:200]:
         body = f"{meta['description']}\n\n{body}"
-    max_chars = int(MAX_SKILL_TOKENS * 2.5)
-    truncated = False
-    if len(body) > max_chars:
-        body = body[:max_chars]
-        truncated = True
-    return {
+    content = render(skill.name, body)
+    truncated = approx_tokens(content) > MAX_SKILL_TOKENS
+    if truncated:
+        # 预算针对实际送给模型的内容，转义和外层标记也占空间。
+        lo, hi = 0, min(len(body), int(MAX_SKILL_TOKENS * CHARS_PER_TOKEN))
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if approx_tokens(render(skill.name, body[:mid], truncated=True)) <= MAX_SKILL_TOKENS:
+                lo = mid
+            else:
+                hi = mid - 1
+        content = render(skill.name, body[:lo], truncated=True)
+    return skill, {
         'name': skill.name,
-        'content': render(skill.name, body, truncated=truncated),
-        'tokens': approx_tokens(body),
+        'content': content,
+        'tokens': approx_tokens(content),
         'truncated': truncated,
         'resources': [],
     }

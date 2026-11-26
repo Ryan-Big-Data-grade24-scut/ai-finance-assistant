@@ -104,7 +104,8 @@ def _active(conn, session_id: str):
 
 
 def begin_run(session_id: str, *, provider: str, model: str, system: str, tools: list[dict],
-              digest: str, snapshot: str, text: str, run_id: str | None = None) -> dict:
+              digest: str, snapshot: str, text: str, run_id: str | None = None,
+              skill: dict[str, str] | None = None) -> dict:
     with closing(open_conn()) as conn, atomic(conn):
         _get(conn, session_id)
         if _active(conn, session_id):
@@ -124,7 +125,10 @@ def begin_run(session_id: str, *, provider: str, model: str, system: str, tools:
         _append(conn, session_id, 'system', 'prompt_snapshot',
                 {'digest': digest, 'unchanged': True} if same else {'digest': digest, 'system': system, 'tools': tools})
         _append(conn, session_id, 'system', 'context_snapshot', {'text': snapshot})
-        _append(conn, session_id, 'user', 'user_text', {'text': text})
+        user = {'text': text}
+        if skill is not None:
+            user['skill'] = skill
+        _append(conn, session_id, 'user', 'user_text', user)
     return run
 
 
@@ -321,7 +325,10 @@ def chat_item(e: dict) -> dict | None:
     kind, p = e['kind'], e['payload']
     base = {'id': e['id'], 'at': e['created_at']}
     if kind == 'user_text':
-        return {**base, 'type': 'user', 'text': p.get('text') or ''}
+        item = {**base, 'type': 'user', 'text': p.get('text') or ''}
+        if 'skill' in p:
+            item['skill'] = p['skill']
+        return item
     if kind == 'assistant_text':
         return {**base, 'type': 'assistant', 'text': p.get('text') or '',
                 'calls': p.get('tool_calls') or [], 'step': p.get('step')}

@@ -30,7 +30,7 @@ _BUSINESS = re.compile(
     "诊所|牙科|花店|会员|公交|地铁|物业|停车|食府|面馆|烧腊|食杂|百货|[馆铺摊]$"
 )
 _COUNTERPARTY_FIELDS = {"counterparty", "merchant", "merchant_name", "交易对方", "对方名称", "收款方", "付款方"}
-_PRIVATE_FIELDS = {"对方账号", "对方账户", "对手账号", "对手账户", "银行卡号", "身份证号", "手机号", "联系电话"}
+_PRIVATE_FIELDS = {"对方账号", "对方账户", "对手账号", "对手账户", "银行卡号", "卡号", "身份证号", "手机号", "联系电话"}
 
 
 def _looks_private(value: str) -> bool:

@@ -75,7 +75,8 @@ function pageContext(): Record<string, unknown> {
 }
 
 const {
-  sessions, detail, input, opening, sending, stopping, reconnectText, errorBanner, notice,
+  sessions, detail, draft, skills, skillStatus, refreshSkills,
+  opening, sending, stopping, reconnectText, errorBanner, notice,
   currentId, run, active, items, todos, sessionBusy, formatError, showError,
   openSession, newSession, rename, removeCurrent, isSessionRunning, send, stop, init,
 } = useAgentSession({
@@ -317,7 +318,8 @@ onBeforeUnmount(() => {
 
     <!-- 中：对话 -->
     <AgentCoreChat class="ac-col ac-main-chat" :key="currentId ?? 'opening'"
-                   v-model:input="input" :items="items" :run="run" :active="active"
+                   v-model:draft="draft" :items="items" :run="run" :active="active"
+                   :skills="skills" :skill-status="skillStatus" @refresh-skills="refreshSkills"
                    :status="detail?.status ?? ''" :step="detail?.step ?? 0" :totals="detail?.totals ?? null"
                    :ready="!!currentId" :send-blocked="importBusy" :sending="sending" :stopping="stopping" :opening="opening"
                    :reconnect-text="reconnectText" :error-banner="errorBanner" :notice="notice"

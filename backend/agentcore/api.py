@@ -14,13 +14,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 
 from backend import db, uploads
 from backend.ai import privacy
 
-from . import actions, import_tool, memory, runtime, session
+from . import actions, import_tool, memory, runtime, session, skills
 from .store import open_conn
 
 router = APIRouter(prefix='/api/agentcore', tags=['agentcore'])
@@ -43,6 +43,7 @@ class TurnIn(BaseModel):
     model_config = ConfigDict(extra='forbid')
     text: str
     page: dict | None = None
+    skill_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class DecideIn(BaseModel):
@@ -97,6 +98,15 @@ def _action_view(row: dict) -> dict:
 @router.get('/health')
 def health() -> dict:
     return {'ok': True, **db.health_snapshot(), 'context': runtime.context_limits()}
+
+
+@router.get('/skills')
+def list_skills() -> dict:
+    return {'skills': [
+        {'id': skill.name, 'label': skill.label, 'description': skill.description,
+         'when_to_use': skill.when_to_use}
+        for skill in skills.catalog()
+    ]}
 
 
 # ── 会话 ──────────────────────────────────────────────────────────────────────
@@ -175,7 +185,7 @@ async def send_turn(session_id: str, data: TurnIn):
     if len(text) > MAX_TURN_CHARS:
         return _error(400, 'TEXT_TOO_LONG', f'单条消息最多 {MAX_TURN_CHARS} 个字符。')
     try:
-        return await runtime.start_turn(session_id, text, data.page)
+        return await runtime.start_turn(session_id, text, data.page, skill_id=data.skill_id)
     except runtime.AgentcoreError as exc:
         return _error(exc.status, exc.code, exc.message)
 

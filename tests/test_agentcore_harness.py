@@ -13,7 +13,7 @@ import pytest
 
 from agentcore_support import call_reply, install_config, tool
 from backend import db
-from backend.agentcore import adapter, compact, memory, prompt, registry, runtime, session, truncate
+from backend.agentcore import adapter, compact, memory, prompt, registry, runtime, session, skills, truncate
 from ledger2_support import add_tx
 
 QUERY = 'finance_query_transactions'
@@ -126,6 +126,42 @@ def test_same_prefix_latest_snapshot_and_skill_on_demand(harness, monkeypatch):
     assert skill.startswith('<skill_content name="ledger-classify">') and '## 操作顺序' in skill
     first_log, second_log = [e['payload'] for e in session.events(harness) if e['kind'] == 'prompt_snapshot']
     assert second_log == {'digest': first_log['digest'], 'unchanged': True}
+
+
+def test_cross_platform_cashflow_example_loads_skill_on_demand(harness, monkeypatch):
+    skill_id = 'cross-platform-cashflow'
+    provider = stub(monkeypatch, call_reply(tool('skill', 'read_skill', {'skill_id': skill_id})),
+                    adapter.ModelReply(text='已读取只读分析流程'))
+    frames = run_turn(harness, '对一下各平台的收入、转账和实际支出，先别改账。')
+    first, after_skill = provider.calls
+    system = first['system']
+    assert '### 只读：梳理跨平台收入、账户转账与实际支出' in system
+    assert f'read_skill({skill_id})' in system and f'- `{skill_id}` —' in system
+    assert '## 操作顺序' not in system and '读完不等于判完' not in system
+    skill_tool, = (t['function'] for t in first['tools'] if t['function']['name'] == 'read_skill')
+    assert skill_id in skill_tool['parameters']['properties']['skill_id']['enum']
+    result, = _tool_items(frames)
+    assert not result['is_error'] and not result['result']['truncated']
+    loaded = json.loads(after_skill['messages'][-1]['content'])['content']
+    assert loaded.startswith(f'<skill_content name="{skill_id}">')
+    assert '零命中也要复核' in loaded and '多个合理候选不强配' in loaded
+    assert after_skill['system'] == system
+
+
+def test_skill_budget_counts_escaped_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, 'SKILLS_DIR', tmp_path)
+    folder = tmp_path / 'synthetic'
+    folder.mkdir()
+    body = '# 合成技能\n\n' + '<&' * 2_000
+    (folder / 'SKILL.md').write_text(body, encoding='utf-8')
+
+    summary, loaded = skills.load_selected('synthetic')
+    assert summary.label == '合成技能'
+    assert truncate.approx_tokens(body) < skills.MAX_SKILL_TOKENS
+    assert loaded['truncated'] and loaded['tokens'] == truncate.approx_tokens(loaded['content'])
+    assert loaded['tokens'] <= skills.MAX_SKILL_TOKENS
+    assert '&lt;&amp;' in loaded['content'] and '已截断' in loaded['content']
+    assert loaded['content'].endswith('</skill_instructions>\n</skill_content>')
 
 
 def test_context_snapshot_normalizes_page_and_marks_omissions():
@@ -374,8 +410,13 @@ def test_no_provider_request_or_run_when_config_not_ready(harness, monkeypatch, 
     else:
         install_config(monkeypatch, allow_external_processing=external)
     provider = stub(monkeypatch)
+
+    def forbidden_load(_skill_id):
+        pytest.fail('未获外部处理授权时不读取选用的 Skill')
+
+    monkeypatch.setattr(runtime.skills, 'load_selected', forbidden_load)
     with pytest.raises(runtime.AgentcoreError) as exc:
-        asyncio.run(runtime.start_turn(harness, '不应发请求'))
+        asyncio.run(runtime.start_turn(harness, '不应发请求', skill_id='ledger-classify'))
     assert (exc.value.code, exc.value.status) == (code, status)
     assert provider.calls == [] and session.events(harness) == []
 

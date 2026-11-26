@@ -43,8 +43,19 @@ export interface AgentTerminal {
   message: string | null
 }
 
+export interface AgentSkillRef {
+  id: string
+  label: string
+}
+
+export interface AgentSkill extends AgentSkillRef {
+  description: string
+  when_to_use: string
+}
+
 export type AgentChatItem =
-  | { id: number; type: 'user' | 'compaction'; text: string; at?: string }
+  | { id: number; type: 'user'; text: string; skill?: AgentSkillRef; at?: string }
+  | { id: number; type: 'compaction'; text: string; at?: string }
   | { id: number; type: 'assistant'; text: string; calls: AgentToolCall[]; step: number | null; at?: string }
   | { id: number; type: 'tool'; name: string; call_id: string; result: Record<string, unknown> | string | null;
       step: number | null; is_error: boolean; recovered: boolean; at?: string }
@@ -169,6 +180,9 @@ const json = (body: object): RequestInit => ({
 
 // ── 会话 ──────────────────────────────────────────────────────────────────────
 
+export const listSkills = () =>
+  request<{ skills: AgentSkill[] }>('/api/agentcore/skills')
+
 export const listSessions = () =>
   request<{ sessions: AgentSession[] }>('/api/agentcore/sessions')
 
@@ -187,8 +201,8 @@ export const deleteSession = (id: string) =>
 const turnsUrl = (id: string) => `/api/agentcore/sessions/${encodeURIComponent(id)}/turns`
 const runUrl = (sessionId: string, runId: string) => `${turnsUrl(sessionId)}/${encodeURIComponent(runId)}`
 
-export const startTurn = (id: string, text: string, page: Record<string, unknown>) =>
-  request<AgentRun>(turnsUrl(id), json({ text, page }))
+export const startTurn = (id: string, text: string, page: Record<string, unknown>, skillId?: string) =>
+  request<AgentRun>(turnsUrl(id), json({ text, page, skill_id: skillId }))
 
 export const stopTurn = (sessionId: string, runId: string) =>
   request<AgentRun>(`${runUrl(sessionId, runId)}/stop`, json({}))

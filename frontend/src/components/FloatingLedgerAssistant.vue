@@ -24,7 +24,8 @@ const petButton = ref<HTMLButtonElement | null>(null)
 const closeButton = ref<HTMLButtonElement | null>(null)
 
 const {
-  input, detail, currentId, opening, sending, stopping, reconnectText, errorBanner, notice,
+  draft, skills, skillStatus, refreshSkills,
+  detail, currentId, opening, sending, stopping, reconnectText, errorBanner, notice,
   sessions, sessionBusy, run, active, items, isSessionRunning, openSession, newSession, removeCurrent,
   send, stop, init,
 } = useAgentSession({
@@ -371,7 +372,9 @@ onBeforeUnmount(() => {
         :key="currentId ?? 'opening'"
         compact
         :show-header="false"
-        v-model:input="input"
+        v-model:draft="draft"
+        :skills="skills"
+        :skill-status="skillStatus"
         :items="items"
         :run="run"
         :active="active"
@@ -388,6 +391,7 @@ onBeforeUnmount(() => {
         subtitle="明确要求执行时会写入账本；结果以回执为准。"
         @send="send"
         @stop="stop"
+        @refresh-skills="refreshSkills"
       >
         <template #welcome-art>
           <div class="fa-welcome-character"><AtlasMascot :variant="variant" /></div>

@@ -4,11 +4,13 @@
  * 完整页面和浮窗共用列表、当前会话和消息订阅。
  */
 import { computed, ref, shallowRef, watch } from 'vue'
+import type { JSONContent } from '@tiptap/core'
+import { readDraft, textDraft, withoutSkill } from '@/utils/agentDraft'
 import {
-  AgentCoreError, createSession, deleteSession, getSession, listSessions,
+  AgentCoreError, createSession, deleteSession, getSession, listSessions, listSkills,
   renameSession, startTurn, stopTurn, subscribeTurn,
   type AgentChatItem, type AgentEvent, type AgentRun, type AgentSession,
-  type AgentSessionDetail, type AgentTodo,
+  type AgentSessionDetail, type AgentSkill, type AgentTodo,
 } from '@/api/agentCore'
 import { agentLedgerRevision } from '@/utils/agentPageState'
 import { useLibraries } from '@/composables/useLibraries'
@@ -37,7 +39,10 @@ const { revision: libraryRevision, mutating: libraryChanging } = useLibraries()
 function createSessionState() {
   const sessions = ref<AgentSession[]>([])
   const detail = ref<AgentSessionDetail | null>(null)
-  const input = ref('')
+  /** 编辑器草稿：纯文本 + 可选的行内 Skill 节点。 */
+  const draft = shallowRef<JSONContent>(textDraft())
+  const skills = ref<AgentSkill[]>([])
+  const skillStatus = ref<'loading' | 'ready' | 'error'>('loading')
   const opening = ref(true)
   const sending = ref(false)
   const stopping = ref(false)
@@ -50,7 +55,8 @@ function createSessionState() {
   let started = false
   let libraryVersion = 0
   let listVersion = 0
-  const drafts = new Map<string, string>()
+  /** 分会话保存的草稿；只存正文，不带 Skill 选择。 */
+  const drafts = new Map<string, JSONContent>()
 
   const currentId = computed(() => detail.value?.session.id ?? null)
   const run = computed(() => detail.value?.run ?? null)
@@ -109,6 +115,17 @@ function createSessionState() {
     })
   })
 
+  async function refreshSkills() {
+    skillStatus.value = 'loading'
+    try {
+      const next = await listSkills()
+      skills.value = next.skills
+      skillStatus.value = 'ready'
+    } catch {
+      skillStatus.value = 'error'
+    }
+  }
+
   function disconnect() {
     controller?.abort()
     controller = null
@@ -121,8 +138,9 @@ function createSessionState() {
     notice.value = ''
     const before = currentId.value
     if (before !== next.session.id) {
-      if (before) drafts.set(before, input.value)
-      input.value = drafts.get(next.session.id) ?? ''
+      // 切走时只带走正文，Skill 选择不跨会话。
+      if (before) drafts.set(before, withoutSkill(draft.value))
+      draft.value = drafts.get(next.session.id) ?? textDraft()
     }
     detail.value = next
     updateSession({ ...next.session, active_run_id: next.run?.end_id === null ? next.run.id : null })
@@ -206,8 +224,8 @@ function createSessionState() {
       sessions.value = sessions.value.filter(row => row.id !== id)
       drafts.delete(id)
       disconnect()
+      draft.value = textDraft()
       detail.value = null
-      input.value = ''
       localStorage.removeItem('agentcore.session')
       await refreshSessions()
       if (version !== libraryVersion) return
@@ -291,16 +309,18 @@ function createSessionState() {
 
   async function send(pageContext: () => Record<string, unknown>) {
     const view = detail.value
-    const text = input.value.trim()
+    const submitted = draft.value
+    const { text: body, skillId } = readDraft(submitted)
+    const text = body.trim()
     if (!view || !text || active.value || sessionBusy.value) return
     const version = libraryVersion
     sending.value = true
     errorBanner.value = null
     notice.value = ''
     try {
-      const nextRun = await startTurn(view.session.id, text, pageContext())
+      const nextRun = await startTurn(view.session.id, text, pageContext(), skillId)
       if (detail.value !== view) return
-      if (input.value.trim() === text) input.value = ''
+      if (draft.value === submitted) draft.value = textDraft()
       view.run = nextRun
       view.cursor = nextRun.start_id - 1
       view.status = '运行已启动，正在接收步骤…'
@@ -314,8 +334,9 @@ function createSessionState() {
         const next = await getSession(view.session.id).catch(() => null)
         const recovered = next?.run
         if (detail.value === view && next && recovered && recovered.id !== view.run?.id) {
-          if (input.value.trim() === text && next.messages.some(item =>
-            item.type === 'user' && item.id >= recovered.start_id && item.text === text)) input.value = ''
+          if (draft.value === submitted && next.messages.some(item => item.type === 'user'
+            && item.id >= recovered.start_id && (recovered.end_id === null || item.id <= recovered.end_id)
+            && item.text === text && item.skill?.id === skillId)) draft.value = textDraft()
           openSnapshot(next)
           if (recovered.end_id !== null) notifyRunEnd()
           notice.value = '已从会话记录接回最新一轮，没有重发消息。'
@@ -351,6 +372,7 @@ function createSessionState() {
     const version = libraryVersion
     started = true
     opening.value = true
+    void refreshSkills()
     try {
       await refreshSessions()
       if (version !== libraryVersion) return
@@ -376,7 +398,7 @@ function createSessionState() {
     sessions.value = []
     detail.value = null
     drafts.clear()
-    input.value = ''
+    draft.value = textDraft()
     opening.value = true
     sending.value = false
     stopping.value = false
@@ -385,7 +407,8 @@ function createSessionState() {
   }, { flush: 'sync' })
 
   return {
-    sessions, detail, input, opening, sending, stopping, reconnectText, toolResult, sessionBusy,
+    sessions, detail, draft, skills, skillStatus, refreshSkills,
+    opening, sending, stopping, reconnectText, toolResult, sessionBusy,
     errorBanner, notice, currentId, run, active, items, todos,
     formatError, showError, openSession, newSession, rename, removeCurrent, isSessionRunning,
     send, stop, init,

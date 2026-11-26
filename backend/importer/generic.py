@@ -78,14 +78,17 @@ REQUIRED = {
     'split': {'income', 'expense'}, 'column': {'amount', 'direction'}, 'signed': {'amount'},
     'order': {'amount', 'status'}, 'income': {'amount'}, 'neutral': {'amount'}, 'card': {'amount', 'tx_type'},
 }
+# 平台 ID 与 PLATFORM_META 保持一致：同一平台只能有一个 ID。
+# platforms.name 是 UNIQUE，两个 ID 用同一个显示名会在第二次 INSERT 时被
+# OR IGNORE 静默跳过，随后 transactions_raw 的外键找不到平台行而整批回滚。
 SOURCE_NAMES = (
     ('微信零钱通理财通', 'wechat_yield', '微信零钱通／理财通收益'),
-    ('招商银行信用卡', 'cmb_credit', '招商银行信用卡'),
-    ('招商银行储蓄卡', 'cmb_debit', '招商银行储蓄卡'),
-    ('广发银行信用卡', 'cgb_credit', '广发银行信用卡'),
-    ('工商银行', 'icbc', '工商银行'), ('建设银行', 'ccb', '建设银行'),
-    ('淘宝', 'taobao', '淘宝／天猫'), ('京东', 'jd', '京东'), ('美团', 'meituan', '美团'),
-    ('天天基金', 'fund', '天天基金'), ('证券', 'securities', '证券成交'),
+    ('招商银行信用卡', 'bank_cmb_credit', '招商银行信用卡'),
+    ('招商银行储蓄卡', 'bank_cmb_savings', '招商银行储蓄卡'),
+    ('广发银行信用卡', 'bank_cgb_credit', '广发银行信用卡'),
+    ('工商银行', 'bank_icbc', '工商银行'), ('建设银行', 'bank_ccb', '建设银行'),
+    ('淘宝', 'taobao', '淘宝天猫'), ('京东', 'jd', '京东'), ('美团', 'meituan', '美团'),
+    ('天天基金', 'fund', '基金交易'), ('证券', 'broker', '证券成交'),
     ('银行理财', 'bank_wealth_yield', '银行理财收益'),
 )
 PLANS: OrderedDict[str, tuple[float, str, str, Plan]] = OrderedDict()

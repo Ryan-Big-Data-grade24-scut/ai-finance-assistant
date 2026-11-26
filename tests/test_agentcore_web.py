@@ -353,6 +353,65 @@ def test_one_active_run_disconnect_resume_and_terminal_retrieval(app, agentcore_
     asyncio.run(main())
 
 
+def test_selected_skill_loads_before_task_and_stays_out_of_user_text(app, agentcore_paths, agentcore_evidence, monkeypatch):
+    requests = []
+
+    async def model(_cfg, **request):
+        requests.append(request)
+        return adapter.ModelReply(text='合成验证完成')
+
+    monkeypatch.setattr(adapter, 'complete', model)
+
+    async def main():
+        async with web(app) as client:
+            evidence = Evidence(agentcore_evidence, agentcore_paths, '技能_显式加载与普通对话')
+            catalog = (await body(client.get(f'{AC}/skills')))['skills']
+            skill_id = 'ledger-classify'
+            skill, = (s for s in catalog if s['id'] == skill_id)
+            assert skill['label'] == '自动分类与参考历史'
+            assert all(set(s) == {'id', 'label', 'description', 'when_to_use'} for s in catalog)
+            text = '示例：按现有分类习惯给我建议，不修改账本。\n分两点回答。'
+            url = await create(client, '显式技能合成验证')
+            rejected = await body(client.post(f'{url}/turns', json={'text': text, 'skill_id': '../missing'}), 404)
+            assert rejected['code'] == 'SKILL_NOT_FOUND' and not requests
+            assert rows('SELECT * FROM agentcore_run') == []
+            evidence.step('GET /skills；POST 不存在的 skill_id', '只提供可发现的摘要，过期 ID 不开启运行。',
+                          '目录没有正文和路径；404 SKILL_NOT_FOUND；没有运行或模型请求。')
+
+            run = await body(client.post(f'{url}/turns', json={'text': text, 'skill_id': skill_id}), 202)
+            frames = await events(client, f"{url}/turns/{run['id']}")
+            detail = await body(client.get(url))
+            check_detail(detail, run, frames)
+            user, = (m for m in detail['messages'] if m['type'] == 'user')
+            assert (user['text'], user['skill']) == (text, {'id': skill_id, 'label': skill['label']})
+            assert results(frames) == {}
+            first, = requests
+            assert first['messages'][-1] == {'role': 'user', 'content': text}
+            content = first['messages'][-2]['content']
+            assert '<turn_context>' in content and f'<skill_content name="{skill_id}">' in content
+            assert '## 操作顺序' in content and '## 操作顺序' not in first['system']
+            evidence.step('带独立 skill_id 发送；订阅 SSE 并重读会话', '区分用户正文、技能正文与历史标签。',
+                          '首个任务请求已有技能正文，用户正文原样；SSE 与历史都保留技能标签，无伪造工具事件。')
+
+            plain_text = '下一轮：这条消息不选技能。'
+            plain = await body(client.post(f'{url}/turns', json={'text': plain_text}), 202)
+            tail = await events(client, f"{url}/turns/{plain['id']}")
+            next_user, = (f['item'] for f in tail if f.get('item', {}).get('type') == 'user')
+            assert next_user['text'] == plain_text and 'skill' not in next_user
+            assert len(requests) == 2
+            second = requests[1]
+            assert second['system'] == first['system'] and second['tools'] == first['tools']
+            assert second['messages'][-1] == {'role': 'user', 'content': plain_text}
+            assert all('<skill_content' not in m['content'] for m in second['messages'])
+            assert rows('SELECT * FROM transactions_raw') == [] and rows('SELECT * FROM ledger2_tx') == []
+            evidence.step('同一会话不选技能再发送', '技能仅作用本轮，不影响稳定前缀或账本。',
+                          '无标签与技能正文，系统文本和工具不变，原始流水与 V2 摆放未写入。')
+            evidence.finish(await body(client.get(TREE)), [(run['id'], '显式选择'), (plain['id'], '普通请求')],
+                            artifacts={'技能目录.json': catalog, '选中与普通_SSE.json': frames + tail})
+
+    asyncio.run(main())
+
+
 def test_stop_drains_the_inflight_write_without_dispatching_tail(app, agentcore_paths, agentcore_evidence, monkeypatch):
     async def main():
         started = asyncio.Event()

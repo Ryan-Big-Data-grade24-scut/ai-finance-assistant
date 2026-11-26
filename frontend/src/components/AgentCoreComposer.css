@@ -1,0 +1,36 @@
+.ac-editor-wrap { position: relative; flex: 1; width: 100%; min-width: 0; }
+.ac-editor-wrap :deep(.ac-editor) {
+  box-sizing: border-box; min-height: 3.4em; max-height: 144px; overflow: auto;
+  padding: 4px 5px; outline: none; color: var(--atlas-ink); font-size: 15px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ac-editor-wrap :deep(.ac-editor p) { margin: 0; }
+.ac-editor-placeholder {
+  position: absolute; inset: 4px 5px auto; color: var(--atlas-muted); pointer-events: none;
+  font-size: 15px; line-height: 1.5;
+}
+.ac-editor-wrap :deep(.ac-skill-chip) {
+  display: inline; padding: 2px 6px; border: 1px solid var(--atlas-line); border-radius: 6px;
+  color: var(--atlas-strong); background: var(--atlas-tint); font-weight: 650; font-size: .88em;
+  box-decoration-break: clone;
+}
+.ac-skill-menu {
+  position: fixed; z-index: 121; overflow: auto; overscroll-behavior: contain;
+  padding: 5px; border: 1px solid var(--atlas-line); border-radius: 12px;
+  background: var(--atlas-paper); color: var(--atlas-ink); box-shadow: 0 12px 28px rgb(23 54 44 / 16%);
+}
+.ac-skill-heading { padding: 5px 8px; color: var(--atlas-muted); font-size: 12px; }
+.ac-skill-heading kbd { font: inherit; font-weight: 650; }
+.ac-skill-option {
+  display: flex; align-items: flex-start; gap: 8px; padding: 7px 8px; border-radius: 7px;
+  cursor: pointer; font-size: 13px; overflow-wrap: anywhere;
+}
+.ac-skill-option[aria-selected='true'] { background: var(--atlas-tint); color: var(--atlas-strong); }
+.ac-skill-option > svg { width: 16px; height: 16px; margin-top: 2px; flex: none; color: var(--atlas-accent); }
+.ac-skill-option small { display: block; margin-top: 2px; color: var(--atlas-muted); font-size: 12px; }
+.ac-skill-menu p { margin: 4px 8px 6px; font-size: 13px; color: var(--atlas-muted); }
+.ac-skill-menu button { cursor: pointer; color: var(--atlas-accent); }
+
+@media (max-width: 620px) {
+  .ac-editor-wrap :deep(.ac-editor), .ac-editor-placeholder { font-size: 16px; }
+}

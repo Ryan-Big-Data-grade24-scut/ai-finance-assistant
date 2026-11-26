@@ -169,15 +169,15 @@
   background: var(--atlas-paper); box-shadow: 0 3px 10px rgb(23 54 44 / 5%);
 }
 .ac-composer-box:focus-within { border-color: var(--atlas-accent); }
-.ac-composer textarea {
-  display: block; width: 100%; min-width: 0; resize: none; border: 0; padding: 4px 5px;
-  background: transparent; color: var(--atlas-ink); font-size: 15px; line-height: 1.5; outline: none;
+.ac-history-skill {
+  display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; padding: 1px 6px;
+  border-radius: 6px; background: var(--atlas-paper); color: var(--atlas-strong); font-size: .83em;
 }
-.ac-composer textarea:focus-visible { outline: none; }
-.ac-composer textarea::placeholder { color: var(--atlas-muted); }
+.ac-history-skill svg { width: 13px; height: 13px; }
 .ac-composer-actions { display: flex; align-items: center; gap: 8px; padding: 2px 0 0 5px; }
-.ac-keys, .ac-composer-note { color: var(--atlas-muted); font-size: 11px; }
-.ac-keys kbd { font: inherit; font-weight: 650; }
+.ac-keys, .ac-composer-note, .ac-skill-hint { color: var(--atlas-muted); font-size: 11px; }
+.ac-keys kbd, .ac-skill-hint kbd { font: inherit; font-weight: 650; }
+.ac-skill-hint { white-space: nowrap; }
 .ac-composer-note { max-width: 720px; margin: 8px auto 0; text-align: center; line-height: 1.45; }
 .ac-send {
   margin-left: auto; min-height: 36px; padding: 6px 12px; flex: none;
@@ -201,7 +201,6 @@
 /* 浮窗把输入和主要操作排在同一行，避免下方留出空白按钮栏。 */
 .ac-chat--compact .ac-composer { padding: 9px 11px 11px; border-top: 1px solid var(--atlas-line); }
 .ac-chat--compact .ac-composer-box { display: flex; align-items: flex-end; gap: 6px; padding: 6px; }
-.ac-chat--compact .ac-composer textarea { align-self: center; padding: 4px 6px; }
 .ac-chat--compact .ac-composer-actions { flex: none; padding: 0; }
 .ac-chat--compact .ac-keys { display: none; }
 .ac-chat--compact .ac-send { min-width: 68px; min-height: 40px; border: 1px solid transparent; border-radius: 9px; }
@@ -236,6 +235,5 @@
   .ac-constellation { min-height: 108px; }
   .ac-empty-mark { width: 48px; height: 48px; font-size: 28px; border-radius: 15px; }
   .ac-suggestions { margin-top: 12px; }
-  .ac-composer textarea { font-size: 16px; }
   .ac-keys { display: none; }
 }

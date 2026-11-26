@@ -97,10 +97,19 @@ def ensure_platform(conn, platform_id: str, source: str | None = None) -> None:
     """导入时自动注册平台。
 
     不单独做 seed.sql —— 加一个新平台不应该需要改两处地方。
+
+    platforms.name 是 UNIQUE：同名但不同 ID 的平台如果直接 INSERT OR IGNORE，
+    第二行会被静默跳过，随后 transactions_raw 的外键找不到平台行而整批回滚。
+    所以这里先看名字是否已被别的 ID 占用，占用了就给新 ID 加后缀。
     """
     name, kind, adapter = PLATFORM_META.get(
         platform_id, (source or platform_id, "other", "generic_csv")
     )
+    owner = conn.execute(
+        "SELECT id FROM platforms WHERE name=? AND id<>?", (name, platform_id)
+    ).fetchone()
+    if owner is not None:
+        name = f"{name}（{platform_id}）"
     conn.execute(
         "INSERT OR IGNORE INTO platforms (id, name, kind, adapter) "
         "VALUES (?,?,?,?)",
@@ -250,11 +259,31 @@ def import_rows(
             )
         with (db.transaction(conn) if own else nullcontext(conn)) as c:
             ensure_platform(c, pid, name)
+            # 跨导入器的去重：同一张银行账单可能被专用解析器和通用解析器各读一次，
+            # 两边的 source 不同、dedupe_key 也就不同，于是同一笔流水被插入两次。
+            # 平台内的可靠交易标识（单号 + 金额 + 方向）能跨来源对上。
+            # 只对银行平台启用：钱包类平台（如支付宝小荷包）多个账户共用订单号空间，
+            # 靠 wallet_domain 分域，跨账户撞号是正常业务，不能按单号去重。
+            # 没有单号的行仍然只按 dedupe_key 去重，避免误吞真实的两笔。
+            cross_source = pid.startswith('bank')
+            seen_tx: set[tuple[str, float, str]] = set()
+            if cross_source and any(row.tx_no for row in rows):
+                for existing in c.execute(
+                    "SELECT tx_no, amount, direction FROM transactions_raw "
+                    "WHERE platform_id=? AND tx_no<>''", (pid,)
+                ):
+                    seen_tx.add((existing[0], float(existing[1]), existing[2]))
             for i, row in enumerate(rows, 1):
+                tx_key = (row.tx_no, float(row.amount), row.direction) if cross_source and row.tx_no else None
+                if tx_key is not None and tx_key in seen_tx:
+                    skipped += 1
+                    continue
                 try:
                     cur = c.execute(INSERT_SQL, row.to_sql_tuple(batch_id))
                     if cur.rowcount == 1:
                         inserted += 1
+                        if tx_key is not None:
+                            seen_tx.add(tx_key)
                     else:
                         skipped += 1
                 except Exception as exc:
