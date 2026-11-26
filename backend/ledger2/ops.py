@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from uuid import uuid4
 
 from . import facts, invariants
@@ -21,6 +23,22 @@ from .errors import LedgerError
 from .model import GroupRef, TxRef
 from .store import root_id
 from .tx import atomic
+
+_RUN_ID = ContextVar('ledger2_run_id', default=None)
+
+
+@contextmanager
+def history_run(run_id: str | None):
+    token = _RUN_ID.set(run_id)
+    try:
+        yield
+    finally:
+        _RUN_ID.reset(token)
+
+
+def _record_event(conn, seq: int, kind: str) -> None:
+    conn.execute('INSERT INTO ledger2_replay_event(op_seq, kind, run_id) VALUES(?,?,?)',
+                 (seq, kind, _RUN_ID.get()))
 
 # ── 读表小工具 ──────────────────────────────────────────────────────────────
 
@@ -447,11 +465,12 @@ def _run(conn, prims: list[dict], name: str) -> None:
         for p in prims:
             _apply(conn, p)
         invariants.check(conn)
-        conn.execute(
+        logged = conn.execute(
             "INSERT INTO ledger2_op_log(op_json, undo_json, state) VALUES(?, ?, 'applied')",
             (json.dumps({'name': name, 'prims': prims}, ensure_ascii=False),
              json.dumps(undo, ensure_ascii=False)),
         )
+        _record_event(conn, logged.lastrowid, 'apply')
 
 
 # ── 构造原语 ────────────────────────────────────────────────────────────────
@@ -1148,32 +1167,34 @@ def update_manual(conn, tx_id: int, title: str | None = None, note: str | None =
 
 def undo(conn) -> str:
     """撤销最后一次操作：执行它的逆原语序列。"""
-    row = conn.execute(
-        "SELECT * FROM ledger2_op_log WHERE state='applied' ORDER BY seq DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        raise LedgerError('NOTHING_TO_UNDO', '没有可以撤销的操作。')
     with atomic(conn):
+        row = conn.execute(
+            "SELECT * FROM ledger2_op_log WHERE state='applied' ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            raise LedgerError('NOTHING_TO_UNDO', '没有可以撤销的操作。')
         for p in json.loads(row['undo_json']):
             _apply(conn, p)
         invariants.check(conn)
         conn.execute("UPDATE ledger2_op_log SET state='undone' WHERE seq=?", (row['seq'],))
+        _record_event(conn, row['seq'], 'undo')
     return json.loads(row['op_json'])['name']
 
 
 def redo(conn) -> str:
     """重做：把最后一次撤销的操作再执行一遍。"""
-    row = conn.execute(
-        "SELECT * FROM ledger2_op_log WHERE state='undone' ORDER BY seq ASC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        raise LedgerError('NOTHING_TO_REDO', '没有可以重做的操作。')
-    op = json.loads(row['op_json'])
     with atomic(conn):
+        row = conn.execute(
+            "SELECT * FROM ledger2_op_log WHERE state='undone' ORDER BY seq ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            raise LedgerError('NOTHING_TO_REDO', '没有可以重做的操作。')
+        op = json.loads(row['op_json'])
         for p in op['prims']:
             _apply(conn, p)
         invariants.check(conn)
         conn.execute("UPDATE ledger2_op_log SET state='applied' WHERE seq=?", (row['seq'],))
+        _record_event(conn, row['seq'], 'redo')
     return op['name']
 
 

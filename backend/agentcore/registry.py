@@ -7,6 +7,7 @@ from typing import Callable
 
 from jsonschema import Draft202012Validator, validators
 
+from backend.ai import privacy
 from backend.ledger2.errors import LedgerError
 
 from . import import_tool, ledger_tools, memory, skills, sql_tool, truncate
@@ -20,6 +21,7 @@ class ToolContext:
     session_id: str | None = None
     # 运行器根据轮次和调用位置生成，不能由模型提供。
     call_key: str | None = None
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -126,12 +128,13 @@ _register(ToolSpec(
     name='finance_query_transactions',
     description=(
         '用一条只读 SQLite SELECT/WITH 查流水字段、筛选候选、聚合或对比；同一 SQL 面覆盖多种问法。'
-        'transactions_raw 是全字段原始凭证（包含逻辑删除前留下的记录）：'
+        'transactions_raw 是流水凭证的查询快照（包含逻辑删除前留下的记录）：'
         'id, source, platform_id, tx_time, direction, amount(元), pay_method, counterparty, item, tx_type, '
         'status, tx_no, merchant_no, remark, date, month, year, weekday, hour, dedupe_key, raw_json, imported_at, import_batch。'
         'agentcore_tx 是排除逻辑删除的分析口径：tx_id, date, month, direction(收入/支出/中性), amount_cents(整数分), '
         'source, platform_id, category(人工分类优先，再平台原分类，最后其他), item, counterparty, status, initialized(1=已进 V2)。'
-        '按 id=tx_id 可取原始详情。只能读这两张流水快照表；30 秒、500 行、60KB，超出用聚合或排序分页。'
+        '按 id=tx_id 可取凭证详情。文本可能已按隐私设置替换为别名；请用可见别名查询。'
+        '只能读这两张流水快照表；30 秒、500 行、60KB，超出用聚合或排序分页。'
         'coverage 是全集日期覆盖，不是 WHERE 命中期；row_count 是结果行数。问 V2 净额用 finance_ledger_read，不能拿流水求和替代。'
     ),
     schema=_object({'sql': _string('一条 SQLite SELECT/WITH。', nonempty=True)}, 'sql'),
@@ -162,7 +165,7 @@ _register(ToolSpec(
         '连续操作根据上步回执和重读决定，不猜 id；undo/redo 是全账本栈，带 expected_seq 可确保目标正是指定那一步。'
     ),
     schema=_LEDGER_APPLY,
-    handler=lambda args, ctx: ledger_tools.apply(args, call_key=ctx.call_key),
+    handler=lambda args, ctx: ledger_tools.apply(args, call_key=ctx.call_key, run_id=ctx.run_id),
 ))
 
 _register(ToolSpec(
@@ -268,13 +271,16 @@ def execute(name: str, args: dict, ctx: ToolContext, *, scope: str = 'all') -> t
         message = invalid.message if invalid.validator == 'required' else f'不符合 schema 的 {invalid.validator} 约束。'
         return truncate.error_result(f'{field}：{message}', code='BAD_ARGUMENTS'), True
     try:
+        policy = privacy.current()
+        if name in {'finance_ledger_read', 'finance_ledger_apply'}:
+            args = policy.ledger_refs(args)
         result = spec.handler(args, ctx)
     except (ToolInputError, LedgerError, import_tool.ImportError_, sql_tool.SqlRejected) as exc:
-        return truncate.error_result(exc.message, code=exc.code), True
+        return truncate.error_result(policy.text(exc.message), code=exc.code), True
     except Exception:  # 兜底：内部错误不冒充领域拒绝，也不把本地异常详情发给模型。
         log.exception('AgentCore tool failed: %s', name)
         return truncate.error_result('工具执行异常；请重新读取状态，不要猜测结果。', code='TOOL_CRASH'), True
-    return truncate.ok_result(result), False
+    return truncate.ok_result(policy.with_candidates(result).redact(result, data_keys=True)), False
 
 
 def recover(name: str, args: dict, ctx: ToolContext) -> dict | None:

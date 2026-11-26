@@ -16,7 +16,9 @@
  * 多个对象取它们可见子树的并集包围盒。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import type { Ledger2Group, Ledger2Node, Ledger2Tx } from '@/api/ledger2'
+import type { Ledger2Group, Ledger2Node, Ledger2ReplayItem, Ledger2ReplayStep, Ledger2Tx } from '@/api/ledger2'
+import type { ReplayPhase } from '@/composables/useLedger2Replay'
+import { replayScene, replaySlots } from '@/utils/ledger2ReplayScene'
 
 type Kind = 'node' | 'group' | 'tx'
 type Role = 'primary' | 'mirror'
@@ -43,6 +45,7 @@ interface RNode extends GNode { o: number }
 /** 布局前的条目：还没有位置和颜色。 */
 type GItem = Omit<GNode, 'depth' | 'x' | 'y' | 'r' | 'hue'>
 interface GEdge { id: string; from: string; to: string }
+interface Graph { nodes: GNode[]; edges: GEdge[] }
 interface Pose { x: number; y: number; r: number; o: number }
 
 const props = defineProps<{
@@ -51,6 +54,9 @@ const props = defineProps<{
   selected: Set<string>
   dragging: Set<string> | null
   dropTarget: string
+  readOnly?: boolean
+  replayStep?: Ledger2ReplayStep | null
+  replayPhase?: ReplayPhase
 }>()
 const emit = defineEmits<{
   (e: 'item-down', ev: PointerEvent, key: string): void
@@ -116,21 +122,23 @@ const radiusOfItem = (it: GItem): number => {
 interface Box { x0: number; y0: number; x1: number; y1: number }
 
 /** 一条标签的宽度（标题 / 金额两行取宽者）。 */
-function labelWidth(n: GNode): number {
+function labelWidth(n: GNode, replay = false): number {
+  if (replay) return textW(clipText(n.name, 130), 16)
   const name = clipText(n.name)
   return n.kind === 'tx'
     ? Math.max(textW(name), textW(txIE(n)))
     : Math.max(textW(name, 11.5), textW(valueLine(n), 10))
 }
 /** 节点连同标签一起占的矩形（世界坐标）。标签永远在 x 的正侧或负侧单边伸出。 */
-function labelBox(n: GNode): Box {
+function labelBox(n: GNode, replay = false): Box {
   if (n.key === 'root') {
-    const half = Math.max(textW(n.name, 14), textW(`支出 −¥${money(n.e)} · 收入 +¥${money(n.i)}`, 11)) / 2 + 12
+    const half = replay ? Math.max(n.r, textW(n.name, 16) / 2) + 12
+      : Math.max(textW(n.name, 14), textW(`支出 −¥${money(n.e)} · 收入 +¥${money(n.i)}`, 11)) / 2 + 12
     return { x0: n.x - half, x1: n.x + half, y0: n.y - n.r - 16, y1: n.y + 78 }
   }
   const gap = 12
   const radius = n.r + (n.kind === 'tx' ? 6 : 14)
-  const w = labelWidth(n) + gap + 12
+  const w = labelWidth(n, replay) + gap + 12
   return n.x >= 0
     ? { x0: n.x - radius, x1: n.x + n.r + w, y0: n.y - Math.max(radius, 18), y1: n.y + Math.max(radius, 24) }
     : { x0: n.x - n.r - w, x1: n.x + radius, y0: n.y - Math.max(radius, 18), y1: n.y + Math.max(radius, 24) }
@@ -138,7 +146,7 @@ function labelBox(n: GNode): Box {
 
 /** Reserve each label and halo before placing the next node. Moving outward keeps
  *  every branch in its own sector and terminates beyond the occupied bounds. */
-function separateLabels(nodes: GNode[]) {
+function separateLabels(nodes: GNode[], replay = false) {
   const cells = new Map<string, Box[]>()
   const size = 128
   const keysFor = (b: Box) => {
@@ -150,12 +158,12 @@ function separateLabels(nodes: GNode[]) {
   }
   for (const node of [...nodes].sort((a, b) => a.depth - b.depth)) {
     const angle = Math.atan2(node.y, node.x)
-    let box = labelBox(node)
+    let box = labelBox(node, replay)
     while (keysFor(box).some(key => cells.get(key)?.some(other =>
       box.x0 < other.x1 && box.x1 > other.x0 && box.y0 < other.y1 && box.y1 > other.y0))) {
       node.x += Math.cos(angle) * 24
       node.y += Math.sin(angle) * 24
-      box = labelBox(node)
+      box = labelBox(node, replay)
     }
     for (const key of keysFor(box)) {
       const entries = cells.get(key) ?? []
@@ -167,11 +175,9 @@ function separateLabels(nodes: GNode[]) {
 
 // ── 布局：分支独立扇区 + 完整标签占位 ─────────────────────────────
 
-const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
-  const nodes: GNode[] = []
-  const edges: GEdge[] = []
+const liveGraph = computed<Graph>(() => {
   const t = props.tree
-  if (!t) return { nodes, edges }
+  if (!t) return { nodes: [], edges: [] }
 
   const nodeItem = (n: Ledger2Node): GItem => ({
     key: n.id, kind: 'node', name: n.name, note: n.note, e: n.e, i: n.i, count: n.count,
@@ -208,6 +214,12 @@ const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
     return n.children.map(c => (c.type === 'node' ? nodeItem(c) : c.type === 'group' ? groupItem(c) : txItem(c)))
   }
 
+  return layoutStars(nodeItem(t), item => childrenOf(item.key, item.kind))
+})
+
+function layoutStars(root: GItem, childrenOf: (item: GItem) => GItem[], replay = false): Graph {
+  const nodes: GNode[] = []
+  const edges: GEdge[] = []
   // 楔形按**可见叶数**分，而不是按交易数：d3 collapsible tree 的做法。
   // 这样展开一个节点会撑大它的楔形、把同一圈的邻居挤开；折叠后又把楔形还回去。
   const leavesCache = new Map<string, number>()
@@ -215,7 +227,7 @@ const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
     const hit = leavesCache.get(it.key)
     if (hit !== undefined) return hit
     leavesCache.set(it.key, 1)          // 防环
-    const kids = childrenOf(it.key, it.kind)
+    const kids = childrenOf(it)
     let n = 1
     if (kids.length) {
       n = 0
@@ -227,17 +239,17 @@ const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
   // All descendants share their top-level branch's angular sector. Weighting
   // by visible leaves reserves space for expanded groups before any points move.
   const palette = [204, 163, 38, 278, 338, 186, 92, 24]
-  const leafCount = leavesOf(nodeItem(t))
-  const ringStep = Math.max(180, Math.min(420, Math.sqrt(leafCount) * 31))
+  const leafCount = leavesOf(root)
+  const ringStep = replay ? 138 : Math.max(180, Math.min(420, Math.sqrt(leafCount) * 31))
   function layout(it: GItem, depth: number, start: number, end: number, hue: number) {
     const angle = (start + end) / 2
-    const radius = depth === 0 ? 0 : 240 + (depth - 1) * ringStep
+    const radius = depth === 0 ? 0 : (replay ? 165 : 240) + (depth - 1) * ringStep
     const node: GNode = {
       ...it, depth, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius,
       r: radiusOfItem(it), hue,
     }
     nodes.push(node)
-    const kids = childrenOf(it.key, it.kind)
+    const kids = childrenOf(it)
     const weight = (child: GItem) => depth === 0 ? Math.sqrt(leavesOf(child)) : leavesOf(child)
     const total = kids.reduce((sum, child) => sum + weight(child), 0)
     let cursor = start
@@ -248,10 +260,61 @@ const graph = computed<{ nodes: GNode[]; edges: GEdge[] }>(() => {
       cursor += span
     }
   }
-  layout(nodeItem(t), 0, -Math.PI / 2, Math.PI * 1.5, 204)
-  separateLabels(nodes)
+  layout(root, 0, -Math.PI / 2, Math.PI * 1.5, 204)
+  separateLabels(nodes, replay)
   return { nodes, edges }
+}
+
+const replayPlan = computed(() => {
+  if (!props.replayStep) return null
+  const { before, after, changed, targets, bundles } = replayScene(props.replayStep)
+  const { slots, beforeKeys, afterKeys } = replaySlots(before, after)
+  const virtualRoot: GItem = { key: '@replay', kind: 'node', name: '', note: '', e: 0, i: 0, count: 0 }
+  const branches = new Map<string, GItem[]>()
+  for (const [key, { item, parent }] of slots) {
+    const owner = parent ?? virtualRoot.key
+    const children = branches.get(owner) ?? []
+    const role = item.kind === 'tx' ? (item.ref.startsWith('txm:') ? 'mirror' : 'primary') : undefined
+    children.push({ key, kind: item.kind, name: item.name, note: item.note, e: 0, i: 0, count: 0, role })
+    branches.set(owner, children)
+  }
+  const roots = branches.get(virtualRoot.key) ?? []
+  const layout = layoutStars(roots.length === 1 ? roots[0] : virtualRoot, item => branches.get(item.key) ?? [], true)
+  const posesBySlot = new Map(layout.nodes.map(node => [node.key, node]))
+
+  function snapshot(items: Map<string, Ledger2ReplayItem>, keys: Map<string, string>): Graph {
+    const nodes: GNode[] = []
+    const edges: GEdge[] = []
+    for (const item of items.values()) {
+      const placement = posesBySlot.get(keys.get(item.ref)!)!
+      nodes.push({ ...placement, key: item.ref, name: item.name, note: item.note })
+      if (item.parent && items.has(item.parent)) edges.push({ id: `${item.parent}->${item.ref}`, from: item.parent, to: item.ref })
+    }
+    return { nodes, edges }
+  }
+
+  const revealed = new Map(before)
+  const revealedKeys = new Map(beforeKeys)
+  for (const [ref, item] of after) {
+    if (revealed.has(ref)) continue
+    revealed.set(ref, item)
+    revealedKeys.set(ref, afterKeys.get(ref)!)
+  }
+  const completed = new Map(after)
+  const completedKeys = new Map(afterKeys)
+  for (const [ref, item] of before) {
+    if (completed.has(ref) || changed.has(ref)) continue
+    completed.set(ref, item)
+    completedKeys.set(ref, beforeKeys.get(ref)!)
+  }
+  const frames = {
+    source: snapshot(before, beforeKeys), target: snapshot(revealed, revealedKeys),
+    result: snapshot(completed, completedKeys),
+  }
+  return { frames, slots: layout.nodes.filter(node => node.key !== virtualRoot.key), changed, targets, bundles }
 })
+
+const graph = computed(() => replayPlan.value?.frames[props.replayPhase ?? 'source'] ?? liveGraph.value)
 
 // ── 动画：目标位置 → 当前位姿（d3 collapsible tree 的套路）─────────────────
 
@@ -302,13 +365,21 @@ function rebuild(next: { nodes: GNode[]; edges: GEdge[] }) {
   const target = new Map(next.nodes.map(n => [n.key, n]))
   const parent = new Map<string, string>()
   for (const e of next.edges) parent.set(e.to, e.from)
+  if (props.replayStep && !prevMeta.size) {
+    for (const node of next.nodes) poses.set(node.key, { x: node.x, y: node.y, r: node.r, o: 1 })
+    prevParent = parent
+    prevMeta = target
+    return
+  }
 
   const tracks = new Map<string, { from: Pose; to: Pose }>()
   for (const n of next.nodes) {
     const cur = poses.get(n.key)
     const to: Pose = { x: n.x, y: n.y, r: n.r, o: 1 }
     if (cur) {
-      tracks.set(n.key, { from: { ...cur }, to })
+      if (!props.replayStep || cur.x !== to.x || cur.y !== to.y || cur.r !== to.r || cur.o !== 1) {
+        tracks.set(n.key, { from: { ...cur }, to })
+      }
     } else {
       // 新出现的节点（展开 / 首次加载）：从父节点此刻的位置长出来
       const pk = parent.get(n.key) ?? prevParent.get(n.key) ?? ''
@@ -333,6 +404,7 @@ function rebuild(next: { nodes: GNode[]; edges: GEdge[] }) {
 
   prevParent = parent
   prevMeta = new Map(next.nodes.map(n => [n.key, n]))
+  if (!tracks.size && !ghosts.size) return
   anim = { t0: performance.now(), dur: 420, tracks, ghosts, final: next.nodes }
   startAnimation()
 }
@@ -388,7 +460,19 @@ function pathOf(a: Pose, b: Pose): string {
 
 const txTotal = computed(() => graph.value.nodes.filter(n => n.kind === 'tx').length)
 const hoverKey = ref('')
-const activeKey = computed(() => hoverKey.value || (props.selected.size === 1 ? [...props.selected][0] : ''))
+const activeKey = computed(() => hoverKey.value || (!props.replayStep && props.selected.size === 1 ? [...props.selected][0] : ''))
+const replayEdges = computed(() => {
+  const plan = replayPlan.value
+  if (!plan) return new Set<string>()
+  return new Set(graph.value.edges.filter(edge => plan.changed.has(edge.to) || plan.targets.has(edge.to)).map(edge => edge.id))
+})
+const replayCaption = computed(() => {
+  if (!replayPlan.value?.changed.size) return '本步暂无可显示的节点变化'
+  if (props.replayPhase === 'target') return '目标位置 · 青色星点是目标分组'
+  if (props.replayPhase === 'result') return '操作结果 · 连线显示新的归属'
+  return '原位置 · 沿连线可查看父节点'
+})
+const replayMembersOpen = ref(false)
 const relatedEdges = computed(() => {
   const result = new Set<string>()
   const parent = new Map(graph.value.edges.map(edge => [edge.to, edge]))
@@ -410,7 +494,7 @@ const relatedNodes = computed(() => {
 })
 /** 金额是认交易的唯一依据：一律显示。名字只在放得下时显示（少了 / 放大了 / 选中的）。 */
 const showTxName = (key: string) =>
-  props.selected.has(key) || hoverKey.value === key || txTotal.value <= 24 || zoom.value >= 2.2
+  !!props.replayStep || props.selected.has(key) || hoverKey.value === key || txTotal.value <= 24 || zoom.value >= 2.2
 const isOpen = (n: { key: string; kind: Kind }) => props.expanded.has(n.kind === 'group' ? n.key.slice(2) : n.key)
 
 // ── 视野：缩放 / 平移 / normal-to ─────────────────────────────────────────
@@ -496,11 +580,26 @@ function zoomBy(f: number) {
   zoom.value = next
 }
 function resetCamera() {
-  focusOn('root')
+  if (replayPlan.value) fitReplay()
+  else focusOn('root')
 }
 
 const VIEW_W = 1800
 const VIEW_H = 1000
+
+function fitReplay() {
+  const slots = replayPlan.value?.slots ?? []
+  if (!slots.length) return
+  const box = slots.map(node => labelBox(node, true)).reduce((bounds, item) => ({
+    x0: Math.min(bounds.x0, item.x0), x1: Math.max(bounds.x1, item.x1),
+    y0: Math.min(bounds.y0, item.y0), y1: Math.max(bounds.y1, item.y1),
+  }))
+  cancelCamera()
+  zoom.value = clamp(Math.min(VIEW_W / (box.x1 - box.x0 + 170), VIEW_H / (box.y1 - box.y0 + 140)), ZOOM_MIN, 2.5)
+  pan.value = { x: -zoom.value * (box.x0 + box.x1) / 2, y: -zoom.value * (box.y0 + box.y1) / 2 }
+}
+
+watch(replayPlan, fitReplay, { immediate: true })
 
 function childMap(): Map<string, string[]> {
   const kids = new Map<string, string[]>()
@@ -589,12 +688,13 @@ function normalTo(keys: Iterable<string>) {
 
 // 选择一变（单击、框选、筛选命中）就取景到整个选区。
 watch(() => props.selected, next => {
-  if (next.size) normalTo(next)
+  if (!props.replayStep && next.size) normalTo(next)
 }, { immediate: true })
 
 // 展开/折叠任一节点时，取景到「已选择 ∪ 刚变动的那个」；没有选择就只看变动项。
 let lastExpanded = new Set(props.expanded)
 watch(() => props.expanded, next => {
+  if (props.replayStep) return
   const changed: string[] = []
   for (const id of next) if (!lastExpanded.has(id)) changed.push(id)
   for (const id of lastExpanded) if (!next.has(id)) changed.push(id)
@@ -632,7 +732,7 @@ function bgDown(e: PointerEvent) {
     window.addEventListener('pointercancel', bgUp)
     return
   }
-  if (e.button !== 0) return
+  if (e.button !== 0 || props.readOnly) return
   cancelCamera()
   const p = svgPoint(e)
   bg = {
@@ -714,7 +814,11 @@ const bandStyle = computed(() => {
 function nodeDown(e: PointerEvent, n: GNode) {
   if (e.button !== 0) return
   e.stopPropagation()
-  emit('item-down', e, n.key)
+  if (!props.readOnly) emit('item-down', e, n.key)
+}
+
+function toggleNode(key: string) {
+  if (!props.readOnly) emit('toggle', key)
 }
 
 onBeforeUnmount(() => {
@@ -728,7 +832,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="l2g" data-testid="graph">
+  <div class="l2g" :class="{ 'is-replaying': replayStep }" data-testid="graph" :data-replay-phase="replayStep ? replayPhase : undefined">
     <svg ref="svgEl" class="l2g-svg" viewBox="-900 -500 1800 1000"
          @pointerdown="bgDown" @wheel.prevent="onWheel"
          @mousedown.middle.prevent @auxclick.prevent>
@@ -747,14 +851,15 @@ onBeforeUnmount(() => {
       <g ref="sceneEl" :transform="`translate(${pan.x} ${pan.y}) scale(${zoom})`">
         <circle r="230" fill="url(#l2gCore)" pointer-events="none" />
         <g class="l2g-edges" pointer-events="none">
-          <path v-for="e in renderEdges" :key="e.id" :d="pathOf(e.a, e.b)" :opacity="e.o"
-                :class="{ 'is-related': relatedEdges.has(e.id), 'is-muted': activeKey && !relatedEdges.has(e.id) }" />
+          <path v-for="e in renderEdges" :key="e.id" :d="pathOf(e.a, e.b)" :opacity="e.o" :data-edge="e.id"
+                :class="{ 'is-related': relatedEdges.has(e.id) || replayEdges.has(e.id), 'is-muted': activeKey && !relatedEdges.has(e.id) }" />
         </g>
         <g v-for="n in renderNodes" :key="n.key" class="l2g-node"
            :class="[`kind-${n.kind}`, `role-${n.role ?? 'none'}`, {
              root: n.key === 'root',
              'is-muted': activeKey && !relatedNodes.has(n.key),
-             selected: selected.has(n.key),
+             selected: replayPlan ? replayPlan.changed.has(n.key) : selected.has(n.key),
+             'replay-target': replayPhase !== 'source' && replayPlan?.targets.has(n.key),
              dragging: dragging?.has(n.key) ?? false,
              'drop-target': dropTarget === n.key,
            }]"
@@ -764,32 +869,32 @@ onBeforeUnmount(() => {
            :data-drop-key="n.key" :data-drop-kind="n.kind"
            @pointerdown="nodeDown($event, n)"
            @pointerenter="hoverKey = n.key" @pointerleave="hoverKey = ''"
-           @dblclick.stop="emit('toggle', n.key)">
-          <title>{{ n.name }}{{ n.note ? ` · ${n.note}` : '' }}{{ n.kind === 'tx' ? ` · ¥${yuan(n.e || n.i)}` : ` · ¥${yuan(n.e + n.i)}` }}</title>
+           @dblclick.stop="toggleNode(n.key)">
+          <title>{{ n.name }}{{ n.note ? ` · ${n.note}` : '' }}{{ replayStep ? '' : ` · ¥${yuan(n.kind === 'tx' ? n.e || n.i : n.e + n.i)}` }}</title>
           <circle :r="Math.max(n.r + 8, 14)" class="hit" />
           <circle :r="n.r + (n.kind === 'tx' ? 3 : 9)" class="halo" />
           <circle :r="n.r" class="core" />
           <text v-if="n.key === 'root'" y="4" text-anchor="middle" class="l2g-root">{{ n.name }}</text>
-          <text v-if="n.key === 'root'" y="56" text-anchor="middle" class="l2g-root-amt">
+          <text v-if="n.key === 'root' && !replayStep" y="56" text-anchor="middle" class="l2g-root-amt">
            支出 −¥{{ money(n.e) }} · 收入 +¥{{ money(n.i) }}
           </text>
-          <template v-else>
+          <template v-else-if="n.key !== 'root'">
             <text v-if="n.kind !== 'tx'" :x="n.x >= 0 ? n.r + 12 : -(n.r + 12)"
-                  :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-1" class="l2g-label">{{ clipText(n.name) }}</text>
-            <text v-if="n.kind !== 'tx' && zoom >= 1.4" :x="n.x >= 0 ? n.r + 12 : -(n.r + 12)"
+                  :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-1" class="l2g-label">{{ replayStep ? clipText(n.name, 130) : clipText(n.name) }}</text>
+            <text v-if="!replayStep && n.kind !== 'tx' && zoom >= 1.4" :x="n.x >= 0 ? n.r + 12 : -(n.r + 12)"
                   :text-anchor="n.x >= 0 ? 'start' : 'end'" y="12" class="l2g-value">
               {{ valueLine(n) }}
             </text>
             <template v-if="n.kind === 'tx'">
               <text v-if="showTxName(n.key)" :x="n.x >= 0 ? n.r + 10 : -(n.r + 10)"
-                    :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-2" class="l2g-tx">{{ clipText(n.name) }}</text>
-              <text :x="n.x >= 0 ? n.r + 10 : -(n.r + 10)" :text-anchor="n.x >= 0 ? 'start' : 'end'"
+                    :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-2" class="l2g-tx">{{ replayStep ? clipText(n.name, 130) : clipText(n.name) }}</text>
+              <text v-if="!replayStep" :x="n.x >= 0 ? n.r + 10 : -(n.r + 10)" :text-anchor="n.x >= 0 ? 'start' : 'end'"
                     :y="showTxName(n.key) ? 13 : 3" class="l2g-tx-amt">{{ txIE(n) }}</text>
             </template>
           </template>
-          <g v-if="n.hasChildren && n.o > 0.9" :transform="`translate(${n.r * 0.75} ${-n.r * 0.75})`"
+          <g v-if="!readOnly && n.hasChildren && n.o > 0.9" :transform="`translate(${n.r * 0.75} ${-n.r * 0.75})`"
              class="l2g-more" :class="{ 'is-open': isOpen(n) }"
-             @pointerdown.stop @click.stop="emit('toggle', n.key)">
+             @pointerdown.stop @click.stop="toggleNode(n.key)">
             <circle r="7" />
             <text y="4" text-anchor="middle">{{ isOpen(n) ? '−' : '+' }}</text>
           </g>
@@ -803,7 +908,19 @@ onBeforeUnmount(() => {
       <button title="适应全部可见节点" @click="resetCamera">复位</button>
       <span>{{ Math.round(zoom * 100) }}%</span>
     </div>
-    <p class="l2g-help">滚轮缩放 · 中键拖视野 · 空白拖框选择 · 选中后按住任意条目拖动 · 双击或 ± 展开/折叠</p>
+    <details v-if="replayPlan?.bundles.length" class="replay-members"
+             @toggle="replayMembersOpen = ($event.target as HTMLDetailsElement).open">
+      <summary>查看合并展示的交易</summary>
+      <div v-if="replayMembersOpen" class="replay-members-list">
+        <section v-for="bundle in replayPlan.bundles" :key="bundle.key">
+          <strong>{{ bundle.from }} → {{ bundle.to }}</strong>
+          <ol><li v-for="(name, index) in bundle.names" :key="index">{{ name }}</li></ol>
+        </section>
+      </div>
+    </details>
+    <p v-if="replayStep" class="l2g-help replay-caption" data-testid="replay-caption">{{ replayCaption }}</p>
+    <p v-else-if="readOnly" class="l2g-help">正在读取回放</p>
+    <p v-else class="l2g-help">滚轮缩放 · 中键拖视野 · 空白拖框选择 · 选中后按住任意条目拖动 · 双击或 ± 展开/折叠</p>
     <div v-if="band" class="l2g-band" :style="bandStyle" />
   </div>
 </template>
@@ -814,6 +931,14 @@ onBeforeUnmount(() => {
   background: #0b1226; border: 1px solid var(--color-border); border-radius: var(--radius);
 }
 .l2g-svg { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+.is-replaying .l2g-label, .is-replaying .l2g-tx { font-size: 16px; }
+.is-replaying .l2g-node.replay-target .core { stroke: #70e0da; stroke-width: 2.5; }
+.is-replaying .replay-caption { font-size: 12px; color: #b8d5fb; }
+.replay-members { position: absolute; top: 12px; left: 12px; max-width: min(320px, 65%); padding: 6px 9px;
+  border: 1px solid #355078; border-radius: 8px; background: #14233d; color: #d0e2ff; font-size: 12px; }
+.replay-members summary { cursor: pointer; }
+.replay-members-list { max-height: 35vh; overflow: auto; padding: 7px 3px; overflow-wrap: anywhere; }
+.replay-members-list ol { margin: 4px 0 8px; padding-left: 20px; }
 .l2g-edges path { fill: none; stroke: #6888b5; stroke-opacity: .22; stroke-width: 1.05; transition: stroke-opacity .18s; }
 .l2g-edges path.is-related { stroke: #9dc9e7; stroke-opacity: .65; stroke-width: 1.5; }
 .l2g-edges path.is-muted { stroke-opacity: .055; }

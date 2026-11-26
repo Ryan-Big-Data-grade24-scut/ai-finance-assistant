@@ -4,7 +4,9 @@
  * 只放稳定引用（路由、日期范围、选区），不放金额和行内容；助手每轮都会
  * 用工具重新读账本。模块级单例让浮窗与完整页面读同一份事实，不引入 Pinia。
  */
-import { reactive } from 'vue'
+import { reactive, ref } from 'vue'
+
+export const agentLedgerRevision = ref(0)
 
 export const agentPageState = reactive({
   route: '',

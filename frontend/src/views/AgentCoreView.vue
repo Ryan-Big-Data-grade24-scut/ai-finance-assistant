@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /** 页面只订阅已落盘的步骤；离开页面不停止，停止也不回滚已提交的操作。 */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AgentCoreChat from '@/components/AgentCoreChat.vue'
+import AgentSessionSpinner from '@/components/AgentSessionSpinner.vue'
 import AtlasIcon from '@/components/AtlasIcon.vue'
 import { useAgentSession } from '@/composables/useAgentSession'
 import { getAISettings, type AISettings } from '@/api/ai'
@@ -11,7 +12,7 @@ import { TODO_LABELS, kindLabel, stateLabel } from '@/utils/agentLabels'
 import {
   AgentCoreError, confirmAction, getSession, getStage, listActions, prepareImport,
   rejectAction, uploadBill,
-  type AgentAction, type AgentImportCommitted, type AgentStage,
+  type AgentAction, type AgentImportCommitted, type AgentSession, type AgentStage,
 } from '@/api/agentCore'
 
 const route = useRoute()
@@ -75,8 +76,8 @@ function pageContext(): Record<string, unknown> {
 
 const {
   sessions, detail, input, opening, sending, stopping, reconnectText, errorBanner, notice,
-  currentId, run, active, items, todos, formatError, showError, refreshSessions,
-  openSession, newSession, removeCurrent, send, stop, init,
+  currentId, run, active, items, todos, sessionBusy, formatError, showError,
+  openSession, newSession, rename, removeCurrent, isSessionRunning, send, stop, init,
 } = useAgentSession({
   pageContext,
   canSend: () => !importBusy.value,
@@ -91,6 +92,43 @@ const {
     await restoreStage()
   },
 })
+
+const titleEdit = ref<{ id: string; title: string } | null>(null)
+const titleInput = ref<HTMLInputElement[]>([])
+const savingTitle = ref(false)
+
+async function beginRename(row: AgentSession) {
+  if (savingTitle.value) return
+  titleEdit.value = { id: row.id, title: row.title }
+  await nextTick()
+  titleInput.value[0]?.focus()
+  titleInput.value[0]?.select()
+}
+
+async function saveTitle() {
+  const change = titleEdit.value
+  titleEdit.value = null
+  if (!change || savingTitle.value) return
+  const title = change.title.trim()
+  if (!title || title === sessions.value.find(row => row.id === change.id)?.title) return
+  savingTitle.value = true
+  try {
+    await rename(change.id, title)
+  } finally {
+    savingTitle.value = false
+  }
+}
+
+function onTitleKey(event: KeyboardEvent) {
+  if (event.isComposing) return
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    void saveTitle()
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    titleEdit.value = null
+  }
+}
 
 const actions = computed(() => detail.value?.actions ?? [])
 const pendingOwn = computed(() => actions.value.filter(action => action.state === 'pending'))
@@ -119,7 +157,7 @@ async function refreshExternal() {
 async function refreshActions() {
   const view = detail.value
   await Promise.all([
-    refreshSessions(), refreshExternal(),
+    refreshExternal(),
     view ? getSession(view.session.id).then(next => {
       if (detail.value === view) view.actions = next.actions
     }) : Promise.resolve(),
@@ -244,26 +282,35 @@ onBeforeUnmount(() => {
     <aside class="ac-col ac-sessions" aria-label="会话列表">
       <div class="ac-panel-head">
         <h2>会话 <span>{{ sessions.length }}</span></h2>
-        <button class="mini mini--primary ac-new" data-testid="ac-new-session" :disabled="opening || sending" @click="newSession">
+        <button class="mini mini--primary ac-new" data-testid="ac-new-session" :disabled="sessionBusy" @click="newSession">
           <AtlasIcon name="plus" /> 新对话
         </button>
       </div>
       <ul v-if="sessions.length" class="ac-session-list">
         <li v-for="session in sessions" :key="session.id">
-          <button :class="['ac-session', { 'ac-session--on': session.id === currentId }]"
-                  :aria-current="session.id === currentId ? 'true' : undefined" :title="session.title || '未命名对话'"
-                  :disabled="opening || sending" @click="openSession(session.id)">
+          <form v-if="titleEdit?.id === session.id" class="ac-session ac-session--edit" @submit.prevent="saveTitle">
+            <input ref="titleInput" v-model="titleEdit.title" aria-label="会话名称" type="text" maxlength="80"
+                   @blur="saveTitle" @keydown="onTitleKey" />
+            <AgentSessionSpinner v-if="isSessionRunning(session.id)" />
+          </form>
+          <button v-else type="button" :class="['ac-session', { 'ac-session--on': session.id === currentId }]"
+                  :aria-current="session.id === currentId ? 'true' : undefined"
+                  :title="(session.title || '未命名对话') + '（双击重命名）'" aria-keyshortcuts="F2"
+                  @click="openSession(session.id)" @dblclick.prevent="beginRename(session)"
+                  @keydown.f2.prevent="beginRename(session)">
             <AtlasIcon name="chat" />
             <span>
               <b>{{ session.title || '未命名对话' }}</b>
               <small v-if="session.updated_at">{{ session.updated_at.slice(0, 16) }}</small>
             </span>
+            <AgentSessionSpinner v-if="isSessionRunning(session.id)" />
           </button>
         </li>
       </ul>
       <p v-else class="ac-session-empty">{{ opening ? '正在加载会话…' : '还没有会话' }}</p>
       <div class="ac-session-foot">
-        <button v-if="currentId" class="mini mini--danger" :disabled="active || opening || sending"
+        <button v-if="currentId" class="mini mini--danger" data-testid="ac-delete-session"
+                :disabled="sessionBusy || isSessionRunning(currentId)"
                 @click="removeCurrent"><AtlasIcon name="remove" /> 删除当前会话</button>
       </div>
     </aside>

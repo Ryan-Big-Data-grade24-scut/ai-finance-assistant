@@ -193,6 +193,27 @@ def test_backend_preview_and_commit(isolated_db: Path):
         assert count_rows() == 2
 
 
+def test_commit_rejects_a_different_active_library(isolated_db: Path):
+    path = wechat_file(isolated_db)
+    upload = {'file': (path.name, path.read_bytes())}
+    with TestClient(app) as client:
+        original = client.get('/api/libraries/active').json()
+        other = client.post('/api/libraries', json={'name': '另一本账本'}).json()
+        expected = {'expected_library_id': original['id']}
+
+        rejected = client.post('/api/import/commit', files=upload, data=expected)
+        assert rejected.status_code == 409
+        assert count_rows() == 0
+
+        assert client.post(f"/api/libraries/{original['id']}/select").status_code == 200
+        committed = client.post('/api/import/commit', files=upload, data=expected)
+        assert committed.status_code == 200, committed.text
+        assert committed.json()['inserted'] == 2
+
+        assert client.post(f"/api/libraries/{other['id']}/select").status_code == 200
+        assert count_rows() == 0
+
+
 def test_zero_amount_is_not_reported_as_duplicate(isolated_db: Path):
     path = alipay_file(isolated_db, extra_rows=[
         '支出,2026-09-03 12:31:00,优惠,模拟商户E,抵扣,0.00,余额宝,交易成功,mock-ali-zero,,'

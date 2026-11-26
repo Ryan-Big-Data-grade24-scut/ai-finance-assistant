@@ -35,10 +35,13 @@ export async function previewImport(file: File, alipayPassword = '', signal?: Ab
   return parseResponse<ImportPreviewResp>(response)
 }
 
-export async function commitImport(file: File, alipayPassword = '') {
+export async function commitImport(file: File, alipayPassword = '', expectedLibraryId?: string, mappingToken?: string | null) {
+  const body = makeFormData(file, alipayPassword)
+  if (expectedLibraryId) body.append('expected_library_id', expectedLibraryId)
+  if (mappingToken) body.append('mapping_token', mappingToken)
   const response = await fetch('/api/import/commit', {
     method: 'POST',
-    body: makeFormData(file, alipayPassword),
+    body,
   })
   return parseResponse<ImportCommitResp>(response)
 }

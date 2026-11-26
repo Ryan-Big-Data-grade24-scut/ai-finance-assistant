@@ -15,14 +15,18 @@ backend/main.py —— FastAPI 入口
 """
 from __future__ import annotations
 
+import csv
 import sys
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from xml.etree.ElementTree import ParseError
+from zipfile import BadZipFile
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from openpyxl.utils.exceptions import InvalidFileException
 
 # 让 `python -m backend.main` 和 `uvicorn backend.main:app` 都能跑
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -30,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend import db, overrides, reports, uploads           # noqa: E402
 from backend import libraries                                # noqa: E402
 from backend import overrides as overrides_mod                # noqa: E402
-from backend.importer import ImportResult, parse_file, import_file  # noqa: E402
+from backend.importer import ImportResult, generic, import_file, import_rows, parse_file  # noqa: E402
 from backend.importer.base import ParseIssues  # noqa: E402
 from backend.overrides import ForbiddenFieldError, TxNotFound  # noqa: E402
 from backend import schemas as S                              # noqa: E402
@@ -43,6 +47,7 @@ from backend.agentcore import store as agentcore_store        # noqa: E402
 from backend.ledger2 import store as ledger2_store            # noqa: E402
 from backend.ledger2.errors import LedgerError as Ledger2Error  # noqa: E402
 from backend.ai import config as ai_config                    # noqa: E402
+from backend.ai import privacy as ai_privacy                  # noqa: E402
 from backend.ai import schemas as AI                           # noqa: E402
 from backend.ai import import_workflow as ai_import            # noqa: E402
 from backend.ai import history_workflow as ai_history          # noqa: E402
@@ -230,6 +235,7 @@ def ledger_reset(data: S.LedgerBookIdIn):
 # 将原始文件名保留为 basename，平台识别和导入批次仍可使用原文件名。
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".xlsx", ".csv", ".zip"}
+UNREADABLE_BILL = (BadZipFile, InvalidFileException, ParseError, OSError, csv.Error, KeyError)
 
 
 async def _stage_upload(file: UploadFile, target_dir: Path) -> Path:
@@ -251,9 +257,28 @@ async def import_preview(
         tmp = await _stage_upload(file, Path(temp_dir))
         try:
             issues = ParseIssues()
-            rows = parse_file(tmp, alipay_password=alipay_password, issues=issues)
+            mapping_token = None
+            mapping_notes = []
+            try:
+                rows = parse_file(tmp, alipay_password=alipay_password, issues=issues)
+            except (ValueError, *UNREADABLE_BILL):
+                if tmp.suffix.lower() not in {'.csv', '.xlsx'}:
+                    raise
+                library_id = libraries.get_active_library()['id']
+                plan = await generic.analyze(tmp)
+                issues = ParseIssues()
+                rows = generic.parse(tmp, plan, issues)
+                if rows:
+                    mapping_token = generic.remember(tmp, plan, library_id)
+                    checked = {'tx_time': '交易时间', 'clock': '时分秒', 'amount': '金额', 'income': '收入金额',
+                               'expense': '支出金额', 'direction': '收支方向', 'tx_type': '交易类型', 'status': '状态'}
+                    headings = '、'.join(f'{plan.header.labels[plan.mapping.columns[key]]} → {field}'
+                                        for key, field in checked.items() if key in plan.mapping.columns)
+                    matched_by = 'AI' if plan.used_ai else '通用规则'
+                    mapping_notes = [f'{matched_by}已匹配表头：{headings}。请核对收支方向和金额。',
+                                     '同一笔交易可能同时出现在支付、银行和订单账单中，去重仅在同一来源内进行。']
             if not rows:
-                raise HTTPException(400, "解析成功但没有任何有效数据行")
+                raise HTTPException(400, issues.first_error or "解析成功但没有任何有效数据行")
 
             dates = sorted(r.date for r in rows)
             by_status: dict[str, int] = {}
@@ -265,6 +290,7 @@ async def import_preview(
             first = rows[0]
             return S.ImportPreviewResp(
                 batch_id="preview",
+                mapping_token=mapping_token,
                 platform_id=first.platform_id,
                 platform_name=first.source,
                 confidence=0.98,
@@ -275,22 +301,35 @@ async def import_preview(
                 date_to=dates[-1],
                 amount_sum=round(sum(r.amount for r in rows if r.direction == "支出"), 2),
                 sample=[r.raw for r in rows[:5]],
-                warnings=issues.warnings,
+                warnings=mapping_notes + issues.warnings,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        except UNREADABLE_BILL as exc:
+            raise HTTPException(400, "文件无法读取，请检查账单格式。") from exc
 
 
 @app.post("/api/import/commit", response_model=S.ImportCommitResp)
 async def import_commit(
     file: UploadFile = File(...),
     alipay_password: str | None = Form(None),
+    expected_library_id: str | None = Form(None),
+    mapping_token: str | None = Form(None),
 ):
     """解析后批量入库，沿用已有事务逻辑和去重机制。"""
     with TemporaryDirectory(prefix="finance_import_") as temp_dir:
         tmp = await _stage_upload(file, Path(temp_dir))
+        active_id = libraries.get_active_library()['id'] if expected_library_id or mapping_token else None
+        if expected_library_id and active_id != expected_library_id:
+            raise HTTPException(409, "当前账本已切换，请切回原账本后再导入。")
         try:
-            r: ImportResult = import_file(tmp, alipay_password=alipay_password)
+            if mapping_token:
+                plan = generic.recalled(mapping_token, tmp, active_id)
+                issues = ParseIssues()
+                rows = generic.parse(tmp, plan, issues)
+                r = import_rows(rows, plan.platform_id, tmp.name, issues)
+            else:
+                r = import_file(tmp, alipay_password=alipay_password)
             ledger_service.sync_live_book()
             return S.ImportCommitResp(
                 batch_id=r.batch_id, inserted=r.inserted, skipped=r.skipped,
@@ -299,6 +338,8 @@ async def import_commit(
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        except UNREADABLE_BILL as exc:
+            raise HTTPException(400, "文件无法读取，请检查账单格式。") from exc
 
 
 @app.get("/api/import/history")
@@ -328,6 +369,19 @@ def put_ai_settings(data: AI.AISettingsIn):
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/ai/settings/privacy")
+def get_ai_privacy_settings():
+    return {"entries": ai_privacy.settings()}
+
+
+@app.put("/api/ai/settings/privacy")
+def put_ai_privacy_alias(data: AI.AIPrivacyAliasIn):
+    try:
+        return {"entries": ai_privacy.save_alias(data.original, data.alias)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/ai/settings/test")

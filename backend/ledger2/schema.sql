@@ -64,3 +64,12 @@ CREATE TABLE IF NOT EXISTS ledger2_op_log (
     state      TEXT NOT NULL DEFAULT 'applied' CHECK (state IN ('applied', 'undone', 'discarded')),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- 播放顺序与撤销栈的当前状态独立。正向操作和撤销共用已有原语。
+CREATE TABLE IF NOT EXISTS ledger2_replay_event (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    op_seq     INTEGER NOT NULL REFERENCES ledger2_op_log(seq) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('apply', 'undo', 'redo')),
+    run_id     TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

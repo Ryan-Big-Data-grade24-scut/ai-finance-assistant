@@ -17,11 +17,13 @@ import {
   applyLedger2Op, getLedger2Tree, getLedger2Uninitialized, redoLedger2, undoLedger2,
   Ledger2Error,
   type Ledger2Group, type Ledger2Node, type Ledger2Op, type Ledger2Range,
-  type Ledger2Tree, type Ledger2Tx, type Ledger2UninitItem,
+  type Ledger2Tree, type Ledger2Tx, type Ledger2UninitItem, type Ledger2TimelineEvent,
 } from '@/api/ledger2'
 import Ledger2Graph from '@/components/Ledger2Graph.vue'
+import Ledger2History from '@/components/Ledger2History.vue'
+import { useLedger2Replay } from '@/composables/useLedger2Replay'
 import {
-  clearAgentPage, setAgentPageRange, setAgentPageRoute, setAgentPageSelection,
+  agentLedgerRevision, clearAgentPage, setAgentPageRange, setAgentPageRoute, setAgentPageSelection,
 } from '@/utils/agentPageState'
 
 type Row =
@@ -127,6 +129,29 @@ const OP_LABELS: Record<string, string> = {
   update_node: '改名/备注', update_manual: '改名/备注',
 }
 const opLabel = (name: string) => OP_LABELS[name] ?? name
+function historyLabel(step: Ledger2TimelineEvent) {
+  const label = opLabel(step.name)
+  return step.kind === 'apply' ? label : `${step.kind === 'undo' ? '撤销' : '重做'} · ${label}`
+}
+
+const {
+  replay, fetching: replayFetching, position: replayPosition, phase: replayPhase, playing: replayPlaying,
+  step: replayStep,
+  active: replayActive, complete: replayComplete, begin: beginReplay,
+  pause: pauseReplay, resume: resumeReplay, exit: exitReplay,
+} = useLedger2Replay()
+const timeline = computed(() => data.value?.timeline ?? [])
+const replayEvent = computed(() => timeline.value.find(event => event.id === replayStep.value?.id))
+
+async function playHistory(ids: number[]) {
+  if (loading.value || replayActive.value) return
+  error.value = ''
+  try {
+    if (await beginReplay(ids)) view.value = 'star'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : '无法读取这段星图历史。'
+  }
+}
 
 const yuan = (cents: number) => (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -210,8 +235,24 @@ async function run(job: () => Promise<Ledger2Tree>, ok?: string) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     loading.value = false
+    refreshAfterAssistant()
   }
 }
+
+let assistantRefreshPending = false
+function refreshAfterAssistant() {
+  if (!assistantRefreshPending || loading.value) return
+  assistantRefreshPending = false
+  const scope = data.value?.scope
+  const currentRange = scope
+    ? { date_from: scope.date_from ?? undefined, date_to: scope.date_to ?? undefined }
+    : range()
+  void run(() => getLedger2Tree(currentRange))
+}
+watch(agentLedgerRevision, () => {
+  assistantRefreshPending = true
+  refreshAfterAssistant()
+})
 
 /** 范围同时写 URL 和 localStorage：导航链接不带 query 时也能切回来。 */
 function rememberRange() {
@@ -263,9 +304,9 @@ const load = () => {
   syncUrl()
   return run(() => getLedger2Tree(range()), cleared ? '时间范围已变化，已清空选区。' : undefined)
 }
-const send = (op: Ledger2Op, ok?: string) => run(() => applyLedger2Op(op, range()), ok)
-const undo = () => run(() => undoLedger2(range()), '已撤销')
-const redo = () => run(() => redoLedger2(range()), '已重做')
+const send = async (op: Ledger2Op, ok?: string) => { if (!replayActive.value) await run(() => applyLedger2Op(op, range()), ok) }
+const undo = () => { if (!replayActive.value) void run(() => undoLedger2(range()), '已撤销') }
+const redo = () => { if (!replayActive.value) void run(() => redoLedger2(range()), '已重做') }
 
 // ── 时间 ─────────────────────────────────────────────────────────────────
 
@@ -831,6 +872,7 @@ function midUp() {
   midDrag = null
 }
 onBeforeUnmount(() => {
+  assistantRefreshPending = false
   clearPress()
   midUp()
   window.removeEventListener('pointermove', bandMove)
@@ -1133,7 +1175,7 @@ onMounted(() => {
     <div class="l2-layout">
       <!-- 左：视图切换 -->
       <nav class="l2-tabs" data-testid="view-select" aria-label="视图">
-        <button class="l2-tab" :class="{ active: view === 'table' }" data-testid="view-table"
+        <button class="l2-tab" :class="{ active: view === 'table' }" data-testid="view-table" :disabled="replayActive"
                 @click="view = 'table'">
           <span class="ico">▤</span><span>表格</span>
         </button>
@@ -1145,15 +1187,31 @@ onMounted(() => {
 
       <!-- 中：账本视图（占满剩余高度，滚动只发生在视图内部） -->
       <div class="l2-main">
-        <p v-if="emptyRange" class="banner banner--warn" data-testid="empty-month">
+        <p v-if="emptyRange && !replayActive" class="banner banner--warn" data-testid="empty-month">
           这个范围里没有数据。<template v-if="lastMonth">最近有数据的月份是 {{ lastMonth }}。</template>
           <button v-if="lastMonth" class="link" @click="setMonth(lastMonth)">跳过去</button>
         </p>
         <p v-if="error" class="banner banner--err" data-testid="error">{{ error }}</p>
-        <p v-else-if="notice" class="banner banner--ok">{{ notice }}</p>
-        <ul v-if="data?.status.warnings.length" class="banner banner--warn" data-testid="warnings">
+        <p v-else-if="notice && !replayActive" class="banner banner--ok">{{ notice }}</p>
+        <ul v-if="data?.status.warnings.length && !replayActive" class="banner banner--warn" data-testid="warnings">
           <li v-for="w in data.status.warnings" :key="w">{{ w }}</li>
         </ul>
+        <div v-if="replayActive" class="replay-bar" data-testid="replay-bar" role="status">
+          <div>
+            <b>星图回放</b>
+            <span v-if="replayFetching">正在还原历史…</span>
+            <span v-else-if="replay && replayEvent">
+              {{ replayPosition + 1 }} / {{ replay.steps.length }} · #{{ replayEvent.seq }} {{ historyLabel(replayEvent) }}
+              <template v-if="replayComplete"> · 已播完</template>
+            </span>
+          </div>
+          <div class="replay-buttons">
+            <button v-if="replay && !replayComplete" type="button" @click="replayPlaying ? pauseReplay() : resumeReplay()">
+              {{ replayPlaying ? '暂停' : '继续' }}
+            </button>
+            <button type="button" data-testid="exit-replay" @click="exitReplay">回到当前星图</button>
+          </div>
+        </div>
 
         <div v-if="view === 'table'" class="l2-tree" data-testid="tree">
           <!-- 仅展示现有状态，不改变账本数据、选择或拖拽行为 -->
@@ -1236,15 +1294,17 @@ onMounted(() => {
           </div>
         </div>
 
-        <Ledger2Graph v-else :tree="data?.tree ?? null" :expanded="expanded" :selected="selected"
-                      :dragging="dragging" :drop-target="dropTarget?.key ?? ''"
+        <Ledger2Graph v-else :key="replayStep ? `replay-${replayStep.id}` : 'live'"
+                      :tree="data?.tree ?? null" :expanded="expanded" :selected="selected"
+                      :replay-step="replayStep" :replay-phase="replayPhase" :read-only="replayActive"
+                      :dragging="replayStep ? null : dragging" :drop-target="replayStep ? '' : dropTarget?.key ?? ''"
                       data-testid="graph" @item-down="itemDown" @band-select="onGraphBand"
                       @toggle="onGraphToggle" />
       </div>
 
       <!-- 右：时间 / 操控 / 详情 / 历史 -->
       <aside class="l2-side">
-        <section class="panel panel--date">
+        <section class="panel panel--date" :inert="replayActive">
           <h3 class="panel-title"><i class="dot dot--date" />时间区间</h3>
           <div class="field-row">
             <label class="field">从<input v-model="dateFrom" type="date" data-testid="date-from"></label>
@@ -1275,7 +1335,7 @@ onMounted(() => {
           </button>
         </section>
 
-        <section class="panel panel--ops" data-testid="console">
+        <section class="panel panel--ops" data-testid="console" :inert="replayActive">
           <h3 class="panel-title"><i class="dot dot--ops" />操作面板</h3>
           <!-- 筛选：只在当前范围里把匹配项选出来，不改账本 scope。 -->
           <div class="ops-filter" data-testid="filter-bar">
@@ -1365,7 +1425,7 @@ onMounted(() => {
           </p>
         </section>
 
-        <section class="panel panel--detail" data-testid="detail">
+        <section class="panel panel--detail" data-testid="detail" :inert="replayActive">
           <h3 class="panel-title"><i class="dot dot--detail" />详细信息</h3>
           <template v-if="single">
             <div class="detail-head">
@@ -1415,13 +1475,8 @@ onMounted(() => {
 
         <section class="panel panel--hist" data-testid="history">
           <h3 class="panel-title"><i class="dot dot--hist" />操作历史</h3>
-          <p v-if="!data?.status.history.length" class="muted">还没有操作</p>
-          <ol v-else>
-            <li v-for="h in [...data.status.history].reverse()" :key="h.seq" :class="{ undone: h.state === 'undone' }">
-              <b>#{{ h.seq }}</b> {{ opLabel(h.name) }}
-              <small class="muted">{{ h.prims }} 步操作<template v-if="h.state === 'undone'"> · 已撤销</template></small>
-            </li>
-          </ol>
+          <Ledger2History :steps="timeline" :busy="replayActive || loading"
+                          :current-id="replayStep?.id ?? null" :label="historyLabel" @play="playHistory" />
         </section>
       </aside>
     </div>
@@ -1668,13 +1723,11 @@ onMounted(() => {
 .d-list dt { color: var(--color-muted); }
 .d-list dd { margin: 0; word-break: break-all; }
 
-.panel--hist ol {
-  margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px;
-  max-height: 280px; overflow: auto;
-}
-.panel--hist li { font-size: 13px; }
-.panel--hist li.undone { opacity: .5; text-decoration: line-through; }
-.panel--hist small { display: block; }
+.replay-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
+  gap: 8px; padding: 8px 10px; border: 1px solid #dbe7f4; border-radius: 8px; background: #edf5ff; color: #214b77; }
+.replay-bar span { margin-left: 8px; font-size: 12px; }
+.replay-buttons { display: flex; gap: 6px; }
+.replay-buttons button { padding: 4px 7px; border: 1px solid #cddff2; border-radius: 6px; background: white; }
 
 /* 账本工作台的视觉增强：只影响中间表格，不触碰账本计算或操作逻辑。 */
 .l2-tree {

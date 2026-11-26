@@ -35,13 +35,20 @@ def get(session_id: str) -> dict:
         return _get(conn, session_id)
 
 
-def list_sessions(limit: int = 50) -> list[dict]:
+def list_sessions() -> list[dict]:
     with closing(open_conn()) as conn:
         rows = conn.execute(
-            'SELECT id,title,created_at,updated_at FROM agentcore_session ORDER BY updated_at DESC, rowid DESC LIMIT ?',
-            (limit,),
+            'SELECT s.id,s.title,s.created_at,s.updated_at,r.id AS active_run_id '
+            'FROM agentcore_session s LEFT JOIN agentcore_run r ON r.session_id=s.id AND r.end_id IS NULL '
+            'ORDER BY s.updated_at DESC, s.rowid DESC'
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def rename(session_id: str, title: str) -> dict:
+    with closing(open_conn()) as conn, conn:
+        conn.execute('UPDATE agentcore_session SET title=? WHERE id=?', (title, session_id))
+        return _get(conn, session_id)
 
 
 def delete(session_id: str) -> None:

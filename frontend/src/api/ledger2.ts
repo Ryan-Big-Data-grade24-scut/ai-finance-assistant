@@ -48,6 +48,31 @@ export interface Ledger2HistoryItem {
   prims: number
   at: string
 }
+export interface Ledger2TimelineEvent {
+  id: number
+  seq: number
+  name: string
+  kind: 'apply' | 'undo' | 'redo'
+  run_id: string | null
+  request: string | null
+  at: string
+}
+export interface Ledger2ReplayItem {
+  ref: string
+  kind: 'node' | 'group' | 'tx'
+  name: string
+  parent: string | null
+  note: string
+}
+export interface Ledger2ReplayStep {
+  id: number
+  changed: string[]
+  before: Ledger2ReplayItem[]
+  after: Ledger2ReplayItem[]
+}
+export interface Ledger2Replay {
+  steps: Ledger2ReplayStep[]
+}
 export interface Ledger2Status {
   seq: number
   can_undo: boolean
@@ -57,6 +82,7 @@ export interface Ledger2Status {
 }
 export interface Ledger2Tree {
   tree: Ledger2Node
+  timeline?: Ledger2TimelineEvent[]
   scope: {
     date_from: string | null; date_to: string | null
     tx_in_scope: number; tx_total: number
@@ -164,3 +190,5 @@ export const applyLedger2Op = (op: Ledger2Op, range: Ledger2Range = {}) =>
   request<Ledger2Tree>('/api/ledger2/op', { op, ...range })
 export const undoLedger2 = (range: Ledger2Range = {}) => request<Ledger2Tree>('/api/ledger2/undo', { ...range })
 export const redoLedger2 = (range: Ledger2Range = {}) => request<Ledger2Tree>('/api/ledger2/redo', { ...range })
+export const getLedger2Replay = (eventIds: number[]) =>
+  request<Ledger2Replay>('/api/ledger2/replay', { event_ids: eventIds })
