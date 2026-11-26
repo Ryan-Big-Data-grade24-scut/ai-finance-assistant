@@ -41,7 +41,7 @@ function Wait-App([string]$Name, [int]$Port, [string]$Path, $Process) {
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "$Name did not start on port $Port. See .runtime\$Name-error.log."
+    throw "$Name did not start on port $Port. See $runtimeDir\$Name-error.log."
 }
 
 $lock = $null

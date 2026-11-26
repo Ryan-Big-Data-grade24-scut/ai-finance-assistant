@@ -39,7 +39,6 @@ dist/
 .env
 .env.*
 !.env.example
-.runtime/
 
 # ---- 本地历史备份（不参与运行；正式历史交给 Git）----
 .engine-backups/

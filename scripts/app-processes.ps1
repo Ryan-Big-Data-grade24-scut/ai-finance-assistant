@@ -1,5 +1,6 @@
 $root = Split-Path -Parent $PSScriptRoot
-$runtimeDir = Join-Path $root '.runtime'
+# 运行日志/进程记录不放在工作区里：在仓库上一级目录统一保存。
+$runtimeDir = Join-Path (Split-Path -Parent $root) '.runtime'
 
 function Lock-App {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
