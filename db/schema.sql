@@ -7,6 +7,13 @@
 --    2. 所有修正落在修正层，不回写原始层
 --    3. 多平台：source 自由文本，platform_id 外键指向 platforms
 -- ============================================================================
+CREATE TABLE IF NOT EXISTS report_briefs (
+    period TEXT NOT NULL CHECK(period IN ('week','month','year')),
+    value TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY(period, value)
+);
+
 
 PRAGMA foreign_keys = ON;
 
@@ -365,6 +372,10 @@ CREATE TABLE IF NOT EXISTS ai_privacy_alias (
 CREATE TABLE IF NOT EXISTS ai_privacy_seed (
     id   INTEGER PRIMARY KEY CHECK (id = 1),
     salt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_privacy_dismissed (
+    original TEXT PRIMARY KEY COLLATE NOCASE
 );
 
 INSERT OR IGNORE INTO ai_privacy_seed(id, salt) VALUES (1, lower(hex(randomblob(16))));

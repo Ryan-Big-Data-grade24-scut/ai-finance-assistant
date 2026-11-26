@@ -6,14 +6,26 @@
  * ========================================================================== */
 
 :root {
+  --book-forest: #29554b;
+  --book-forest-dark: #1b4037;
+  --book-sage: #e9efe4;
+  --book-paper: #fffcf3;
+  --book-line: #d8d4c4;
+  --book-ink: #233d34;
+  --book-serif: Georgia, "Songti SC", SimSun, "Noto Serif CJK SC", serif;
   /* --- 语义色 --- */
   --color-expense: #e5484d;
   --color-income: #30a46c;
-  --color-bg: #f4f7fb;
-  --color-card: #ffffff;
-  --color-border: #e4e6eb;
-  --color-text: #1c1e21;
-  --color-muted: #8b8d98;
+  --color-bg: #eef0e7;
+  --color-card: var(--book-paper);
+  --color-border: var(--book-line);
+  --color-text: var(--book-ink);
+  --color-muted: #59685f;
+  --app-background:
+    radial-gradient(ellipse at 2% 0%, #f6f2e6 0, transparent 48%),
+    radial-gradient(ellipse at 96% 18%, #e2ebde 0, transparent 44%),
+    linear-gradient(155deg, #f8f6ed, #eef0e7 64%, #f3f1e8);
+  --surface-shadow: 0 2px 4px #2b423408, 0 12px 30px #2b42340d;
 
   /* --- 间距刻度，只允许用这 4 档 --- */
   --space-1: 4px;
@@ -34,7 +46,7 @@
   --font-xl: 28px;
 
   /* --- 图表配色序列（ECharts 用）--- */
-  --chart-1: #3b82f6;
+  --chart-1: var(--book-forest);
   --chart-2: #8b5cf6;
   --chart-3: #f59e0b;
   --chart-4: #10b981;
@@ -49,7 +61,7 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC',
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Microsoft YaHei', sans-serif;
   background: var(--color-bg);
   color: var(--color-text);
@@ -60,7 +72,7 @@ body {
 }
 
 button, input, select, textarea { font-family: inherit; }
-button:focus-visible, a:focus-visible { outline: 3px solid rgba(54, 121, 237, .28); outline-offset: 2px; }
+button:focus-visible, a:focus-visible { outline: 3px solid rgba(41, 85, 75, .5); outline-offset: 2px; }
 html, body, #app, .app { max-width: 100%; overflow-x: hidden; }
 
 .card {

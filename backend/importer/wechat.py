@@ -20,15 +20,8 @@ from typing import Iterator
 
 import openpyxl
 
-from .base import (
-    ParseIssues,
-    Row,
-    clean,
-    norm_amount,
-    norm_direction,
-    norm_time,
-    should_drop,
-)
+from .base import ParseIssues, Row, clean
+from .export_validation import ExportRows
 
 # 表头关键词 → 统一字段名
 HEADER_MAP = {
@@ -77,38 +70,33 @@ def parse(path: Path, issues: ParseIssues | None = None) -> Iterator[Row]:
         if missing:
             raise ValueError(f"微信账单缺少必需列: {missing}")
 
+        metadata = (clean(value) for row in ws.iter_rows(max_row=hdr_idx, values_only=True) for value in row) if hdr_idx else ()
+        checked = ExportRows(col, metadata, issues)
         for line_number, raw_row in enumerate(
             ws.iter_rows(min_row=hdr_idx + 2, values_only=True), start=hdr_idx + 2
         ):
-            if not raw_row or raw_row[0] is None:
+            if not any(clean(value) for value in raw_row):
                 continue
 
             def get(key: str):
                 idx = col.get(key)
                 return raw_row[idx] if idx is not None and idx < len(raw_row) else None
 
-            status = clean(get("status"))
-            if should_drop(status):
+            result = checked.check(line_number, get)
+            if result is None:
                 continue
-
-            tx_time = norm_time(get("tx_time"))
-            amount = norm_amount(get("amount"))
-            if tx_time is None or amount is None:
-                if issues is not None:
-                    reason = "交易时间无效" if tx_time is None else "金额无效或不大于零"
-                    issues.add(line_number, reason)
-                continue
+            tx_time, amount, direction, status = result
 
             raw_dict = {
                 header[i]: (str(raw_row[i]) if i < len(raw_row) and raw_row[i] is not None else "")
                 for i in range(len(header))
             }
 
-            yield Row(
+            checked.rows.append((line_number, Row(
                 platform_id="wechat",
                 source="微信支付",
                 tx_time=tx_time,
-                direction=norm_direction(get("direction")),
+                direction=direction,
                 amount=amount,
                 pay_method=clean(get("pay_method")),
                 counterparty=clean(get("counterparty")),
@@ -119,6 +107,7 @@ def parse(path: Path, issues: ParseIssues | None = None) -> Iterator[Row]:
                 merchant_no=clean(get("merchant_no")),
                 remark=clean(get("remark")),
                 raw=raw_dict,
-            )
+            )))
+        yield from checked.accepted()
     finally:
         wb.close()

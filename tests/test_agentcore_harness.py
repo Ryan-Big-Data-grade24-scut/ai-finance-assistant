@@ -111,7 +111,8 @@ def test_same_prefix_latest_snapshot_and_skill_on_demand(harness, monkeypatch):
     assert first['tools'] == second['tools'] == after_skill['tools']
     assert first['cache_key'] == second['cache_key'] == harness
     assert [t['function']['name'] for t in first['tools']] == [
-        QUERY, READ, APPLY, 'finance_import_read', 'finance_import_commit', 'read_skill', 'read_memory', 'todo_write',
+        QUERY, READ, APPLY, 'finance_import_read', 'finance_import_commit', 'finance_report_brief_write',
+        'read_skill', 'read_memory', 'todo_write',
     ]
     assert '## Skill 目录' in first['system'] and 'ledger-classify' in first['system']
     assert '## 操作顺序' not in first['system'] and '2026-03-01' not in first['system']

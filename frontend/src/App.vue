@@ -97,7 +97,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app" :class="{ workspace: isWorkspace }">
+  <div class="app" :class="{ workspace: isWorkspace, 'app--library': isHome }">
     <header class="app-header" :class="{ 'app-header--library': isHome }">
       <div ref="brandWrap" class="brand-wrap">
         <button
@@ -176,6 +176,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.app {
+  min-height: 100dvh;
+  background: var(--app-background);
+  background-repeat: no-repeat;
+  background-size: 100% max(100vh, 810px);
+  background-color: var(--color-bg);
+}
 .app-header {
   position: relative;
   z-index: 30;
@@ -185,9 +192,10 @@ onBeforeUnmount(() => {
   gap: 32px;
   min-height: 70px;
   padding: 10px max(24px, calc((100vw - 1128px) / 2));
-  background: rgba(255, 255, 255, .92);
-  backdrop-filter: blur(16px);
-  border-bottom: 1px solid var(--color-border);
+  background: #faf9f1f5;
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--book-line);
+  box-shadow: 0 2px 16px #29465f0a;
 }
 .brand-wrap { position: relative; flex: none; min-width: 0; }
 .brand {
@@ -204,7 +212,7 @@ onBeforeUnmount(() => {
   font: inherit;
   cursor: pointer;
 }
-.brand:hover, .brand[aria-expanded="true"] { background: #f4f7fb; border-color: #e7edf5; }
+.brand:hover, .brand[aria-expanded="true"] { background: var(--book-sage); border-color: #e7edf5; }
 .brand-mark {
   flex: none;
   width: 38px;
@@ -212,7 +220,7 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   border-radius: 13px;
-  background: linear-gradient(145deg, #376fae, #77a8df);
+  background: var(--book-forest);
   color: #fff;
   font-size: 19px;
   font-weight: 800;
@@ -266,7 +274,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .brand-menu button:hover, .brand-menu button:focus-visible { background: #f3f7fc; }
-.brand-menu button.active { background: #eaf2fb; }
+.brand-menu button.active { background: var(--book-sage); }
 .menu-home { border-bottom: 1px solid #eef2f7; border-radius: 10px 10px 4px 4px !important; margin-bottom: 4px; }
 .menu-icon {
   flex: none;
@@ -275,8 +283,8 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   border-radius: 9px;
-  background: #eaf2fb;
-  color: #3d72ae;
+  background: var(--book-sage);
+  color: var(--book-forest);
   font-size: 16px;
 }
 .brand-menu b, .brand-menu small { display: block; }
@@ -292,19 +300,27 @@ onBeforeUnmount(() => {
 .menu-empty { padding: 10px; color: var(--color-muted); font-size: 12px; }
 .menu-error { margin: 4px; padding: 8px 10px; border-radius: 8px; background: #fff4f4; color: #a04449; font-size: 11px; }
 
-.nav { display: flex; gap: 8px; }
+.nav {
+  display: flex; align-items: center; gap: 4px; padding: 4px;
+  border: 1px solid #d7d9ca; border-radius: 13px; background: #eeeee2;
+}
 .nav-item {
-  color: var(--color-muted);
+  color: #495d52;
   text-decoration: none;
-  padding: 9px 13px;
-  border-radius: 10px;
-}
-.nav-item.router-link-active {
-  color: var(--color-text);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
   font-weight: 600;
-  background: #f0f4f9;
+  white-space: nowrap;
 }
-.home-corner { color: #9aa5b4; font-size: 11px; letter-spacing: .08em; }
+.nav-item:hover { background: var(--book-paper); color: var(--book-forest); }
+.nav-item.router-link-active {
+  color: var(--book-forest-dark);
+  font-weight: 700;
+  background: var(--book-paper);
+  box-shadow: 0 1px 4px #31527618;
+}
+.home-corner { color: var(--color-muted); font-size: 11px; letter-spacing: .08em; }
 .app-main { max-width: 1128px; margin: 0 auto; padding: 24px; }
 .app-main.app-main--wide { max-width: 100%; padding: 18px clamp(12px, 2.2vw, 36px) 34px; }
 
@@ -330,9 +346,6 @@ onBeforeUnmount(() => {
   min-height: 66px;
   gap: 10px 24px;
   padding: 9px max(var(--workspace-gutter), calc((100% - var(--workspace-width)) / 2));
-  background: var(--workspace-paper);
-  border-color: var(--workspace-line);
-  backdrop-filter: none;
 }
 .workspace .brand-wrap { flex: 0 1 auto; }
 .workspace .brand {
@@ -342,7 +355,6 @@ onBeforeUnmount(() => {
 }
 .workspace .app-header--library .brand { max-width: min(380px, 66vw); }
 .workspace .brand:hover, .workspace .brand[aria-expanded="true"] { background: var(--workspace-soft); border-color: transparent; }
-.workspace .brand-mark { border-radius: 10px; background: var(--workspace-accent); box-shadow: none; }
 .workspace .brand-text small { overflow: hidden; color: var(--workspace-muted); text-overflow: ellipsis; }
 .workspace .brand-menu {
   max-width: calc(100vw - 2 * var(--workspace-gutter));
@@ -357,14 +369,23 @@ onBeforeUnmount(() => {
 .workspace .menu-icon, .workspace .menu-check { color: var(--workspace-accent); }
 .workspace .menu-home { border-color: var(--workspace-line); }
 .workspace .home-corner { flex: none; color: var(--workspace-muted); font-size: 12px; letter-spacing: 0; }
-.workspace .nav { flex-wrap: wrap; gap: 4px; overflow: visible; padding: 0; }
-.workspace .nav-item { color: var(--workspace-muted); white-space: nowrap; }
-.workspace .nav-item:hover, .workspace .nav-item.router-link-active { background: var(--workspace-tint); color: var(--workspace-accent); }
+.workspace .nav { flex-wrap: wrap; overflow: visible; }
 .workspace .app-main {
   width: min(var(--workspace-width), calc(100% - 2 * var(--workspace-gutter)));
   max-width: none;
   padding: clamp(22px, 4vw, 48px) 0 54px;
 }
+.app--library {
+  background: radial-gradient(ellipse at 50% 15%, #fbf8ee, transparent 72%), #e9ece4;
+}
+.app--library .app-header--library {
+  background: #f8f8f1;
+  border-color: #d4dbcf;
+  box-shadow: none;
+}
+.app--library .brand-mark { background: #29554b; color: #fbf0d4; box-shadow: none; font-family: Georgia, serif; }
+.app--library .brand-text b, .app--library .brand-chevron { color: #244c42; }
+.app--library .brand-text small, .app--library .home-corner { color: #56665d; }
 @media (max-width: 720px) {
   .workspace .app-header { min-height: 58px; }
   .workspace .nav { flex-basis: 100%; }

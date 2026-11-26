@@ -18,7 +18,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { Ledger2Group, Ledger2Node, Ledger2ReplayItem, Ledger2ReplayStep, Ledger2Tx } from '@/api/ledger2'
 import type { ReplayPhase } from '@/composables/useLedger2Replay'
-import { replayScene, replaySlots } from '@/utils/ledger2ReplayScene'
+import { describeReplay, replayScene, replaySlots } from '@/utils/ledger2ReplayScene'
 
 type Kind = 'node' | 'group' | 'tx'
 type Role = 'primary' | 'mirror'
@@ -41,12 +41,13 @@ interface GNode {
   hue: number
 }
 /** 屏幕上真正画的一个节点：目标信息 + 当前（动画中间态）位姿。 */
-interface RNode extends GNode { o: number }
+interface RNode extends GNode { o: number; labelSide?: number; previousSide?: number; previousName?: string; labelMix?: number }
 /** 布局前的条目：还没有位置和颜色。 */
 type GItem = Omit<GNode, 'depth' | 'x' | 'y' | 'r' | 'hue'>
 interface GEdge { id: string; from: string; to: string }
 interface Graph { nodes: GNode[]; edges: GEdge[] }
 interface Pose { x: number; y: number; r: number; o: number }
+interface Track { from: Pose; to: Pose; control?: { x: number; y: number } }
 
 const props = defineProps<{
   tree: Ledger2Node | null
@@ -99,15 +100,17 @@ function textW(s: string, size = FS): number {
 }
 const LABEL_MAX = 88                // 名字最多这么宽
 /** 过长的名字用省略号掐掉（布局和渲染用同一个结果，宽高才对得上）。 */
-function clipText(s: string, maxW = LABEL_MAX): string {
-  if (textW(s) <= maxW) return s
+function clipText(s: string, maxW = LABEL_MAX, size = FS): string {
+  if (textW(s, size) <= maxW) return s
   let out = ''
   for (const ch of s) {
-    if (textW(out + ch + '…') > maxW) break
+    if (textW(out + ch + '…', size) > maxW) break
     out += ch
   }
   return out + '…'
 }
+const REPLAY_FONT = 18
+const replayLabel = (name: string) => clipText(name, 158, REPLAY_FONT)
 const radiusOfItem = (it: GItem): number => {
   if (it.kind === 'tx') return it.role === 'mirror' ? 4 : 5.5
   if (it.kind === 'group') return 12
@@ -123,7 +126,7 @@ interface Box { x0: number; y0: number; x1: number; y1: number }
 
 /** 一条标签的宽度（标题 / 金额两行取宽者）。 */
 function labelWidth(n: GNode, replay = false): number {
-  if (replay) return textW(clipText(n.name, 130), 16)
+  if (replay) return textW(replayLabel(n.name), REPLAY_FONT)
   const name = clipText(n.name)
   return n.kind === 'tx'
     ? Math.max(textW(name), textW(txIE(n)))
@@ -138,7 +141,7 @@ function labelBox(n: GNode, replay = false): Box {
   }
   const gap = 12
   const radius = n.r + (n.kind === 'tx' ? 6 : 14)
-  const w = labelWidth(n, replay) + gap + 12
+  const w = labelWidth(n, replay) + gap + (replay ? 23 : 12)
   return n.x >= 0
     ? { x0: n.x - radius, x1: n.x + n.r + w, y0: n.y - Math.max(radius, 18), y1: n.y + Math.max(radius, 24) }
     : { x0: n.x - n.r - w, x1: n.x + radius, y0: n.y - Math.max(radius, 18), y1: n.y + Math.max(radius, 24) }
@@ -146,7 +149,7 @@ function labelBox(n: GNode, replay = false): Box {
 
 /** Reserve each label and halo before placing the next node. Moving outward keeps
  *  every branch in its own sector and terminates beyond the occupied bounds. */
-function separateLabels(nodes: GNode[], replay = false) {
+function separateLabels(nodes: GNode[], replay = false, anchors = new Set<string>()) {
   const cells = new Map<string, Box[]>()
   const size = 128
   const keysFor = (b: Box) => {
@@ -156,7 +159,8 @@ function separateLabels(nodes: GNode[], replay = false) {
     }
     return keys
   }
-  for (const node of [...nodes].sort((a, b) => a.depth - b.depth)) {
+  for (const node of [...nodes].sort((a, b) =>
+    Number(anchors.has(b.key)) - Number(anchors.has(a.key)) || a.depth - b.depth)) {
     const angle = Math.atan2(node.y, node.x)
     let box = labelBox(node, replay)
     while (keysFor(box).some(key => cells.get(key)?.some(other =>
@@ -261,13 +265,33 @@ function layoutStars(root: GItem, childrenOf: (item: GItem) => GItem[], replay =
     }
   }
   layout(root, 0, -Math.PI / 2, Math.PI * 1.5, 204)
-  separateLabels(nodes, replay)
+  if (!replay) separateLabels(nodes)
   return { nodes, edges }
 }
 
-const replayPlan = computed(() => {
+interface ReplayPlan {
+  frames: Record<ReplayPhase, Graph>
+  anchors: Map<string, GNode>
+  slots: GNode[]
+  changed: Set<string>
+  targets: Set<string>
+  direction: ReturnType<typeof describeReplay>
+  bundles: ReturnType<typeof replayScene>['bundles']
+  paths: Map<string, { d: string; landingLink: string; arrival: { x: number; y: number } }>
+  labels: Map<string, { text: string; width: number }>
+}
+
+function transferControl(from: { x: number; y: number }, to: { x: number; y: number }) {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const bend = Math.min(0.21, 112 / Math.max(1, Math.hypot(dx, dy)))
+  return { x: (from.x + to.x) / 2 + dy * bend, y: (from.y + to.y) / 2 - dx * bend }
+}
+
+const replayPlan = computed<ReplayPlan | null>((previous) => {
   if (!props.replayStep) return null
   const { before, after, changed, targets, bundles } = replayScene(props.replayStep)
+  const direction = describeReplay(props.replayStep)
   const { slots, beforeKeys, afterKeys } = replaySlots(before, after)
   const virtualRoot: GItem = { key: '@replay', kind: 'node', name: '', note: '', e: 0, i: 0, count: 0 }
   const branches = new Map<string, GItem[]>()
@@ -280,6 +304,16 @@ const replayPlan = computed(() => {
   }
   const roots = branches.get(virtualRoot.key) ?? []
   const layout = layoutStars(roots.length === 1 ? roots[0] : virtualRoot, item => branches.get(item.key) ?? [], true)
+  const pinned = new Set<string>()
+  for (const node of layout.nodes) {
+    const prior = previous?.anchors.get(node.key)
+    if (!prior) continue
+    node.x = prior.x
+    node.y = prior.y
+    node.hue = prior.hue
+    pinned.add(node.key)
+  }
+  separateLabels(layout.nodes, true, pinned)
   const posesBySlot = new Map(layout.nodes.map(node => [node.key, node]))
 
   function snapshot(items: Map<string, Ledger2ReplayItem>, keys: Map<string, string>): Graph {
@@ -296,7 +330,7 @@ const replayPlan = computed(() => {
   const revealed = new Map(before)
   const revealedKeys = new Map(beforeKeys)
   for (const [ref, item] of after) {
-    if (revealed.has(ref)) continue
+    if (revealed.has(ref) || item.kind === 'tx') continue
     revealed.set(ref, item)
     revealedKeys.set(ref, afterKeys.get(ref)!)
   }
@@ -307,11 +341,41 @@ const replayPlan = computed(() => {
     completed.set(ref, item)
     completedKeys.set(ref, beforeKeys.get(ref)!)
   }
-  const frames = {
-    source: snapshot(before, beforeKeys), target: snapshot(revealed, revealedKeys),
-    result: snapshot(completed, completedKeys),
+  const source = before.size ? snapshot(before, beforeKeys)
+    : snapshot(new Map([...after].filter(([ref]) => !changed.has(ref))), afterKeys)
+  const target = snapshot(revealed, revealedKeys)
+  const result = snapshot(completed, completedKeys)
+  // Keep the old group visible until its members have reached their new parent.
+  const settle = {
+    nodes: [...result.nodes, ...source.nodes.filter(node => direction.removing.has(node.key))],
+    edges: [...result.edges, ...source.edges.filter(edge => direction.removing.has(edge.to)
+      && (completed.has(edge.from) || direction.removing.has(edge.from)))],
   }
-  return { frames, slots: layout.nodes.filter(node => node.key !== virtualRoot.key), changed, targets, bundles }
+  const anchors = new Map(result.nodes.map(node => [completedKeys.get(node.key)!, node]))
+  const starts = new Map(source.nodes.map(node => [node.key, node]))
+  const destinations = new Map(result.nodes.map(node => [node.key, node]))
+  const paths: ReplayPlan['paths'] = new Map()
+  const labels: ReplayPlan['labels'] = new Map()
+  for (const item of [...before.values(), ...after.values()]) {
+    if (labels.has(item.name)) continue
+    const text = replayLabel(item.name)
+    labels.set(item.name, { text, width: Math.ceil(textW(text, REPLAY_FONT)) + 18 })
+  }
+  for (const to of result.nodes) {
+    const from = starts.get(to.key)
+    const parentRef = after.get(to.key)?.parent
+    if (from && before.get(to.key)?.parent !== parentRef && after.has(to.key)) {
+      const control = transferControl(from, to)
+      const parent = parentRef ? destinations.get(parentRef) : undefined
+      paths.set(to.key, {
+        d: `M ${from.x} ${from.y} Q ${control.x} ${control.y} ${to.x} ${to.y}`,
+        landingLink: parent ? replayLink(parent, { ...to, r: 7 }) : '',
+        arrival: to,
+      })
+    }
+  }
+  return { frames: { source, target, settle, result }, anchors, paths, direction, labels,
+    slots: layout.nodes.filter(node => node.key !== virtualRoot.key), changed, targets, bundles }
 })
 
 const graph = computed(() => replayPlan.value?.frames[props.replayPhase ?? 'source'] ?? liveGraph.value)
@@ -322,11 +386,15 @@ const poses = new Map<string, Pose>()
 const animPhase = ref(0)
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3)
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 
 let anim: {
   t0: number
   dur: number
-  tracks: Map<string, { from: Pose; to: Pose }>
+  progress: number
+  tracks: Map<string, Track>
+  renames: Map<string, string>
+  transfers: Map<string, string>
   ghosts: Map<string, { meta: GNode; from: Pose; to: Pose; fromKey: string | null }>
   final: GNode[]
 } | null = null
@@ -339,13 +407,22 @@ function startAnimation() {
   const step = (ts: number) => {
     const a = anim
     if (!a) { animRaf = 0; return }
-    const t = Math.min(1, (ts - a.t0) / a.dur)
+    const t = Math.max(0, Math.min(1, (ts - a.t0) / a.dur))
     const k = easeOut(t)
+    a.progress = t
     const blend = (from: Pose, to: Pose): Pose => ({
       x: lerp(from.x, to.x, k), y: lerp(from.y, to.y, k),
       r: lerp(from.r, to.r, k), o: lerp(from.o, to.o, k),
     })
-    for (const [key, tr] of a.tracks) poses.set(key, blend(tr.from, tr.to))
+    for (const [key, tr] of a.tracks) {
+      const pose = blend(tr.from, tr.to)
+      if (tr.control) {
+        const u = t * t * (3 - 2 * t)
+        pose.x = lerp(lerp(tr.from.x, tr.control.x, u), lerp(tr.control.x, tr.to.x, u), u)
+        pose.y = lerp(lerp(tr.from.y, tr.control.y, u), lerp(tr.control.y, tr.to.y, u), u)
+      }
+      poses.set(key, pose)
+    }
     for (const [key, gh] of a.ghosts) poses.set(key, blend(gh.from, gh.to))
     animPhase.value++
     if (t < 1) {
@@ -365,26 +442,40 @@ function rebuild(next: { nodes: GNode[]; edges: GEdge[] }) {
   const target = new Map(next.nodes.map(n => [n.key, n]))
   const parent = new Map<string, string>()
   for (const e of next.edges) parent.set(e.to, e.from)
-  if (props.replayStep && !prevMeta.size) {
+  if (props.replayStep && (!prevMeta.size || reducedMotion.matches)) {
+    if (animRaf) cancelAnimationFrame(animRaf)
+    animRaf = 0
+    anim = null
+    poses.clear()
     for (const node of next.nodes) poses.set(node.key, { x: node.x, y: node.y, r: node.r, o: 1 })
     prevParent = parent
     prevMeta = target
     return
   }
 
-  const tracks = new Map<string, { from: Pose; to: Pose }>()
+  const tracks = new Map<string, Track>()
+  const renames = new Map<string, string>()
+  const transfers = new Map<string, string>()
+  const moving = props.replayPhase === 'result' || props.replayPhase === 'settle'
   for (const n of next.nodes) {
     const cur = poses.get(n.key)
     const to: Pose = { x: n.x, y: n.y, r: n.r, o: 1 }
+    const old = prevMeta.get(n.key)
+    if (moving && old && old.name !== n.name) renames.set(n.key, old.name)
     if (cur) {
       if (!props.replayStep || cur.x !== to.x || cur.y !== to.y || cur.r !== to.r || cur.o !== 1) {
-        tracks.set(n.key, { from: { ...cur }, to })
+        const route = moving && replayPlan.value?.paths.has(n.key)
+        const oldParent = prevParent.get(n.key)
+        const control = route && oldParent !== parent.get(n.key) ? transferControl(cur, to) : undefined
+        if (control && oldParent) transfers.set(n.key, oldParent)
+        tracks.set(n.key, { from: { ...cur }, to, control })
       }
     } else {
       // 新出现的节点（展开 / 首次加载）：从父节点此刻的位置长出来
       const pk = parent.get(n.key) ?? prevParent.get(n.key) ?? ''
       const base = poses.get(pk) ?? (pk ? target.get(pk) : undefined)
-      tracks.set(n.key, { from: { x: base?.x ?? n.x, y: base?.y ?? n.y, r: 0, o: 0 }, to })
+      tracks.set(n.key, { from: props.replayStep ? { ...to, r: to.r * .75, o: 0 }
+        : { x: base?.x ?? n.x, y: base?.y ?? n.y, r: 0, o: 0 }, to })
     }
   }
 
@@ -397,15 +488,17 @@ function rebuild(next: { nodes: GNode[]; edges: GEdge[] }) {
     const pk = prevParent.get(key) ?? ''
     const base = (pk ? target.get(pk) : undefined) ?? poses.get(pk)
     ghosts.set(key, {
-      meta, from: { ...p }, to: { x: base?.x ?? p.x, y: base?.y ?? p.y, r: 0, o: 0 },
+      meta, from: { ...p }, to: props.replayStep ? { ...p, r: p.r * .83, o: 0 }
+        : { x: base?.x ?? p.x, y: base?.y ?? p.y, r: 0, o: 0 },
       fromKey: pk || null,
     })
   }
 
   prevParent = parent
   prevMeta = new Map(next.nodes.map(n => [n.key, n]))
-  if (!tracks.size && !ghosts.size) return
-  anim = { t0: performance.now(), dur: 420, tracks, ghosts, final: next.nodes }
+  if (!tracks.size && !ghosts.size && !renames.size) return
+  const dur = props.replayStep ? (transfers.size ? 640 : 300) : 420
+  anim = { t0: performance.now(), dur, progress: 0, tracks, ghosts, renames, transfers, final: next.nodes }
   startAnimation()
 }
 
@@ -416,7 +509,14 @@ const renderNodes = computed<RNode[]>(() => {
   const out: RNode[] = []
   for (const n of graph.value.nodes) {
     const p = poses.get(n.key) ?? { x: n.x, y: n.y, r: n.r, o: 1 }
-    out.push({ ...n, x: p.x, y: p.y, r: p.r, o: p.o })
+    const track = anim?.tracks.get(n.key)
+    const labelSide = n.x < 0 ? -1 : 1
+    const previousSide = track && track.from.x < 0 ? -1 : 1
+    const flip = !!track && previousSide !== labelSide
+    const previousName = anim?.renames.get(n.key) ?? (flip ? n.name : undefined)
+    out.push({ ...n, x: p.x, y: p.y, r: p.r, o: p.o, labelSide,
+      previousSide: flip ? previousSide : labelSide, previousName,
+      labelMix: previousName === undefined ? undefined : anim!.progress })
   }
   if (anim) {
     for (const [key, gh] of anim.ghosts) {
@@ -427,15 +527,25 @@ const renderNodes = computed<RNode[]>(() => {
   return out
 })
 
-const renderEdges = computed<{ id: string; a: Pose; b: Pose; o: number }[]>(() => {
+interface RenderEdge { id: string; a: Pose; b: Pose; o: number; role?: 'source' | 'target' }
+const renderEdges = computed<RenderEdge[]>(() => {
   void animPhase.value
-  const out: { id: string; a: Pose; b: Pose; o: number }[] = []
+  const out: RenderEdge[] = []
+  const plan = replayPlan.value
+  const arriving = props.replayPhase === 'result' || props.replayPhase === 'settle'
   for (const e of graph.value.edges) {
     const a = poses.get(e.from)
     const b = poses.get(e.to)
-    if (a && b) out.push({ id: e.id, a, b, o: Math.min(a.o, b.o) })
+    const role = plan?.changed.has(e.to) ? (arriving ? 'target' : 'source') : undefined
+    const reveal = anim?.transfers.has(e.to) ? Math.max(0, (anim.progress - .48) / .52) : 1
+    if (a && b) out.push({ id: e.id, a, b, o: Math.min(a.o, b.o) * reveal, role })
   }
   if (anim) {
+    for (const [key, parent] of anim.transfers) {
+      const a = poses.get(parent)
+      const b = poses.get(key)
+      if (a && b) out.push({ id: 'previous:' + key, a, b, o: Math.max(0, 1 - anim.progress * 2), role: 'source' })
+    }
     for (const [key, gh] of anim.ghosts) {
       const a = gh.fromKey ? poses.get(gh.fromKey) : undefined
       const b = poses.get(key)
@@ -445,7 +555,35 @@ const renderEdges = computed<{ id: string; a: Pose; b: Pose; o: number }[]>(() =
   return out
 })
 
+function replayLink(a: { x: number; y: number; r: number }, b: typeof a): string {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const distance = Math.hypot(dx, dy)
+  const gap = distance - a.r - b.r
+  if (gap <= 0) return ''
+
+  // Local control points keep the arc predictable as either endpoint moves.
+  const ux = dx / distance
+  const uy = dy / distance
+  const bend = Math.min(44, gap * .32) * ux
+  const nx = -uy * bend
+  const ny = ux * bend
+  const aLead = a.r + gap * .25
+  const bLead = b.r + gap * .25
+  const c1 = { x: a.x + ux * aLead + nx, y: a.y + uy * aLead + ny }
+  const c2 = { x: b.x - ux * bLead + nx, y: b.y - uy * bLead + ny }
+  function atRim(node: typeof a, control: { x: number; y: number }) {
+    // The node is painted over the edge, so tuck the end slightly beneath its rim.
+    const scale = Math.max(0, node.r - .6) / Math.hypot(control.x - node.x, control.y - node.y)
+    return { x: node.x + (control.x - node.x) * scale, y: node.y + (control.y - node.y) * scale }
+  }
+  const start = atRim(a, c1)
+  const end = atRim(b, c2)
+  return `M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`
+}
+
 function pathOf(a: Pose, b: Pose): string {
+  if (props.replayStep) return replayLink(a, b)
   const distance = Math.hypot(b.x - a.x, b.y - a.y)
   if (!distance) return ''
   const ux = (b.x - a.x) / distance
@@ -460,18 +598,35 @@ function pathOf(a: Pose, b: Pose): string {
 
 const txTotal = computed(() => graph.value.nodes.filter(n => n.kind === 'tx').length)
 const hoverKey = ref('')
-const activeKey = computed(() => hoverKey.value || (!props.replayStep && props.selected.size === 1 ? [...props.selected][0] : ''))
-const replayEdges = computed(() => {
-  const plan = replayPlan.value
-  if (!plan) return new Set<string>()
-  return new Set(graph.value.edges.filter(edge => plan.changed.has(edge.to) || plan.targets.has(edge.to)).map(edge => edge.id))
+const activeKey = computed(() => props.replayStep ? ''
+  : hoverKey.value || (props.selected.size === 1 ? [...props.selected][0] : ''))
+const phaseLabel: Record<ReplayPhase, string> = {
+  source: '原位置', target: '目标位置', settle: '成员已归位', result: '操作结果',
+}
+const replayGuides = computed(() => {
+  void animPhase.value
+  const paths = replayPlan.value?.paths
+  if (!paths || reducedMotion.matches || paths.size > 12) return []
+  const preview = props.replayPhase === 'target'
+  const alpha = preview ? .7 : anim?.transfers.size ? .7 * (1 - anim.progress) : 0
+  if (!alpha) return []
+  return [...paths].map(([key, guide]) => ({ ...guide, key, alpha }))
 })
-const replayCaption = computed(() => {
-  if (!replayPlan.value?.changed.size) return '本步暂无可显示的节点变化'
-  if (props.replayPhase === 'target') return '目标位置 · 青色星点是目标分组'
-  if (props.replayPhase === 'result') return '操作结果 · 连线显示新的归属'
-  return '原位置 · 沿连线可查看父节点'
-})
+function replayMarks(node: RNode) {
+  const labels = replayPlan.value?.labels
+  const current = labels?.get(node.name)
+  const previous = node.previousName === undefined ? undefined : labels?.get(node.previousName)
+  const mix = node.labelMix ?? 1
+  const side = node.labelSide ?? (node.x < 0 ? -1 : 1)
+  const previousSide = node.previousSide ?? side
+  const flip = side !== previousSide
+  const oldOpacity = flip ? Math.max(0, 1 - 2 * mix) : 1 - mix
+  const newOpacity = flip ? Math.max(0, 2 * mix - 1) : mix
+  return [
+    ...(previous && oldOpacity > 0 ? [{ ...previous, opacity: oldOpacity, side: previousSide, key: 'previous' }] : []),
+    ...(current && newOpacity > 0 ? [{ ...current, opacity: newOpacity, side, key: 'current' }] : []),
+  ]
+}
 const replayMembersOpen = ref(false)
 const relatedEdges = computed(() => {
   const result = new Set<string>()
@@ -580,26 +735,40 @@ function zoomBy(f: number) {
   zoom.value = next
 }
 function resetCamera() {
-  if (replayPlan.value) fitReplay()
+  if (replayPlan.value) fitReplay(true, true)
   else focusOn('root')
 }
 
 const VIEW_W = 1800
 const VIEW_H = 1000
 
-function fitReplay() {
-  const slots = replayPlan.value?.slots ?? []
+function fitReplay(force: boolean, animated: boolean) {
+  const plan = replayPlan.value
+  const slots = plan?.slots ?? []
   if (!slots.length) return
   const box = slots.map(node => labelBox(node, true)).reduce((bounds, item) => ({
     x0: Math.min(bounds.x0, item.x0), x1: Math.max(bounds.x1, item.x1),
     y0: Math.min(bounds.y0, item.y0), y1: Math.max(bounds.y1, item.y1),
   }))
-  cancelCamera()
-  zoom.value = clamp(Math.min(VIEW_W / (box.x1 - box.x0 + 170), VIEW_H / (box.y1 - box.y0 + 140)), ZOOM_MIN, 2.5)
-  pan.value = { x: -zoom.value * (box.x0 + box.x1) / 2, y: -zoom.value * (box.y0 + box.y1) / 2 }
+  const current = zoom.value
+  if (!force && box.x0 * current + pan.value.x >= -VIEW_W / 2 + 60
+      && box.x1 * current + pan.value.x <= VIEW_W / 2 - 60
+      && box.y0 * current + pan.value.y >= -VIEW_H / 2 + 55
+      && box.y1 * current + pan.value.y <= VIEW_H / 2 - 76) return
+  const next = clamp(Math.min(VIEW_W / (box.x1 - box.x0 + 180), VIEW_H / (box.y1 - box.y0 + 186)), ZOOM_MIN, 2.55)
+  const z = force ? next : Math.min(current, next)
+  const p = { x: -z * (box.x0 + box.x1) / 2, y: -z * (box.y0 + box.y1) / 2 - 20 }
+  if (animated && !reducedMotion.matches) animateCamera(z, p, 420)
+  else {
+    cancelCamera()
+    zoom.value = z
+    pan.value = p
+  }
 }
 
-watch(replayPlan, fitReplay, { immediate: true })
+watch(replayPlan, (plan, previous) => {
+  if (plan) fitReplay(!previous, !!previous)
+}, { immediate: true })
 
 function childMap(): Map<string, string[]> {
   const kids = new Map<string, string[]>()
@@ -846,20 +1015,32 @@ onBeforeUnmount(() => {
           <stop offset="100%" stop-color="#0b1226" stop-opacity="0" />
         </radialGradient>
       </defs>
-      <rect x="-900" y="-500" width="1800" height="1000" fill="#0b1226" />
-      <rect x="-900" y="-500" width="1800" height="1000" fill="url(#l2gField)" />
+      <rect v-if="!replayStep" x="-900" y="-500" width="1800" height="1000" fill="#0b1226" />
+      <rect v-if="replayStep" x="-2700" y="-2700" width="5400" height="5400" fill="url(#l2gField)" pointer-events="none" />
+      <rect v-else x="-900" y="-500" width="1800" height="1000" fill="url(#l2gField)" />
       <g ref="sceneEl" :transform="`translate(${pan.x} ${pan.y}) scale(${zoom})`">
-        <circle r="230" fill="url(#l2gCore)" pointer-events="none" />
+        <circle v-if="!replayStep" r="230" fill="url(#l2gCore)" pointer-events="none" />
         <g class="l2g-edges" pointer-events="none">
           <path v-for="e in renderEdges" :key="e.id" :d="pathOf(e.a, e.b)" :opacity="e.o" :data-edge="e.id"
-                :class="{ 'is-related': relatedEdges.has(e.id) || replayEdges.has(e.id), 'is-muted': activeKey && !relatedEdges.has(e.id) }" />
+                :class="{ 'is-related': relatedEdges.has(e.id), 'is-muted': activeKey && !relatedEdges.has(e.id) }"
+                :data-replay-role="e.role" />
+        </g>
+        <g v-if="replayStep" class="replay-guides" pointer-events="none">
+          <g v-for="guide in replayGuides" :key="guide.key" :opacity="guide.alpha">
+            <path :d="guide.d" />
+            <path v-if="replayPhase === 'target' && guide.landingLink" class="replay-landing-link" :d="guide.landingLink" />
+            <circle :cx="guide.arrival.x" :cy="guide.arrival.y" r="7" />
+          </g>
         </g>
         <g v-for="n in renderNodes" :key="n.key" class="l2g-node"
            :class="[`kind-${n.kind}`, `role-${n.role ?? 'none'}`, {
              root: n.key === 'root',
              'is-muted': activeKey && !relatedNodes.has(n.key),
              selected: replayPlan ? replayPlan.changed.has(n.key) : selected.has(n.key),
+             'replay-source': replayPhase !== 'result' && replayPlan?.direction.sources.has(n.key),
              'replay-target': replayPhase !== 'source' && replayPlan?.targets.has(n.key),
+             'replay-context': replayPlan && !replayPlan.changed.has(n.key) && !replayPlan.targets.has(n.key)
+               && !replayPlan.direction.sources.has(n.key),
              dragging: dragging?.has(n.key) ?? false,
              'drop-target': dropTarget === n.key,
            }]"
@@ -878,16 +1059,23 @@ onBeforeUnmount(() => {
           <text v-if="n.key === 'root' && !replayStep" y="56" text-anchor="middle" class="l2g-root-amt">
            支出 −¥{{ money(n.e) }} · 收入 +¥{{ money(n.i) }}
           </text>
+          <template v-else-if="replayStep && n.key !== 'root'">
+            <g v-for="label in replayMarks(n)" :key="label.key" class="replay-label" :opacity="label.opacity">
+              <rect :x="label.side > 0 ? n.r + 12 : -n.r - 12 - label.width" y="-15" :width="label.width" height="30" rx="8" />
+              <text :x="label.side * (n.r + 21)" :text-anchor="label.side > 0 ? 'start' : 'end'"
+                    dominant-baseline="central">{{ label.text }}</text>
+            </g>
+          </template>
           <template v-else-if="n.key !== 'root'">
             <text v-if="n.kind !== 'tx'" :x="n.x >= 0 ? n.r + 12 : -(n.r + 12)"
-                  :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-1" class="l2g-label">{{ replayStep ? clipText(n.name, 130) : clipText(n.name) }}</text>
+                  :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-1" class="l2g-label">{{ clipText(n.name) }}</text>
             <text v-if="!replayStep && n.kind !== 'tx' && zoom >= 1.4" :x="n.x >= 0 ? n.r + 12 : -(n.r + 12)"
                   :text-anchor="n.x >= 0 ? 'start' : 'end'" y="12" class="l2g-value">
               {{ valueLine(n) }}
             </text>
             <template v-if="n.kind === 'tx'">
               <text v-if="showTxName(n.key)" :x="n.x >= 0 ? n.r + 10 : -(n.r + 10)"
-                    :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-2" class="l2g-tx">{{ replayStep ? clipText(n.name, 130) : clipText(n.name) }}</text>
+                    :text-anchor="n.x >= 0 ? 'start' : 'end'" y="-2" class="l2g-tx">{{ clipText(n.name) }}</text>
               <text v-if="!replayStep" :x="n.x >= 0 ? n.r + 10 : -(n.r + 10)" :text-anchor="n.x >= 0 ? 'start' : 'end'"
                     :y="showTxName(n.key) ? 13 : 3" class="l2g-tx-amt">{{ txIE(n) }}</text>
             </template>
@@ -918,7 +1106,10 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </details>
-    <p v-if="replayStep" class="l2g-help replay-caption" data-testid="replay-caption">{{ replayCaption }}</p>
+    <div v-if="replayPlan" class="replay-caption" data-testid="replay-caption" role="status">
+      <span>{{ phaseLabel[replayPhase ?? 'source'] }}</span>
+      <b :title="replayPlan.direction.summary">{{ replayPlan.direction.summary }}</b>
+    </div>
     <p v-else-if="readOnly" class="l2g-help">正在读取回放</p>
     <p v-else class="l2g-help">滚轮缩放 · 中键拖视野 · 空白拖框选择 · 选中后按住任意条目拖动 · 双击或 ± 展开/折叠</p>
     <div v-if="band" class="l2g-band" :style="bandStyle" />
@@ -931,9 +1122,17 @@ onBeforeUnmount(() => {
   background: #0b1226; border: 1px solid var(--color-border); border-radius: var(--radius);
 }
 .l2g-svg { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
-.is-replaying .l2g-label, .is-replaying .l2g-tx { font-size: 16px; }
-.is-replaying .l2g-node.replay-target .core { stroke: #70e0da; stroke-width: 2.5; }
-.is-replaying .replay-caption { font-size: 12px; color: #b8d5fb; }
+.l2g.is-replaying { background: radial-gradient(ellipse at 44% 42%, #1b3054, #111e37 58%, #0b1427 100%); }
+.replay-caption {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 9px; max-width: calc(100% - 32px); width: max-content;
+  padding: 6px 10px; border: 1px solid #40567a; border-radius: 12px;
+  background: #10203a; color: #ebf3ff; font-size: 12px;
+}
+.replay-caption span {
+  flex: none; padding: 2px 6px; border-radius: 5px; background: #223859; color: #d1e3ff; font-size: 11px;
+}
+.replay-caption b { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 650; }
 .replay-members { position: absolute; top: 12px; left: 12px; max-width: min(320px, 65%); padding: 6px 9px;
   border: 1px solid #355078; border-radius: 8px; background: #14233d; color: #d0e2ff; font-size: 12px; }
 .replay-members summary { cursor: pointer; }
@@ -963,6 +1162,25 @@ onBeforeUnmount(() => {
 .l2g-node.root .halo { fill: #767de2; opacity: .35; }
 .l2g-node.selected .core { stroke: #fff; stroke-width: 3; filter: drop-shadow(0 0 8px #9fd8ff); }
 .l2g-node.selected .halo { opacity: .19; }
+.is-replaying .l2g-node { cursor: default; transition: none; }
+.is-replaying .l2g-node.selected .core { stroke: #eaf4ff; fill: #b8d5ff; stroke-width: 2.2; filter: none; }
+.is-replaying .l2g-node.selected:not(.kind-tx) .core { fill: #344a74; }
+.is-replaying .l2g-node.replay-source .core { stroke: #f0bf81; stroke-width: 2.2; }
+.is-replaying .l2g-node.replay-target .core { fill: #204348; stroke: #7be1d6; stroke-width: 2.4; }
+.is-replaying .l2g-node.replay-context .halo { opacity: .05; }
+.is-replaying .l2g-edges path { stroke: #7d9bc3; stroke-opacity: .42; stroke-linecap: round; transition: none; }
+.is-replaying .l2g-edges path[data-replay-role="source"] { stroke: #dfb17d; stroke-opacity: .8; stroke-width: 1.8; }
+.is-replaying .l2g-edges path[data-replay-role="target"] { stroke: #7be1d6; stroke-opacity: .86; stroke-width: 2; }
+.replay-guides path { fill: none; stroke: #8bc0fb; stroke-width: 1.4; stroke-dasharray: 4 6; stroke-linecap: round; }
+.replay-guides .replay-landing-link { stroke: #7be1d6; stroke-width: 1.6; stroke-dasharray: 2 5; }
+.replay-guides circle { fill: #142842; stroke: #7be1d6; stroke-width: 1.8; }
+.replay-label { pointer-events: none; }
+.replay-label rect { fill: #14233c; fill-opacity: .94; stroke: #465f85; stroke-opacity: .8; }
+.replay-label text { fill: #e4eeff; font-size: 18px; font-weight: 600; }
+.replay-context .replay-label rect { fill-opacity: .75; stroke-opacity: .4; }
+.replay-context .replay-label text { fill: #aebfd8; }
+.replay-source .replay-label rect { stroke: #b79165; }
+.replay-target .replay-label rect { stroke: #63b7b2; }
 .l2g-node.dragging { opacity: .4; }
 .l2g-node.drop-target .core { fill: #317e7e; stroke: #ffe1ac; stroke-width: 3.5; }
 .l2g-label {

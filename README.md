@@ -40,6 +40,12 @@
 
 ---
 
+## 报告页的财务简报
+
+打开当前账本的报告，选择包含今天的周、月或年，左侧会显示该周期的信纸。初次打开时正文为空。在报告页浮窗中对 ATLAS 说“根据当前账本，为本期写一份财务简报”，助手可以使用 `finance_report_brief_write` 写入。三个周期独立保存；再次撰写会更新同一封信。
+
+预测范围为从撰写当天到期末尚未发生的收支。预计支出是义务性支出和弹性支出之和，预计收入减去义务性支出得到未来活钱，再减弹性支出得到预计结余。缺少依据的金额显示为“待估算”。信纸也可列出值得核对的支出和改善建议。
+
 ## 目录 / Contents
 
 | 中文 | English |
@@ -77,7 +83,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 .\一键启动财务助手.cmd
 ```
 
-启动后打开 <http://127.0.0.1:5173>，应能看到「选择一本账本」。另在 PowerShell 中检查后端，预期 `status` 为 `ok`：
+启动器会自动在浏览器打开 <http://127.0.0.1:5173>，页面显示「选择一本账本」。另在 PowerShell 中检查后端，预期 `status` 为 `ok`：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
@@ -85,9 +91,9 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 
 - **端口占用：** 启动器不会关闭其他进程。可改用 `.\一键启动财务助手.cmd -BackendPort 18000 -FrontendPort 15173`，前端改开 `http://127.0.0.1:15173`，健康检查改用 `18000`。其他步骤不变。
 - **启动失败：** 检查仓库上一级 `.runtime/` 下的 `backend-error.log` 和 `frontend-error.log`；缺依赖时重跑安装脚本。
-- **停止：** 运行 `.\一键停止财务助手.cmd`，或双击同名文件。它只停止由当前目录的一键入口启动的进程，保留本地账本。服务默认只绑定本机，不要对公网开放。
+- **停止：** 关闭启动窗口，或在窗口里按 Ctrl+C。前后端会一起停止，本地账本会保留。服务默认绑定本机。
 
-> **EN — Install and launch.** Install Git, Python 3.12 and Node.js LTS, then run `scripts/setup.ps1` once and `一键启动财务助手.cmd` afterwards. Open <http://127.0.0.1:5173>; `GET /health` must return `status: ok`. Use `-BackendPort 18000 -FrontendPort 15173` if the default ports are taken. Stop with `一键停止财务助手.cmd`; services bind to localhost only.
+> **EN — Install and launch.** Install Git, Python 3.12 and Node.js LTS, then run `scripts/setup.ps1` once. Double-click `一键启动财务助手.cmd` to launch the app and open <http://127.0.0.1:5173>. Use `-BackendPort 18000 -FrontendPort 15173` if the default ports are taken. Close the launcher window or press Ctrl+C to stop both local services.
 
 ---
 
@@ -181,7 +187,7 @@ ATLAS is a local-first personal finance app for Windows. It imports Alipay and W
 
 **Acceptance case (the main thing to review):** [`docs/验收/饮食支出梳理-AI.md`](docs/验收/饮食支出梳理-AI.md). Using a real-source, sanitized October 2025 statement (210 expenses), it checks whether ATLAS can list every possible food row and classify it as *meal*, *snack & drink* or *needs review*, with a reason per row, while keeping campus stores, transfers, red packets, refunds, parking, medicine and other non-food items out. Expected weekly/monthly counts and sums are in the case. The sanitized package is delivered separately; the repository contains no per-row bills.
 
-**Quick start:** install Git, Python 3.12 and Node.js LTS; run `scripts/setup.ps1` once; then `一键启动财务助手.cmd`; open <http://127.0.0.1:5173>; `GET /health` should return `status: ok`. Ports can be changed with `-BackendPort 18000 -FrontendPort 15173`. Stop with `一键停止财务助手.cmd`.
+**Quick start.** Install Git, Python 3.12 and Node.js LTS, then run `scripts/setup.ps1` once. Double-click `一键启动财务助手.cmd` to open <http://127.0.0.1:5173>. To use different ports, pass `-BackendPort 18000 -FrontendPort 15173`. Close the launcher window or press Ctrl+C to stop.
 
 **No-AI check:** [`docs/验收/无AI操作验收.md`](docs/验收/无AI操作验收.md) uses fully fictional statements to verify import, reports, grouping, undo/redo, budget arithmetic, exception handling and 3,000-row dedupe.
 

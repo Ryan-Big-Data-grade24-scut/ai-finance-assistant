@@ -4,20 +4,18 @@ body:has(#app > .app.workspace) { min-width: 0; }
 .workspace {
   --workspace-width: 1120px;
   --workspace-gutter: clamp(16px, 3.5vw, 36px);
-  --workspace-bg: var(--color-bg);
   --workspace-paper: var(--color-card);
-  --workspace-ink: #18314e;
-  --workspace-muted: #536780;
-  --workspace-line: #dce6f3;
-  --workspace-soft: #f0f5fc;
-  --workspace-accent: #2d619f;
-  --workspace-accent-hover: #234e83;
-  --workspace-tint: #e6f0fd;
-  --workspace-line-accent: #a8c3e5;
+  --workspace-ink: var(--book-ink);
+  --workspace-muted: var(--color-muted);
+  --workspace-line: var(--book-line);
+  --workspace-soft: #f5f3e9;
+  --workspace-accent: var(--book-forest);
+  --workspace-accent-hover: var(--book-forest-dark);
+  --workspace-tint: var(--book-sage);
+  --workspace-line-accent: #a9b8a5;
   --workspace-danger: #9c3940;
   --workspace-warning: #805716;
   min-height: 100vh;
-  background: var(--workspace-bg);
   color: var(--workspace-ink);
 }
 
@@ -50,6 +48,7 @@ body:has(#app > .app.workspace) { min-width: 0; }
   border: 1px solid var(--workspace-line);
   border-radius: 18px;
   background: var(--workspace-paper);
+  box-shadow: var(--surface-shadow);
 }
 .workspace-button {
   display: inline-flex;

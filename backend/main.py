@@ -19,6 +19,7 @@ import csv
 import sys
 from contextlib import closing
 from pathlib import Path
+from typing import Literal
 from tempfile import TemporaryDirectory
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
@@ -33,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend import db, overrides, reports, uploads           # noqa: E402
 from backend import libraries                                # noqa: E402
+from backend.reports import brief as report_brief
 from backend import overrides as overrides_mod                # noqa: E402
 from backend.importer import ImportResult, generic, import_file, import_rows, parse_file  # noqa: E402
 from backend.importer.base import ParseIssues  # noqa: E402
@@ -278,7 +280,10 @@ async def import_preview(
                     mapping_notes = [f'{matched_by}已匹配表头：{headings}。请核对收支方向和金额。',
                                      '同一笔交易可能同时出现在支付、银行和订单账单中，去重仅在同一来源内进行。']
             if not rows:
-                raise HTTPException(400, issues.first_error or "解析成功但没有任何有效数据行")
+                detail = "没有有效交易"
+                if issues.failed:
+                    detail += f"。发现 {issues.failed} 行异常：" + "；".join(issues.display_warnings())
+                raise HTTPException(400, detail)
 
             dates = sorted(r.date for r in rows)
             by_status: dict[str, int] = {}
@@ -295,13 +300,14 @@ async def import_preview(
                 platform_name=first.source,
                 confidence=0.98,
                 total=len(rows),
+                failed=issues.failed,
                 by_status=by_status,
                 by_direction=by_direction,
                 date_from=dates[0],
                 date_to=dates[-1],
                 amount_sum=round(sum(r.amount for r in rows if r.direction == "支出"), 2),
                 sample=[r.raw for r in rows[:5]],
-                warnings=mapping_notes + issues.warnings,
+                warnings=mapping_notes + issues.display_warnings(),
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -380,6 +386,14 @@ def get_ai_privacy_settings():
 def put_ai_privacy_alias(data: AI.AIPrivacyAliasIn):
     try:
         return {"entries": ai_privacy.save_alias(data.original, data.alias)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/ai/settings/privacy")
+def delete_ai_privacy_entry(data: AI.AIPrivacyOriginalIn):
+    try:
+        return {"entries": ai_privacy.dismiss(data.original)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -634,6 +648,11 @@ def reject_ai_chat_action(conversation_id: str, action_id: str):
 # ═══════════════════════════════════════════════════════════
 #  报告（全部只读 GET）
 # ═══════════════════════════════════════════════════════════
+
+@app.get("/api/report/brief")
+def get_report_brief(period: Literal['week', 'month', 'year'], value: str):
+    return report_brief.read(period, value)
+
 
 @app.get("/api/report/summary", response_model=S.SummaryResp)
 async def rpt_summary(req: S.ReportReq = Depends()):

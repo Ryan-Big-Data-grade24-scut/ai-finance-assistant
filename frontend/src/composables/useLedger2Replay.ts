@@ -1,7 +1,8 @@
 import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
 import { getLedger2Replay, type Ledger2Replay } from '@/api/ledger2'
+import { describeReplay } from '@/utils/ledger2ReplayScene'
 
-export type ReplayPhase = 'source' | 'target' | 'result'
+export type ReplayPhase = 'source' | 'target' | 'settle' | 'result'
 
 export function useLedger2Replay() {
   const replay = shallowRef<Ledger2Replay | null>(null)
@@ -14,14 +15,7 @@ export function useLedger2Replay() {
   let request = 0
 
   const step = computed(() => replay.value?.steps[position.value] ?? null)
-  const staged = computed(() => {
-    const current = step.value
-    if (!current) return false
-    const before = new Map(current.before.map(item => [item.ref, item.parent]))
-    const changed = new Set(current.changed)
-    return current.after.some(item => changed.has(item.ref)
-      && before.has(item.ref) && before.get(item.ref) !== item.parent)
-  })
+  const direction = computed(() => step.value ? describeReplay(step.value) : null)
   const active = computed(() => fetching.value || replay.value !== null)
 
   function pause() {
@@ -31,12 +25,13 @@ export function useLedger2Replay() {
   }
 
   function advance() {
-    const duration = phase.value === 'source' ? (staged.value ? 950 : 650)
-      : phase.value === 'target' ? 900 : 1150
+    const duration = phase.value === 'source' ? (direction.value?.preview ? 780 : 680)
+      : phase.value === 'target' ? 690 : phase.value === 'settle' ? 850 : 1150
     timer = window.setTimeout(() => {
       if (!replay.value) return
-      if (phase.value === 'source') phase.value = staged.value ? 'target' : 'result'
-      else if (phase.value === 'target') phase.value = 'result'
+      if (phase.value === 'source') phase.value = direction.value?.preview ? 'target' : 'result'
+      else if (phase.value === 'target') phase.value = direction.value?.settle ? 'settle' : 'result'
+      else if (phase.value === 'settle') phase.value = 'result'
       else if (position.value + 1 < replay.value.steps.length) {
         position.value += 1
         phase.value = 'source'

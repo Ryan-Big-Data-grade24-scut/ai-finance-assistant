@@ -15,9 +15,12 @@ class AISettingsIn(BaseModel):
     confidence_threshold: float = Field(default=0.90, ge=0.70, le=0.99)
 
 
-class AIPrivacyAliasIn(BaseModel):
+class AIPrivacyOriginalIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     original: str = Field(min_length=1, max_length=240)
+
+
+class AIPrivacyAliasIn(AIPrivacyOriginalIn):
     alias: str | None = Field(max_length=120)
 
 

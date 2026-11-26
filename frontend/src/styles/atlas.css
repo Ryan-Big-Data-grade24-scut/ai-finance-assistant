@@ -1,14 +1,14 @@
 /* ATLAS 工作台与浮窗共用；不覆盖账本和报告页的语义色。 */
 .atlas-theme {
-  --atlas-ink: #182b29;
+  --atlas-ink: var(--book-ink);
   --atlas-muted: #546962;
-  --atlas-paper: #fdfdf9;
-  --atlas-surface: #fff;
-  --atlas-wash: #f1f5f0;
-  --atlas-line: #dce6df;
-  --atlas-accent: #116854;
-  --atlas-strong: #0c5142;
-  --atlas-tint: #e4f3eb;
+  --atlas-paper: var(--book-paper);
+  --atlas-surface: #fffdf7;
+  --atlas-wash: #f4f3e9;
+  --atlas-line: var(--book-line);
+  --atlas-accent: var(--book-forest);
+  --atlas-strong: var(--book-forest-dark);
+  --atlas-tint: var(--book-sage);
   --atlas-alert: #923b36;
   --atlas-alert-bg: #fff3ef;
   --atlas-warn: #785914;

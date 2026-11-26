@@ -49,7 +49,8 @@ class ImportPreviewResp(BaseModel):
     confidence: float = Field(
         description="平台识别置信度 0~1。低于 0.6 时前端应弹窗让用户确认平台"
     )
-    total: int = Field(description="解析到的总行数")
+    total: int = Field(description="通过解析校验的交易数")
+    failed: int = Field(default=0, description="未通过校验的异常行数")
     by_status: dict[str, int] = Field(
         description="按原始状态分布，如 {'交易成功': 1980, '已关闭': 20}"
     )

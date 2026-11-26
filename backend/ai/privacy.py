@@ -23,18 +23,69 @@ _SURNAMES = (
 _NAME = re.compile(
     rf"(?:[{_SURNAMES}]|欧阳|司马|上官|诸葛|司徒|慕容|东方|夏侯|皇甫)[\u3400-\u9fff]{{1,2}}"
 )
+_HAN = r"[\u3400-\u9fff]"
+_SHORT_NAME = re.compile(rf"{_HAN}{{1,3}}")
+_MASKED_NAME = re.compile(rf"[{_SURNAMES}*＊×Xx](?:{_HAN}|[*＊×Xx]){{1,3}}")
+_TITLED_NAME = re.compile(rf"{_HAN}{{1,3}}(?:先生|女士|老师|同学|小姐)")
+_LATIN = r"A-Za-zÀ-ÖØ-öø-ÿ"
+_LATIN_WORD = re.compile(rf"[{_LATIN}]+(?:['’.-][{_LATIN}]+)*\.?")
+_LATIN_NAMES = set("""
+    alex alice amy andrew anna ann anne anthony ben bob brian charles chris chloe daniel david
+    diana edward elizabeth emily emma eric frank george grace hannah henry jack james
+    jane jason jean jenny jessica john jonathan joseph joy julia karen kate katherine
+    kevin leo lily lisa lucas lucy mark mary matthew michael michelle mike nancy
+    nick olivia oscar patrick paul peter rachel robert rose ryan sam sarah sophia
+    steve susan thomas tim tina tom victoria william zoe iris oliver eva sean
+    chen hu huang lee li lin liu lu ma wang wu xu yang zhang zhao zhou zhu smith
+""".split())
+_LATIN_BUSINESS = re.compile(
+    r"\b(?:bakery|bank|cafe|coffee|company|corp|group|hotel|inc|llc|ltd|market|online|"
+    r"restaurant|shop|store|studio|supermarket|university)\b|^(?:nike|walmart|starbucks|amazon|paypal)$", re.I,
+)
+_NON_NAMES = {
+    "甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸",
+    "收入", "支出", "中性", "未知", "空白", "其他", "自己", "本人", "对方", "商户", "无", "总账",
+    "货款", "退款", "转账", "收款", "汇款", "消费", "红包", "工资", "房租", "水费", "电费",
+    "零钱", "余额", "余额宝", "零钱通", "支付宝", "微信", "抖音", "便利蜂", "小米", "瑞幸", "喜茶",
+}
 _BUSINESS = re.compile(
     "食堂|餐厅|餐饮|酒楼|火锅|小吃|奶茶|咖啡|饭店|烧烤|商店|商城|商行|超市|网店|"
     "旗舰店|便利店|小卖部|专卖店|店$|小铺|药房|医院|学校|大学|公司|集团|"
     "银行|支付|淘宝|京东|美团|天猫|拼多多|菜鸟|快递|书店|客栈|酒店|网吧|工厂|"
     "诊所|牙科|花店|会员|公交|地铁|物业|停车|食府|面馆|烧腊|食杂|百货|[馆铺摊]$"
 )
-_COUNTERPARTY_FIELDS = {"counterparty", "merchant", "merchant_name", "交易对方", "对方名称", "收款方", "付款方"}
+_COUNTERPARTY_FIELDS = {"counterparty", "merchant", "merchant_name", "交易对方", "对方名称", "对方昵称",
+                        "收款方", "付款方", "操作人昵称", "操作人姓名"}
 _PRIVATE_FIELDS = {"对方账号", "对方账户", "对手账号", "对手账户", "银行卡号", "卡号", "身份证号", "手机号", "联系电话"}
 
 
 def _looks_private(value: str) -> bool:
-    return bool(_NAME.fullmatch(value) and not _BUSINESS.search(value))
+    if value in _NON_NAMES or _BUSINESS.search(value):
+        return False
+    if (_SHORT_NAME.fullmatch(value) or _NAME.fullmatch(value)
+            or _TITLED_NAME.fullmatch(value) or (_MASKED_NAME.fullmatch(value) and re.search(_HAN, value))):
+        return True
+    if _LATIN_BUSINESS.search(value):
+        return False
+    parts = value.split()
+    if not 1 <= len(parts) <= 4 or not all(_LATIN_WORD.fullmatch(part) for part in parts):
+        return False
+    if len(parts) == 1:
+        word = parts[0]
+        return word.casefold() in _LATIN_NAMES or (len(word) >= 3 and word.isalpha() and word.istitle())
+    return any(part.casefold() in _LATIN_NAMES for part in parts) or all(
+        part.istitle() or part.isupper() for part in parts
+    )
+
+
+def _literal_pattern(term: str) -> str:
+    escaped = re.escape(term)
+    if re.fullmatch(_HAN, term):
+        return rf"(?<!{_HAN}){escaped}(?!{_HAN})"
+    parts = term.split()
+    if parts and all(_LATIN_WORD.fullmatch(part) for part in parts):
+        return rf"(?<![{_LATIN}0-9_]){escaped}(?![{_LATIN}0-9_])"
+    return escaped
 
 
 def _names_in(value: Any) -> set[str]:
@@ -57,11 +108,14 @@ def _auto_alias(seed: str, original: str) -> str:
 
 
 class Policy:
-    def __init__(self, seed: str, overrides: dict[str, str], candidates: set[str]):
+    def __init__(self, seed: str, overrides: dict[str, str], candidates: set[str], dismissed: set[str]):
         self.seed = seed
         self.overrides = overrides
-        self.candidates = candidates
-        self.aliases = {name: _auto_alias(seed, name) for name in candidates}
+        self.dismissed = dismissed
+        excluded = {name.casefold() for name in dismissed}
+        self.candidates = {name for name in candidates if name.casefold() not in excluded}
+        overridden = {name.casefold() for name in overrides}
+        self.aliases = {name: _auto_alias(seed, name) for name in self.candidates if name.casefold() not in overridden}
         self.aliases.update(overrides)
         self.aliases = {name: alias for name, alias in self.aliases.items() if alias}
         self._replacements = {name.casefold(): alias for name, alias in self.aliases.items()}
@@ -69,11 +123,12 @@ class Policy:
             _auto_alias(seed, name).casefold(): overrides[name]
             for name in candidates & overrides.keys() if overrides[name]
         })
-        terms = self._replacements.keys()
-        if terms:
+        if self._replacements:
             # Protect aliases already in a message so successive passes are idempotent.
             aliases = set(self.aliases.values())
-            self._pattern = re.compile("|".join(map(re.escape, sorted(set(terms) | aliases, key=len, reverse=True))), re.I)
+            keep = {name.casefold() for name, alias in overrides.items() if not alias} | excluded
+            terms = self._replacements.keys() | aliases | keep
+            self._pattern = re.compile("|".join(map(_literal_pattern, sorted(terms, key=len, reverse=True))), re.I)
         else:
             self._pattern = None
         self._reverse = {alias.casefold(): name for name, alias in self.aliases.items()}
@@ -81,8 +136,9 @@ class Policy:
                                if self._reverse else None)
 
     def with_candidates(self, value: Any) -> Policy:
-        names = _names_in(value) - self.candidates - self.overrides.keys()
-        return Policy(self.seed, self.overrides, self.candidates | names) if names else self
+        known = {name.casefold() for name in self.candidates | self.overrides.keys() | self.dismissed}
+        names = {name for name in _names_in(value) if name.casefold() not in known}
+        return Policy(self.seed, self.overrides, self.candidates | names, self.dismissed) if names else self
 
     def text(self, value: str) -> str:
         if self._pattern:
@@ -161,12 +217,13 @@ class Policy:
 
 def _load(conn: sqlite3.Connection) -> tuple[Policy, dict[str, int]]:
     tables = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('ai_privacy_seed', 'transactions_raw')"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('ai_privacy_seed', 'ai_privacy_dismissed', 'transactions_raw')"
     )}
     counts = {
         row[0]: row[1] for row in conn.execute(
             "SELECT trim(counterparty), COUNT(*) FROM transactions_raw "
-            "WHERE counterparty IS NOT NULL AND trim(counterparty) <> '' GROUP BY trim(counterparty)"
+            "WHERE counterparty IS NOT NULL AND trim(counterparty) <> '' GROUP BY trim(counterparty) COLLATE NOCASE"
         )
     } if "transactions_raw" in tables else {}
     seed = ""
@@ -174,7 +231,8 @@ def _load(conn: sqlite3.Connection) -> tuple[Policy, dict[str, int]]:
     if "ai_privacy_seed" in tables:
         seed = conn.execute("SELECT salt FROM ai_privacy_seed WHERE id=1").fetchone()[0]
         overrides = dict(conn.execute("SELECT original, alias FROM ai_privacy_alias").fetchall())
-    return Policy(seed, overrides, {name for name in counts if _looks_private(name)}), counts
+    dismissed = {row[0] for row in conn.execute("SELECT original FROM ai_privacy_dismissed")} if "ai_privacy_dismissed" in tables else set()
+    return Policy(seed, overrides, {name for name in counts if _looks_private(name)}, dismissed), counts
 
 
 def current(conn: sqlite3.Connection | None = None) -> Policy:
@@ -185,11 +243,14 @@ def current(conn: sqlite3.Connection | None = None) -> Policy:
 
 
 def _entries(policy: Policy, counts: dict[str, int]) -> list[dict]:
+    detected = {name.casefold(): count for name, count in counts.items() if name in policy.candidates}
+    overridden = {name.casefold() for name in policy.overrides}
+    names = policy.overrides.keys() | {name for name in policy.candidates if name.casefold() not in overridden}
     return [
-        {"original": name, "alias": policy.aliases.get(name, ""), "count": counts.get(name, 0),
+        {"original": name, "alias": policy.aliases.get(name, ""), "count": detected.get(name.casefold(), counts.get(name, 0)),
          "mode": ("keep" if policy.overrides[name] == "" else "custom") if name in policy.overrides else "auto",
-         "detected": name in policy.candidates}
-        for name in sorted(policy.candidates | policy.overrides.keys(), key=lambda name: (-counts.get(name, 0), name))
+         "detected": name.casefold() in detected}
+        for name in sorted(names, key=lambda name: (-detected.get(name.casefold(), counts.get(name, 0)), name))
     ]
 
 
@@ -210,7 +271,8 @@ def save_alias(original: str, alias: str | None) -> list[dict]:
         overrides = {name: value for name, value in policy.overrides.items() if name.casefold() != original.casefold()}
         if alias is not None:
             if alias:
-                others = Policy(policy.seed, overrides, policy.candidates - {original})
+                candidates = {name for name in policy.candidates if name.casefold() != original.casefold()}
+                others = Policy(policy.seed, overrides, candidates, policy.dismissed)
                 if original.casefold() in alias.casefold() or others.text(alias) != alias:
                     raise ValueError("请使用不包含隐私原文的别名。")
                 if alias.casefold() in {name.casefold() for name in counts} or any(
@@ -220,8 +282,19 @@ def save_alias(original: str, alias: str | None) -> list[dict]:
                     raise ValueError("这个别名已在使用，请换一个。")
                 if any(original.casefold() in value.casefold() for value in overrides.values() if value):
                     raise ValueError("原文与现有别名重叠，请先修改已有别名。")
-            overrides[original] = alias
         conn.execute("DELETE FROM ai_privacy_alias WHERE original = ?", (original,))
+        conn.execute("DELETE FROM ai_privacy_dismissed WHERE original = ?", (original,))
         if alias is not None:
             conn.execute("INSERT INTO ai_privacy_alias(original, alias) VALUES (?, ?)", (original, alias))
-        return _entries(Policy(policy.seed, overrides, policy.candidates), counts)
+        return _entries(*_load(conn))
+
+
+def dismiss(original: str) -> list[dict]:
+    original = original.strip()
+    if not original:
+        raise ValueError("请选择要删除的筛查项。")
+    with closing(db.get_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM ai_privacy_alias WHERE original = ?", (original,))
+        conn.execute("INSERT OR IGNORE INTO ai_privacy_dismissed(original) VALUES (?)", (original,))
+        return _entries(*_load(conn))

@@ -7,6 +7,7 @@ import json
 import re
 import zipfile
 from collections import Counter, defaultdict
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -227,13 +228,14 @@ def test_wechat_columns_and_yield_detail(tmp_path: Path, dataset):
 
 
 def test_verified_formats_roundtrip_through_importer(tmp_path: Path, isolated_db: Path):
-    ds = generate(seed=20261126, months=12)
+    # 全年往返样例必须已结算，未来交易另有异常行测试。
+    ds = generate(seed=20261126, start=date(2025, 1, 1), months=12)
     dataset_dir = tmp_path / "synth"
     write_all(ds, dataset_dir)
 
     cases = [
-        ("alipay", dataset_dir / "支付宝" / "支付宝交易明细(20260101-20261231).csv"),
-        ("wechat", dataset_dir / "微信" / "微信支付账单(20260101-20261231).xlsx"),
+        ("alipay", dataset_dir / "支付宝" / "支付宝交易明细(20250101-20251231).csv"),
+        ("wechat", dataset_dir / "微信" / "微信支付账单(20250101-20251231).xlsx"),
         ("wallet_family", dataset_dir / "支付宝小荷包" / "小荷包收支明细_家庭开销.xlsx"),
         ("wallet_travel", dataset_dir / "支付宝小荷包" / "小荷包收支明细_旅行基金.xlsx"),
         ("wallet_auto", dataset_dir / "支付宝小荷包" / "小荷包收支明细_自动攒.xlsx"),

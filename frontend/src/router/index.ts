@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { currentPeriodValue } from '@/utils/reportPeriod'
 import BillView from '@/views/BillView.vue'
 
 /**
@@ -22,11 +23,11 @@ const router = createRouter({
       path: '/bill',
       name: 'bill',
       component: BillView,
-      // 默认值：支出 · 月度 · 9月 · 小结
+      // 未指定日期时进入当前报告周期。
       props: route => ({
         type: (route.query.type as string) ?? 'expense',
         period: (route.query.period as string) ?? 'month',
-        value: (route.query.value as string) ?? '2026-10',
+        value: (route.query.value as string) ?? currentPeriodValue(String(route.query.period ?? 'month')),
         tab: (route.query.tab as string) ?? 'summary',
       }),
     },

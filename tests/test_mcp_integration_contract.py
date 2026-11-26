@@ -21,7 +21,7 @@ def test_mcp_tool_registry_matches_expected_tool_contract():
             expected = set(ast.literal_eval(node.value))
     assert expected is not None
     business = {spec.name for spec in registry.TOOLS.values() if spec.scope == "business"}
-    assert len(expected) == 6
+    assert 'finance_report_brief_write' in expected
     assert expected == business
     assert "read_skill" in expected
 

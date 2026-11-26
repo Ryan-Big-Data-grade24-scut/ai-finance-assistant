@@ -2,7 +2,7 @@
 
 ## 1. 工作方式
 
-项目本身不内置模型。你选择支持本地 stdio MCP 的 AI 客户端；客户端里的模型通过 6 个工具读流水、读 V2 账本、执行操作。工具 schema 与页面共用 `backend/agentcore/registry.py`，校验和结果一致。
+项目本身不内置模型。你选择支持本地 stdio MCP 的 AI 客户端；客户端里的模型通过 7 个工具读流水、读 V2 账本、执行操作。工具 schema 与页面共用 `backend/agentcore/registry.py`，校验和结果一致。
 
 ```text
 用户自己的 AI 客户端
@@ -12,6 +12,7 @@ backend/mcp/server.py
 finance_query_transactions  → 只读原始流水
 finance_ledger_read/apply   → 读 / 写 V2 账本
 finance_import_read/commit  → 读暂存 / 原始流水入库
+finance_report_brief_write  → 写本周、本月或本年简报
 read_skill                  → 该业务的操作顺序
         ↓
 backend/ledger2 引擎
@@ -35,7 +36,7 @@ backend/ledger2 引擎
 }
 ```
 
-把路径替换为本机项目路径，然后将 `mcpServers` 内容复制到客户端配置中。移动项目文件夹后同步修改 `command` 和 `cwd`。客户端重启后应加载 6 个工具；`scripts/print_mcp_config.py` 可自动生成绝对路径配置。
+把路径替换为本机项目路径，然后将 `mcpServers` 内容复制到客户端配置中。移动项目文件夹后同步修改 `command` 和 `cwd`。客户端重启后应加载 7 个工具；`scripts/print_mcp_config.py` 可自动生成绝对路径配置。
 
 先运行服务端自检和真实 stdio 握手：
 

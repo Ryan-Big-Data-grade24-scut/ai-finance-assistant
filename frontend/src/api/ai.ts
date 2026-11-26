@@ -119,6 +119,14 @@ export async function saveAIPrivacy(original: string, alias: string | null): Pro
   }))
 }
 
+export async function deleteAIPrivacy(original: string): Promise<{ entries: AIPrivacyEntry[] }> {
+  return parseResponse(await fetch('/api/ai/settings/privacy', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ original }),
+  }))
+}
+
 export async function saveAISettings(payload: {
   provider: AISettings['provider']; base_url: string; model: string; api_key?: string
   clear_api_key?: boolean; auto_apply_rules: boolean; allow_external_processing: boolean; confidence_threshold: number

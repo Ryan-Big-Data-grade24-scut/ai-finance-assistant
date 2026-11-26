@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 EXPECTED_TOOLS = {
     "finance_query_transactions", "finance_ledger_read", "finance_ledger_apply",
-    "finance_import_read", "finance_import_commit", "read_skill",
+    "finance_import_read", "finance_import_commit", "finance_report_brief_write", "read_skill",
 }
 
 

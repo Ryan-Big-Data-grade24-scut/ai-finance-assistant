@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import ReportBrief from '@/components/ReportBrief.vue'
+import { isoWeek, currentPeriodValue } from '@/utils/reportPeriod'
+import { setAgentPageRange, clearAgentPage } from '@/utils/agentPageState'
 import * as echarts from 'echarts'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -36,6 +39,16 @@ const trendEl = ref<HTMLDivElement | null>(null)
 const categoryEl = ref<HTMLDivElement | null>(null)
 let trendChart: echarts.ECharts | null = null
 let categoryChart: echarts.ECharts | null = null
+const chartSizeObserver = new ResizeObserver(entries => {
+  for (const { target, contentRect } of entries) {
+    const chart = target === trendEl.value ? trendChart : categoryChart
+    const width = Math.round(contentRect.width)
+    const height = Math.round(contentRect.height)
+    if (chart?.getDom() === target && width && height && (width !== chart.getWidth() || height !== chart.getHeight())) {
+      chart.resize({ width, height, silent: true })
+    }
+  }
+})
 
 const currentType = computed<TxType>(() => props.type === 'income' ? 'income' : 'expense')
 const currentPeriod = computed<Period>(() => ['week', 'year'].includes(props.period) ? props.period as Period : 'month')
@@ -85,13 +98,6 @@ const deterministicInsight = computed(() => {
   return topCategory.value ? `${topCategory.value.major}占本期支出的 ${topCategory.value.pct.toFixed(1)}%，是金额最高的分类。` : `本期共记录 ${summary.value.count} 笔支出。`
 })
 
-function isoWeek(date: Date) {
-  const utc = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
-  const day = utc.getUTCDay() || 7
-  utc.setUTCDate(utc.getUTCDate() + 4 - day)
-  const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1))
-  return { year: utc.getUTCFullYear(), week: Math.ceil((((utc.getTime() - yearStart.getTime()) / 86400000) + 1) / 7) }
-}
 function weekStart(value: string) {
   const [yearText, weekText] = value.split('-W')
   const fourth = new Date(Number(yearText), 0, 4)
@@ -109,6 +115,31 @@ function periodValueDate(period: Period, value: string) {
   const month = period === 'month' ? Math.max(1, Number(value.slice(5, 7)) || 1) : 1
   return new Date(year, month - 1, 1)
 }
+
+const today = ref(new Date())
+const showBrief = computed(() => props.value === currentPeriodValue(currentPeriod.value, today.value))
+let midnightTimer: number
+function syncToday() {
+  today.value = new Date()
+  const next = new Date(today.value)
+  next.setHours(24, 0, 0, 0)
+  window.clearTimeout(midnightTimer)
+  midnightTimer = window.setTimeout(syncToday, next.getTime() - today.value.getTime())
+}
+watch([currentPeriod, () => props.value], ([period, value]) => {
+  const start = periodValueDate(period, value)
+  const end = new Date(start)
+  if (period === 'week') end.setDate(end.getDate() + 6)
+  else if (period === 'month') end.setMonth(end.getMonth() + 1, 0)
+  else end.setMonth(11, 31)
+  setAgentPageRange(isoDate(start), isoDate(end))
+}, { immediate: true })
+onMounted(() => { syncToday(); document.addEventListener('visibilitychange', syncToday) })
+onBeforeUnmount(() => {
+  window.clearTimeout(midnightTimer)
+  document.removeEventListener('visibilitychange', syncToday)
+  clearAgentPage()
+})
 
 const pickerTitle = computed(() => {
   const year = pickerCursor.value.getFullYear()
@@ -198,7 +229,7 @@ function isToday(key: string) { return key === isoDate(new Date()) }
 function heatStyle(amount: number) {
   if (!amount || calendarView.value !== 'heat') return undefined
   const intensity = Math.min(0.88, 0.16 + amount / maxDayAmount.value * 0.72)
-  return { background: `rgba(54, 121, 237, ${intensity})`, color: intensity > 0.5 ? '#fff' : '#254f82' }
+  return { background: `rgba(55, 106, 80, ${intensity})`, color: intensity > 0.5 ? '#fff' : '#365c45' }
 }
 function categoryIcon(name: string) {
   const map: Record<string, string> = { 餐饮美食: '🍜', 交通出行: '🚕', 日用百货: '🛍️', 学习教育: '📚', 娱乐休闲: '🎬', 医疗健康: '🩺', 生活缴费: '💡', 数码电器: '💻', 住房: '🏠', 工资: '💼', 奖学金: '🎓', 转账红包: '🧧', 退款: '↩️' }
@@ -290,16 +321,47 @@ function renderCharts() {
       trendChart = echarts.init(trendEl.value, undefined, { renderer: 'svg' })
     }
     const amounts = trend.value.bars.map(item => item.amount)
-    const averageLine = trend.value.avg ? { symbol: 'none', silent: true, data: [{ yAxis: trend.value.avg }], lineStyle: { color: '#d6b85b', type: 'dashed' }, label: { formatter: `均值 ¥${compactMoney(trend.value.avg)}`, color: '#9a7b1f', position: 'insideEndTop' } } : undefined
+    const averageLine = trend.value.avg ? {
+      symbol: 'none', silent: true, data: [{ yAxis: trend.value.avg }],
+      lineStyle: { color: '#ad8445', type: 'dashed', opacity: .66 }, label: { show: false },
+    } : undefined
+    const accent = isIncome.value ? '#538477' : '#62846b'
+    const priorBar = isIncome.value ? '#b4cdc4' : '#c3cfba'
+    const barFill = new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+      { offset: 0, color: isIncome.value ? '#82ad9f' : '#90a98b' }, { offset: 1, color: accent },
+    ])
+    const valueLabel = {
+      show: true, position: 'top' as const, distance: 8, color: '#405a49', fontSize: 11,
+      formatter: ({ value }: { value: number }) => compactMoney(value),
+    }
     trendChart.setOption({
-      animationDuration: 650,
-      grid: { left: 8, right: 8, top: 34, bottom: 28, containLabel: true },
-      tooltip: { trigger: 'axis', valueFormatter: (value: number) => `¥${money(value)}` },
-      xAxis: { type: 'category', data: trend.value.bars.map(item => currentPeriod.value === 'month' ? `${Number(item.label.slice(5))}月` : item.label), axisTick: { show: false }, axisLine: { lineStyle: { color: '#dbe3ec' } }, axisLabel: { color: '#748091', fontSize: 12 } },
-      yAxis: { type: 'value', show: false },
+      animationDuration: 450,
+      grid: { left: 16, right: 16, top: 32, bottom: 13, containLabel: true },
+      tooltip: { trigger: 'axis', confine: true, valueFormatter: (value: number) => `¥${money(value)}` },
+      xAxis: {
+        type: 'category', boundaryGap: true,
+        data: trend.value.bars.map(item => currentPeriod.value === 'month' ? `${Number(item.label.slice(5))}月` : item.label),
+        axisTick: { show: false }, axisLine: { lineStyle: { color: '#cdd5c7' } },
+        axisLabel: { color: '#53685b', fontSize: 11, margin: 12, hideOverlap: true },
+      },
+      yAxis: { type: 'value', splitNumber: 4, axisLabel: { show: false },
+        splitLine: { lineStyle: { color: '#dedfd3', type: 'dashed' } } },
       series: trendView.value === 'bar'
-        ? [{ type: 'bar', data: amounts.map((value, index) => ({ value, itemStyle: { color: index === amounts.length - 1 ? '#3679ed' : '#b9d7ff', borderRadius: [9, 9, 2, 2] } })), barMaxWidth: 42, label: { show: true, position: 'top', color: '#647083', formatter: ({ value }: { value: number }) => compactMoney(value) }, markLine: averageLine }]
-        : [{ type: 'line', data: amounts, smooth: true, symbol: 'circle', symbolSize: 9, lineStyle: { width: 4, color: '#3679ed' }, itemStyle: { color: '#3679ed', borderColor: '#fff', borderWidth: 3 }, areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(54,121,237,.35)' }, { offset: 1, color: 'rgba(54,121,237,.03)' }] } }, label: { show: true, position: 'top', color: '#647083', formatter: ({ value }: { value: number }) => compactMoney(value) }, markLine: averageLine }],
+        ? [{
+          type: 'bar', barMaxWidth: 42,
+          data: amounts.map((value, index) => ({
+            value, itemStyle: { color: index === amounts.length - 1 ? barFill : priorBar, borderRadius: [8, 8, 2, 2] },
+          })),
+          label: valueLabel, labelLayout: { hideOverlap: true }, markLine: averageLine,
+        }]
+        : [{
+          type: 'line', data: amounts, smooth: true, symbol: 'circle', symbolSize: 8,
+          lineStyle: { width: 3, color: accent }, itemStyle: { color: accent, borderColor: '#fff', borderWidth: 2 },
+          areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: accent + '40' }, { offset: 1, color: accent + '04' },
+          ]) },
+          label: valueLabel, labelLayout: { hideOverlap: true }, markLine: averageLine,
+        }],
     }, true)
   } else if (trendChart) {
     trendChart.dispose()
@@ -310,21 +372,21 @@ function renderCharts() {
       categoryChart?.dispose()
       categoryChart = echarts.init(categoryEl.value, undefined, { renderer: 'svg' })
     }
-    const colors = ['#3679ed', '#65a8ff', '#72d1c1', '#f6bd60', '#ee7b7b', '#9d8df1', '#8fabc7']
+    const colors = ['#42745b', '#b99059', '#78a59a', '#d2bb74', '#ba7d68', '#9587a0', '#82929f']
     const option = categoryView.value === 'donut' ? {
       animationDuration: 650, color: colors, tooltip: { trigger: 'item', formatter: '{b}<br/>¥{c} · {d}%' },
       xAxis: undefined, yAxis: undefined, grid: undefined,
       series: [{ type: 'pie', radius: ['54%', '76%'], center: ['50%', '50%'], selectedMode: 'single', avoidLabelOverlap: true, itemStyle: { borderColor: '#fff', borderWidth: 3, borderRadius: 6 }, label: { show: false }, emphasis: { scaleSize: 8 }, data: categories.value.majors.map(item => ({ name: item.major, value: item.amount, selected: item.major === selectedMajor.value?.major })) }],
       graphic: [{ type: 'group', left: 'center', top: 'middle', children: [
         { type: 'text', style: { text: selectedMajor.value?.major || '', textAlign: 'center', fill: '#667085', fontSize: 14 }, left: 'center', top: -20 },
-        { type: 'text', style: { text: `${selectedMajor.value?.pct.toFixed(1) || 0}%`, textAlign: 'center', fill: '#172033', fontSize: 24, fontWeight: 700 }, left: 'center', top: 3 },
+        { type: 'text', style: { text: `${selectedMajor.value?.pct.toFixed(1) || 0}%`, textAlign: 'center', fill: '#223d32', fontSize: 24, fontWeight: 700 }, left: 'center', top: 3 },
       ] }],
     } : {
       animationDuration: 650, color: colors, tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: (value: number) => `¥${money(value)}` }, graphic: [],
       grid: { left: 16, right: 45, top: 8, bottom: 8, containLabel: true },
       xAxis: { type: 'value', show: false },
       yAxis: { type: 'category', inverse: true, data: categories.value.majors.map(item => item.major), axisTick: { show: false }, axisLine: { show: false }, axisLabel: { color: '#59667a' } },
-      series: [{ type: 'bar', data: categories.value.majors.map((item, index) => ({ value: item.amount, name: item.major, itemStyle: { color: item.major === selectedMajor.value?.major ? '#3679ed' : colors[index % colors.length], borderRadius: [0, 8, 8, 0] } })), barMaxWidth: 24, label: { show: true, position: 'right', formatter: ({ value }: { value: number }) => `¥${compactMoney(value)}`, color: '#657185' } }],
+      series: [{ type: 'bar', data: categories.value.majors.map((item, index) => ({ value: item.amount, name: item.major, itemStyle: { color: item.major === selectedMajor.value?.major ? '#42745b' : colors[index % colors.length], borderRadius: [0, 8, 8, 0] } })), barMaxWidth: 24, label: { show: true, position: 'right', formatter: ({ value }: { value: number }) => `¥${compactMoney(value)}`, color: '#657185' } }],
     }
     categoryChart.setOption(option, true)
     categoryChart.off('click')
@@ -347,7 +409,10 @@ async function loadReport() {
   finally { loading.value = false }
   if (loaded) { await nextTick(); renderCharts() }
 }
-function onResize() { trendChart?.resize(); categoryChart?.resize() }
+watch([trendEl, categoryEl], (elements) => {
+  chartSizeObserver.disconnect()
+  for (const element of elements) if (element) chartSizeObserver.observe(element)
+}, { flush: 'post' })
 watch(() => [props.type, props.period, props.value], loadReport, { immediate: true })
 watch(revision, async () => {
   libraryLoaded.value = false
@@ -356,22 +421,11 @@ watch(revision, async () => {
 onMounted(() => { loadLibraryState() })
 watch(activePane, async () => { await nextTick(); renderCharts() })
 watch([trendView, categoryView], async () => { await nextTick(); renderCharts() })
-window.addEventListener('resize', onResize)
-onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendChart?.dispose(); categoryChart?.dispose() })
+onBeforeUnmount(() => { chartSizeObserver.disconnect(); trendChart?.dispose(); categoryChart?.dispose() })
 </script>
 
 <template>
-  <div class="report-page" :class="{ 'has-aside': asideVisible }">
-    <section v-if="reportEmpty" class="report-empty" data-testid="report-empty">
-      <span class="empty-mark" aria-hidden="true">∑</span>
-      <h1>还没有流水导入</h1>
-      <p>请前往导入账单，或询问 ATLAS。</p>
-      <div class="empty-actions">
-        <RouterLink class="primary" to="/import">前往导入账单</RouterLink>
-        <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
-      </div>
-    </section>
-    <template v-else>
+  <div class="report-page" :class="{ 'has-aside': asideVisible, 'has-brief': showBrief }">
     <header class="report-controls">
       <div class="period-tabs" aria-label="报告周期">
         <button v-for="item in periodTabs" :key="item.key" :class="{ active: currentPeriod === item.key }" @click="openPeriodPicker(item.key)">{{ item.label }}<small>▼</small></button>
@@ -408,7 +462,16 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
 
     <div class="report-shell">
     <div class="report-main">
-    <div v-if="error" class="status-card error-card"><b>报告暂时无法加载</b><span>{{ error }}</span><button @click="loadReport">重新加载</button></div>
+    <section v-if="reportEmpty" class="report-empty" data-testid="report-empty">
+      <span class="empty-mark" aria-hidden="true">∑</span>
+      <h1>还没有流水导入</h1>
+      <p>请前往导入账单，或询问 ATLAS。</p>
+      <div class="empty-actions">
+        <RouterLink class="primary" to="/import">前往导入账单</RouterLink>
+        <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
+      </div>
+    </section>
+    <div v-else-if="error" class="status-card error-card"><b>报告暂时无法加载</b><span>{{ error }}</span><button @click="loadReport">重新加载</button></div>
     <div v-else-if="loading" class="loading-grid" aria-label="正在加载"><div v-for="n in 4" :key="n" class="skeleton" /></div>
     <template v-else>
       <section class="hero-card" :class="{ income: isIncome }">
@@ -475,7 +538,9 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
     </template>
     </div>
 
-    <aside v-if="asideVisible" class="report-aside" aria-label="报告提示">
+    <aside v-if="showBrief || asideVisible" class="report-aside" aria-label="财务简报与报告提示">
+      <ReportBrief v-if="showBrief" :key="revision + ':' + currentPeriod + ':' + value" :period="currentPeriod" :value="value" :label="periodLabel" />
+      <template v-if="asideVisible">
       <section v-if="uninitializedCount > 0" class="hint-card hint-init" data-testid="hint-initialize">
         <span class="hint-mark" aria-hidden="true">∑</span>
         <h2>账本还没整理完</h2>
@@ -500,55 +565,87 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); trendCha
           <RouterLink to="/v2/assistant">询问 ATLAS</RouterLink>
         </div>
       </section>
+      </template>
     </aside>
     </div>
-    </template>
 
     <Teleport to="body"><div v-if="detailOpen" class="detail-backdrop" @click.self="closeDetails"><aside class="detail-sheet" aria-modal="true" role="dialog"><header><div><span>逐笔可追溯</span><h2>{{ detailTitle }}</h2></div><button aria-label="关闭" @click="closeDetails">×</button></header><div v-if="detailLoading" class="empty-state">正在加载明细…</div><div v-else-if="detailItems.length" class="detail-list"><button v-for="item in detailItems" :key="item.id" @click="router.push(`/tx?id=${item.id}`)"><span class="category-avatar">{{ categoryIcon(item.category) }}</span><span class="transaction-main"><b>{{ item.counterparty || item.item || item.category }}</b><small>{{ item.tx_time }} · {{ item.source }} · {{ item.pay_method }}</small></span><strong>{{ item.direction === 'income' ? '+' : '-' }}¥{{ money(item.amount) }}</strong></button></div><div v-else class="empty-state">没有符合条件的交易</div></aside></div></Teleport>
   </div>
 </template>
 
 <style scoped>
-.report-page{width:min(100%,1080px);margin:0 auto;padding-bottom:56px}.report-controls{position:sticky;top:0;z-index:20;margin:-24px -24px 20px;padding:18px 24px 0;background:rgba(246,249,253,.92);backdrop-filter:blur(16px);border-bottom:1px solid rgba(215,224,235,.8)}.period-tabs,.view-tabs{display:flex;justify-content:center;gap:54px}.period-tabs button,.view-tabs button{position:relative;border:0;background:transparent;color:#697386;font:inherit;font-weight:650;cursor:pointer;padding:8px 2px 14px}.period-tabs button{font-size:17px}.period-tabs button.active,.view-tabs button.active{color:#172033}.period-tabs button.active:after,.view-tabs button.active:after{content:'';position:absolute;height:3px;width:28px;border-radius:99px;background:#172033;bottom:5px;left:50%;transform:translateX(-50%)}.filter-row{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0 14px}.date-switcher{display:flex;align-items:center;gap:10px}.date-switcher strong{min-width:138px;text-align:center;font-size:21px;letter-spacing:-.4px}.round-button{width:32px;height:32px;border:1px solid #dfe6ef;border-radius:50%;background:#fff;color:#657185;cursor:pointer;font-size:24px;line-height:24px}.type-toggle{display:flex;padding:3px;background:#e9eef5;border-radius:999px}.type-toggle button{min-width:66px;padding:8px 16px;border:0;border-radius:999px;background:transparent;color:#697386;font:inherit;font-weight:650;cursor:pointer}.type-toggle button.active{background:#6d8eb8;color:#fff;box-shadow:0 4px 12px rgba(71,104,148,.2)}.view-tabs{justify-content:flex-start;gap:36px}.view-tabs button{font-size:15px}
-.hero-card{position:relative;overflow:hidden;min-height:190px;padding:30px 34px;border-radius:28px;color:#253043;background:linear-gradient(120deg,#ffead8 0%,#fff3ce 48%,#deecff 100%);box-shadow:0 18px 46px rgba(70,88,116,.11)}.hero-card:before,.hero-card:after{content:'';position:absolute;border-radius:50%;filter:blur(2px);opacity:.7}.hero-card:before{width:180px;height:180px;right:13%;top:-80px;background:rgba(255,186,93,.35)}.hero-card:after{width:110px;height:110px;left:43%;bottom:-72px;background:rgba(255,141,103,.25)}.hero-card.income{background:linear-gradient(120deg,#dff7eb,#e9fbf4 48%,#dcecff)}.hero-card p{color:#687489;font-size:15px;font-weight:650}.hero-card h1{margin:18px 0 13px;font-size:clamp(38px,6vw,58px);line-height:1;letter-spacing:-2px}.hero-card h1 span{font-size:.52em;margin-right:6px;vertical-align:9px}.hero-meta{display:flex;flex-wrap:wrap;gap:10px 22px;color:#687489}.hero-orbit{position:absolute;right:7%;top:22px;width:145px;height:145px;display:grid;place-items:center}.orbit-ring{position:absolute;inset:8px;border:1px solid rgba(55,92,145,.2);border-radius:44% 56% 63% 37%/45% 38% 62% 55%;transform:rotate(18deg);animation:float 8s ease-in-out infinite}.orbit-core{width:76px;height:76px;display:grid;place-items:center;border-radius:24px;background:rgba(255,255,255,.72);backdrop-filter:blur(8px);color:#5079a9;font-size:30px;font-weight:750;box-shadow:0 18px 35px rgba(59,93,134,.18);transform:rotate(-6deg)}@keyframes float{50%{transform:rotate(34deg) scale(1.05)}}
-.report-card{margin-top:18px;padding:26px 28px;background:#fff;border:1px solid #edf1f6;border-radius:24px;box-shadow:0 10px 30px rgba(59,73,96,.06)}.section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}.section-heading.compact{margin-bottom:12px}.section-heading h2{margin-top:4px;font-size:22px;letter-spacing:-.4px}.eyebrow{color:#8b96a7;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase}.data-badge,.average-pill{flex:none;padding:7px 12px;border-radius:99px;background:#f1f6ff;color:#4c76ac;font-size:12px}.average-pill{background:#fff7df;color:#8c7426}.muted{color:#9aa3b1;font-size:12px}.insight-copy{display:flex;gap:10px;align-items:flex-start;line-height:1.8;font-size:16px}.insight-copy i{flex:none;width:7px;height:7px;margin-top:11px;border-radius:50%;background:#3f83ee;box-shadow:0 0 0 5px #e9f2ff}.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:22px}.metric-grid>div{min-width:0;padding:16px;border-radius:16px;background:#f5f8fc}.metric-grid span{display:block;color:#7b8798;font-size:12px}.metric-grid strong{display:block;margin-top:9px;font-size:20px}.metric-grid strong.warm{color:#e15f58}.metric-grid strong.cool{color:#29866d}.truncate{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.trend-chart{height:290px;width:100%}
-.weekday-row,.calendar-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:9px}.weekday-row{margin-bottom:9px;color:#8b95a5;text-align:center;font-size:12px}.calendar-cell{aspect-ratio:1.2;min-height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;border-radius:14px;background:#f6f8fb;color:#576276}.calendar-cell.blank{visibility:hidden}.calendar-cell.active{background:#eaf3ff;color:#254f82}.calendar-cell.today{color:#fff;background:linear-gradient(145deg,#72aaf2,#4c86dc);box-shadow:0 7px 18px rgba(58,121,209,.25)}.calendar-cell b{font-size:13px}.calendar-cell small{max-width:100%;padding:0 4px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.year-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.year-grid>div{padding:17px;border-radius:16px;background:#f6f8fb}.year-grid>div.active{background:#eaf3ff}.year-grid span,.year-grid small{display:block;color:#7c8797}.year-grid strong{display:block;margin:8px 0}
-.transaction-list,.detail-list{display:flex;flex-direction:column}.transaction-row,.detail-list button,.rank-row{width:100%;display:flex;align-items:center;gap:13px;border:0;border-bottom:1px solid #eef2f6;background:transparent;padding:14px 0;text-align:left;cursor:pointer;font:inherit;color:inherit}.transaction-row:last-child,.detail-list button:last-child,.rank-row:last-child{border-bottom:0}.category-avatar{flex:none;width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:#edf4fc;font-size:19px}.transaction-main{min-width:0;flex:1}.transaction-main b,.transaction-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.transaction-main small{margin-top:5px;color:#8a95a5;font-size:12px}.transaction-row>strong,.detail-list button>strong{flex:none;color:#263247}.transaction-row>strong.income{color:#268269}.text-button{border:0;background:transparent;color:#4079bc;cursor:pointer;font:inherit;font-size:13px}.empty-state{padding:42px 12px;color:#929cab;text-align:center}
-.category-layout{display:grid;grid-template-columns:minmax(300px,1fr) minmax(240px,.8fr);gap:30px;align-items:center}.category-chart{height:320px}.category-legend{display:flex;flex-direction:column;gap:5px}.category-legend button{display:flex;justify-content:space-between;padding:11px 12px;border:0;border-radius:12px;background:transparent;color:#485468;font:inherit;cursor:pointer}.category-legend button:hover{background:#f4f7fb}.category-group+.category-group{border-top:1px solid #eef2f6}.category-summary{width:100%;display:flex;align-items:center;gap:12px;padding:17px 0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-align:left}.rank-number{width:24px;color:#9ba4b2;font-weight:700}.category-name{min-width:0;flex:1}.category-name b,.category-name small{display:block}.category-name small{margin-top:4px;color:#8b96a6;font-size:12px}.chevron{margin-left:4px;color:#98a1af;transition:transform .2s}.chevron.open{transform:rotate(180deg)}.minor-list{margin:0 0 14px 78px;padding:6px 14px;border-radius:15px;background:#f3f7fc}.minor-list button{width:100%;display:flex;justify-content:space-between;padding:11px 0;border:0;border-bottom:1px solid #e3eaf2;background:transparent;color:#687487;font:inherit;cursor:pointer}.minor-list button:last-child{border-bottom:0}.minor-list b{font-size:12px}
-.method-row{width:100%;display:flex;align-items:center;gap:14px;padding:15px;margin-top:10px;border:0;border-radius:17px;background:#f4f8fc;color:inherit;font:inherit;text-align:left;cursor:pointer}.method-logo{flex:none;width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:#436a9f;color:#fff;font-weight:800}.method-logo.wechat{background:#21a77a}.method-logo.alipay{background:#287bee}.method-logo.family{background:#ff7a45}.method-main{min-width:0;flex:1}.method-main b{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.method-main>span{display:block;height:4px;margin-top:9px;border-radius:9px;background:#dde6f0;overflow:hidden}.method-main i{display:block;height:100%;border-radius:inherit;background:#7aa9e8}.method-row>strong{flex:none;text-align:right}.method-row>strong small{display:block;margin-top:4px;color:#8994a4;font-weight:500}.row-arrow{color:#a7afbb;font-size:22px}.rank-medal{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#eef2f7;color:#7e8999;font-size:12px;font-weight:800}.rank-medal.top{background:#fff0c8;color:#a67d11}.rank-row>strong{color:#268269}
-.status-card{padding:22px;border-radius:18px;background:#fff}.error-card{display:flex;align-items:center;gap:12px;color:#9a3d42;border:1px solid #f1c9cc}.error-card span{flex:1}.error-card button{border:0;border-radius:10px;padding:8px 12px;background:#9a3d42;color:#fff;cursor:pointer}.loading-grid{display:grid;gap:18px}.skeleton{height:180px;border-radius:24px;background:linear-gradient(90deg,#edf1f6,#f8fafc,#edf1f6);background-size:200% 100%;animation:shimmer 1.5s infinite}@keyframes shimmer{to{background-position:-200% 0}}
-.detail-backdrop{position:fixed;inset:0;z-index:100;display:flex;justify-content:flex-end;background:rgba(20,30,46,.42);backdrop-filter:blur(3px)}.detail-sheet{width:min(540px,100%);height:100%;overflow:auto;padding:28px;background:#fff;box-shadow:-20px 0 60px rgba(24,39,63,.18);animation:sheet-in .25s ease-out}.detail-sheet header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}.detail-sheet header span{color:#8b96a7;font-size:12px}.detail-sheet header h2{margin-top:4px}.detail-sheet header button{width:36px;height:36px;border:0;border-radius:50%;background:#f0f3f7;color:#5f6b7b;font-size:24px;cursor:pointer}@keyframes sheet-in{from{transform:translateX(30px);opacity:0}}
-@media(max-width:720px){.report-page{width:100%}.report-controls{margin:-16px -16px 14px;padding:10px 16px 0}.period-tabs{gap:36px}.filter-row{gap:8px}.date-switcher{gap:4px}.date-switcher strong{min-width:112px;font-size:18px}.round-button{width:28px;height:28px;font-size:20px}.type-toggle button{min-width:56px;padding:7px 12px}.hero-card{min-height:175px;padding:25px 22px;border-radius:22px}.hero-orbit{right:1%;transform:scale(.8)}.hero-card h1{font-size:39px}.report-card{margin-top:14px;padding:21px 18px;border-radius:20px}.metric-grid{grid-template-columns:repeat(2,1fr)}.metric-grid>div{padding:14px}.metric-grid strong{font-size:17px}.section-heading h2{font-size:19px}.section-heading .muted{display:none}.trend-chart{height:240px}.calendar-grid,.weekday-row{gap:5px}.calendar-cell{min-height:49px;border-radius:11px;aspect-ratio:1}.calendar-cell small{font-size:9px}.year-grid{grid-template-columns:repeat(3,1fr);gap:8px}.year-grid>div{padding:13px 10px}.category-layout{grid-template-columns:1fr;gap:0}.category-chart{height:270px}.category-legend{display:grid;grid-template-columns:1fr 1fr}.minor-list{margin-left:0}.method-row{padding:13px 11px}.method-row>strong{font-size:13px}.category-summary>strong{font-size:14px}.data-badge{max-width:140px;text-align:center}}
+.report-page{width:min(100%,1080px);margin:0 auto;padding-bottom:56px}.report-controls{position:sticky;top:0;z-index:20;margin:0 0 18px;padding:10px clamp(14px,2.5vw,24px) 0;background:#fffcf3f2;backdrop-filter:blur(12px);border:1px solid var(--book-line);border-radius:17px;box-shadow:var(--surface-shadow)}.period-tabs,.view-tabs{display:flex;justify-content:center;gap:54px}.period-tabs button,.view-tabs button{position:relative;border:0;background:transparent;color:#697386;font:inherit;font-weight:650;cursor:pointer;padding:8px 2px 14px}.period-tabs button{font-size:17px}.period-tabs button.active,.view-tabs button.active{color:#223d32}.period-tabs button.active:after,.view-tabs button.active:after{content:'';position:absolute;height:3px;width:28px;border-radius:99px;background:#223d32;bottom:5px;left:50%;transform:translateX(-50%)}.filter-row{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0 14px}.date-switcher{display:flex;align-items:center;gap:10px}.date-switcher strong{min-width:138px;text-align:center;font-size:21px;letter-spacing:-.4px}.round-button{width:32px;height:32px;border:1px solid #dfe6ef;border-radius:50%;background:var(--book-paper);color:#657185;cursor:pointer;font-size:24px;line-height:24px}.type-toggle{display:flex;padding:3px;background:var(--book-sage);border-radius:999px}.type-toggle button{min-width:66px;padding:8px 16px;border:0;border-radius:999px;background:transparent;color:#697386;font:inherit;font-weight:650;cursor:pointer}.type-toggle button.active{background:#d0decc;color:#294737;box-shadow:0 2px 5px #3f58401a}.view-tabs{justify-content:flex-start;gap:36px}.view-tabs button{font-size:15px}
+.hero-card{position:relative;overflow:hidden;min-height:190px;padding:30px 34px;border-radius:24px;color:#294337;border:1px solid #ccd8c7;background:radial-gradient(ellipse at 88% 0%,#f8faedaa,transparent 58%),linear-gradient(116deg,#ebf0e6,#cfdcc9);box-shadow:0 10px 26px #28453513}.hero-card:before,.hero-card:after{content:'';position:absolute;border-radius:50%;filter:blur(2px);opacity:.7}.hero-card:before{width:180px;height:180px;right:13%;top:-80px;background:#fbfcf879}.hero-card:after{width:110px;height:110px;left:43%;bottom:-72px;background:#ede5be5e}.hero-card.income{border-color:#c7d8cf;background:radial-gradient(ellipse at 88% 0%,#f6fbf3b3,transparent 58%),linear-gradient(115deg,#e9f1eb,#cfe1d7)}
+.hero-card>div:first-child{position:relative;z-index:1;max-width:calc(100% - 130px)}.hero-card p{color:#425b4b;font-size:15px;font-weight:650}.hero-card h1{margin:18px 0 13px;font-size:clamp(38px,6vw,58px);line-height:1;letter-spacing:-.04em;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.hero-card h1 span{font-size:.52em;margin-right:6px;vertical-align:9px}.hero-meta{display:flex;flex-wrap:wrap;gap:9px 17px;color:#425b4b}.hero-orbit{position:absolute;right:7%;top:22px;width:145px;height:145px;display:grid;place-items:center}.orbit-ring{position:absolute;inset:8px;border:1px solid #869c77a6;border-radius:44% 56% 63% 37%/45% 38% 62% 55%;transform:rotate(18deg);animation:float 8s ease-in-out infinite}.orbit-core{width:76px;height:76px;display:grid;place-items:center;border-radius:24px;background:#f7fae98f;border:1px solid #96ab8782;color:#46634d;font-size:30px;font-weight:750;box-shadow:0 10px 25px #52684a1c;transform:rotate(-6deg)}@keyframes float{50%{transform:rotate(34deg) scale(1.05)}}
+.report-card{min-width:0;margin-top:16px;padding:23px 26px;background:var(--book-paper);border:1px solid #dfe9f2;border-radius:20px;box-shadow:var(--surface-shadow)}.section-heading{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:15px}.section-heading.compact{margin-bottom:12px}.section-heading h2{margin-top:4px;font-size:22px;letter-spacing:-.4px}.eyebrow{color:#5d738c;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase}.data-badge,.average-pill{flex:none;padding:7px 12px;border-radius:99px;background:var(--book-sage);color:#42614e;font-size:12px}.average-pill{background:#fff7df;color:#8c7426}.muted{color:#9aa3b1;font-size:12px}.insight-copy{display:flex;gap:10px;align-items:flex-start;line-height:1.8;font-size:16px}.insight-copy i{flex:none;width:7px;height:7px;margin-top:11px;border-radius:50%;background:#42765e;box-shadow:0 0 0 5px #e5eddd}.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:22px}.metric-grid>div{min-width:0;padding:16px;border-radius:16px;background:#f2f2e8}.metric-grid span{display:block;color:#7b8798;font-size:12px}.metric-grid strong{display:block;margin-top:9px;font-size:20px}.metric-grid strong.warm{color:#e15f58}.metric-grid strong.cool{color:#29866d}.truncate{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.chart-card{background:linear-gradient(#fff 20%,#fbfdff)}
+.chart-card .section-heading{align-items:center}
+.trend-chart{height:clamp(230px,25vw,290px);width:100%;min-width:0;overflow:hidden}
+.weekday-row,.calendar-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:9px}.weekday-row{margin-bottom:9px;color:#8b95a5;text-align:center;font-size:12px}.calendar-cell{aspect-ratio:1.2;min-height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;border-radius:14px;background:#f3f2e9;color:#576276}.calendar-cell.blank{visibility:hidden}.calendar-cell.active{background:#e1ecdb;color:#365c45}.calendar-cell.today{color:#fff;background:linear-gradient(145deg,#658873,#416954);box-shadow:0 7px 18px rgba(58,121,209,.25)}.calendar-cell b{font-size:13px}.calendar-cell small{max-width:100%;padding:0 4px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.year-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.year-grid>div{padding:17px;border-radius:16px;background:#f3f2e9}.year-grid>div.active{background:#e1ecdb}.year-grid span,.year-grid small{display:block;color:#7c8797}.year-grid strong{display:block;margin:8px 0}
+.transaction-list,.detail-list{display:flex;flex-direction:column}.transaction-row,.detail-list button,.rank-row{width:100%;display:flex;align-items:center;gap:13px;border:0;border-bottom:1px solid #eef2f6;background:transparent;padding:14px 0;text-align:left;cursor:pointer;font:inherit;color:inherit}.transaction-row:last-child,.detail-list button:last-child,.rank-row:last-child{border-bottom:0}.category-avatar{flex:none;width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:#edf0e3;font-size:19px}.transaction-main{min-width:0;flex:1}.transaction-main b,.transaction-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.transaction-main small{margin-top:5px;color:#8a95a5;font-size:12px}.transaction-row>strong,.detail-list button>strong{flex:none;color:#263247}.transaction-row>strong.income{color:#268269}.text-button{border:0;background:transparent;color:#4079bc;cursor:pointer;font:inherit;font-size:13px}.empty-state{padding:42px 12px;color:#929cab;text-align:center}
+.category-layout{display:grid;grid-template-columns:minmax(300px,1fr) minmax(240px,.8fr);gap:30px;align-items:center}.category-chart{height:320px}.category-legend{display:flex;flex-direction:column;gap:5px}.category-legend button{display:flex;justify-content:space-between;padding:11px 12px;border:0;border-radius:12px;background:transparent;color:#485468;font:inherit;cursor:pointer}.category-legend button:hover{background:#f5f3ea}.category-group+.category-group{border-top:1px solid #eef2f6}.category-summary{width:100%;display:flex;align-items:center;gap:12px;padding:17px 0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-align:left}.rank-number{width:24px;color:#9ba4b2;font-weight:700}.category-name{min-width:0;flex:1}.category-name b,.category-name small{display:block}.category-name small{margin-top:4px;color:#8b96a6;font-size:12px}.chevron{margin-left:4px;color:#98a1af;transition:transform .2s}.chevron.open{transform:rotate(180deg)}.minor-list{margin:0 0 14px 78px;padding:6px 14px;border-radius:15px;background:#f3f7fc}.minor-list button{width:100%;display:flex;justify-content:space-between;padding:11px 0;border:0;border-bottom:1px solid #e3eaf2;background:transparent;color:#687487;font:inherit;cursor:pointer}.minor-list button:last-child{border-bottom:0}.minor-list b{font-size:12px}
+.method-row{width:100%;display:flex;align-items:center;gap:14px;padding:15px;margin-top:10px;border:0;border-radius:17px;background:#f2f2e8;color:inherit;font:inherit;text-align:left;cursor:pointer}.method-logo{flex:none;width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:#436a9f;color:#fff;font-weight:800}.method-logo.wechat{background:#21a77a}.method-logo.alipay{background:#287bee}.method-logo.family{background:#ff7a45}.method-main{min-width:0;flex:1}.method-main b{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.method-main>span{display:block;height:4px;margin-top:9px;border-radius:9px;background:#dde6f0;overflow:hidden}.method-main i{display:block;height:100%;border-radius:inherit;background:#7aa9e8}.method-row>strong{flex:none;text-align:right}.method-row>strong small{display:block;margin-top:4px;color:#8994a4;font-weight:500}.row-arrow{color:#a7afbb;font-size:22px}.rank-medal{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#eef2f7;color:#7e8999;font-size:12px;font-weight:800}.rank-medal.top{background:#fff0c8;color:#a67d11}.rank-row>strong{color:#268269}
+.status-card{padding:22px;border-radius:18px;background:#fff}.error-card{display:flex;align-items:center;gap:12px;color:#9a3d42;border:1px solid #f1c9cc}.error-card span{flex:1}.error-card button{border:0;border-radius:10px;padding:8px 12px;background:#9a3d42;color:#fff;cursor:pointer}.loading-grid{display:grid;gap:18px}.skeleton{height:180px;border-radius:24px;background:linear-gradient(90deg,var(--book-line),#f8fafc,var(--book-line));background-size:200% 100%;animation:shimmer 1.5s infinite}@keyframes shimmer{to{background-position:-200% 0}}
+.detail-backdrop{position:fixed;inset:0;z-index:100;display:flex;justify-content:flex-end;background:rgba(20,30,46,.42);backdrop-filter:blur(3px)}.detail-sheet{width:min(540px,100%);height:100%;overflow:auto;padding:28px;background:var(--book-paper);box-shadow:-20px 0 60px rgba(24,39,63,.18);animation:sheet-in .25s ease-out}.detail-sheet header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}.detail-sheet header span{color:#8b96a7;font-size:12px}.detail-sheet header h2{margin-top:4px}.detail-sheet header button{width:36px;height:36px;border:0;border-radius:50%;background:#f0f3f7;color:#5f6b7b;font-size:24px;cursor:pointer}@keyframes sheet-in{from{transform:translateX(30px);opacity:0}}
+@media(max-width:720px){.report-page{width:100%}.report-controls{margin:0 0 14px;padding:8px 12px 0}.period-tabs{gap:36px}.filter-row{gap:8px}.date-switcher{gap:4px}.date-switcher strong{min-width:112px;font-size:18px}.round-button{width:28px;height:28px;font-size:20px}.type-toggle button{min-width:56px;padding:7px 12px}.hero-card{min-height:175px;padding:25px 22px;border-radius:22px}.hero-orbit{right:-6px;transform:scale(.65)}.hero-card>div:first-child{max-width:calc(100% - 72px)}.hero-card h1{font-size:clamp(29px,7vw,39px)}.report-card{margin-top:14px;padding:21px 18px;border-radius:20px}.metric-grid{grid-template-columns:repeat(2,1fr)}.metric-grid>div{padding:14px}.metric-grid strong{font-size:17px}.section-heading h2{font-size:19px}.section-heading .muted{display:none}.trend-chart{height:240px}.calendar-grid,.weekday-row{gap:5px}.calendar-cell{min-height:49px;border-radius:11px;aspect-ratio:1}.calendar-cell small{font-size:9px}.year-grid{grid-template-columns:repeat(3,1fr);gap:8px}.year-grid>div{padding:13px 10px}.category-layout{grid-template-columns:1fr;gap:0}.category-chart{height:270px}.category-legend{display:grid;grid-template-columns:1fr 1fr}.minor-list{margin-left:0}.method-row{padding:13px 11px}.method-row>strong{font-size:13px}.category-summary>strong{font-size:14px}.data-badge{max-width:140px;text-align:center}}
 @media(max-width:390px){.period-tabs{gap:26px}.view-tabs{gap:24px}.date-switcher .round-button{display:none}.date-switcher strong{text-align:left}.hero-orbit{display:none}.metric-grid{gap:8px}.calendar-cell small{transform:scale(.9)}}
 .report-page{max-width:100%;overflow-x:clip}.filter-row,.date-switcher{min-width:0}.type-toggle{flex:none}
 @media(max-width:720px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.report-card,.hero-card{max-width:100%;overflow:hidden}}
-.period-tabs button small{margin-left:4px;color:#9aa4b3;font-size:8px}.period-picker{position:absolute;z-index:40;top:58px;left:50%;width:min(410px,calc(100% - 32px));padding:16px 18px 15px;border:1px solid #dce5ef;border-radius:20px;background:rgba(255,255,255,.98);box-shadow:0 22px 55px rgba(43,61,88,.2);transform:translateX(-50%)}.period-picker-header,.picker-nav{display:flex;align-items:center;justify-content:space-between}.period-picker-header{padding-bottom:10px}.period-picker-header>b{font-size:15px}.period-picker-header>button,.picker-nav>button{border:0;background:transparent;color:#7c8999;cursor:pointer}.period-picker-header>button{width:32px;height:32px;border-radius:50%;font-size:22px}.period-picker-header>button:hover,.picker-nav>button:hover{background:#f0f4f9}.picker-nav{padding:6px 0 13px}.picker-nav>strong{font-size:17px}.picker-nav>button{width:34px;height:34px;border-radius:10px;font-size:24px}.picker-weekdays,.picker-calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}.picker-weekdays{padding-bottom:6px;color:#909baa;text-align:center;font-size:11px}.picker-day{position:relative;min-height:38px;border:0;border-radius:9px;background:#f7f9fc;color:#566479;font:inherit;cursor:pointer}.picker-day.blank{visibility:hidden}.picker-day:hover{background:#e9f2ff;color:#2f6fbe}.picker-day.selected{background:#dcecff;color:#275f9f;border-radius:4px}.picker-day.today{box-shadow:inset 0 0 0 2px #6b9bd4}.picker-day.has-record:after{content:'';position:absolute;left:50%;bottom:4px;width:4px;height:4px;border-radius:50%;background:#3f83ee;transform:translateX(-50%)}.picker-day.selected.has-record:after{background:#275f9f}.picker-help{margin:10px 0 0;color:#8994a4;font-size:11px;text-align:center}.picker-option-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.picker-option-grid button{min-height:43px;padding:9px 7px;border:0;border-radius:11px;background:#f4f7fb;color:#59677b;font:inherit;cursor:pointer}.picker-option-grid button:hover{background:#e9f2ff;color:#2f6fbe}.picker-option-grid button.selected{background:#397ceb;color:#fff;font-weight:700}.heading-actions{display:flex;align-items:center;gap:9px}.chart-switch{display:flex;padding:3px;border-radius:10px;background:#edf2f8}.chart-switch button{padding:6px 10px;border:0;border-radius:8px;background:transparent;color:#748094;font-size:12px;cursor:pointer}.chart-switch button.active{background:#fff;color:#2f6fbe;font-weight:700;box-shadow:0 3px 9px rgba(55,77,110,.1)}.calendar-cell{border:0;font-family:inherit;cursor:pointer}.calendar-cell:disabled{cursor:default}.calendar-grid.heatmap .calendar-cell{transition:background .2s,color .2s}.category-legend button.active{background:#eaf2fd;color:#285f9f}.category-legend button.active b{color:#2f73c8}
+.period-tabs button small{margin-left:4px;color:#9aa4b3;font-size:8px}.period-picker{position:absolute;z-index:40;top:58px;left:50%;width:min(410px,calc(100% - 32px));padding:16px 18px 15px;border:1px solid #dce5ef;border-radius:20px;background:rgba(255,255,255,.98);box-shadow:0 22px 55px rgba(43,61,88,.2);transform:translateX(-50%)}.period-picker-header,.picker-nav{display:flex;align-items:center;justify-content:space-between}.period-picker-header{padding-bottom:10px}.period-picker-header>b{font-size:15px}.period-picker-header>button,.picker-nav>button{border:0;background:transparent;color:#7c8999;cursor:pointer}.period-picker-header>button{width:32px;height:32px;border-radius:50%;font-size:22px}.period-picker-header>button:hover,.picker-nav>button:hover{background:#f0f4f9}.picker-nav{padding:6px 0 13px}.picker-nav>strong{font-size:17px}.picker-nav>button{width:34px;height:34px;border-radius:10px;font-size:24px}.picker-weekdays,.picker-calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}.picker-weekdays{padding-bottom:6px;color:#909baa;text-align:center;font-size:11px}.picker-day{position:relative;min-height:38px;border:0;border-radius:9px;background:#f7f9fc;color:#566479;font:inherit;cursor:pointer}.picker-day.blank{visibility:hidden}.picker-day:hover{background:#e5eddd;color:var(--book-forest)}.picker-day.selected{background:var(--book-sage);color:var(--book-forest-dark);border-radius:4px}.picker-day.today{box-shadow:inset 0 0 0 2px #749677}.picker-day.has-record:after{content:'';position:absolute;left:50%;bottom:4px;width:4px;height:4px;border-radius:50%;background:#42765e;transform:translateX(-50%)}.picker-day.selected.has-record:after{background:var(--book-forest-dark)}.picker-help{margin:10px 0 0;color:#8994a4;font-size:11px;text-align:center}.picker-option-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.picker-option-grid button{min-height:43px;padding:9px 7px;border:0;border-radius:11px;background:#f5f3ea;color:#59677b;font:inherit;cursor:pointer}.picker-option-grid button:hover{background:#e5eddd;color:var(--book-forest)}.picker-option-grid button.selected{background:var(--book-forest);color:#fff;font-weight:700}.heading-actions{display:flex;align-items:center;gap:9px}.chart-switch{display:flex;padding:3px;border-radius:10px;background:#edeee4}.chart-switch button{padding:6px 10px;border:0;border-radius:8px;background:transparent;color:#748094;font-size:12px;cursor:pointer}.chart-switch button.active{background:var(--book-paper);color:var(--book-forest);font-weight:700;box-shadow:0 3px 9px rgba(55,77,110,.1)}.calendar-cell{border:0;font-family:inherit;cursor:pointer}.calendar-cell:disabled{cursor:default}.calendar-grid.heatmap .calendar-cell{transition:background .2s,color .2s}.category-legend button.active{background:var(--book-sage);color:var(--book-forest-dark)}.category-legend button.active b{color:var(--book-forest)}
 .report-shell{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-items:start}
 .report-main{min-width:0}
 .report-aside{display:flex;flex-direction:column;gap:14px}
 @media(min-width:1024px){.report-page.has-aside .report-shell{grid-template-columns:minmax(0,1fr) 248px}}
-.report-aside .hint-card{padding:18px 17px;border:1px solid #e6edf6;border-radius:18px;background:#fff;box-shadow:0 10px 28px rgba(59,73,96,.06)}
+.report-aside .hint-card{padding:18px 17px;border:1px solid #e6edf6;border-radius:18px;background:var(--book-paper);box-shadow:0 10px 28px rgba(59,73,96,.06)}
 .report-aside .hint-card h2{font-size:14px;line-height:1.35;letter-spacing:-.1px}
 .report-aside .hint-card p{margin-top:8px;color:#7d899a;font-size:12px;line-height:1.75}
 .report-aside .hint-card hr{margin:15px 0 14px;border:0;border-top:1px solid #eef2f7}
 .report-aside .hint-actions{display:flex;flex-direction:column;gap:7px;margin-top:13px}
-.report-aside .hint-actions a{display:block;padding:8px 11px;border-radius:9px;background:#f2f7fd;color:#366ea9;font-size:12px;font-weight:650;text-decoration:none;transition:background .16s}
-.report-aside .hint-actions a:hover{background:#e6f0fb}
-.report-aside .hint-actions a:first-child{background:#3d74b0;color:#fff}
-.report-aside .hint-actions a:first-child:hover{background:#35679d}
+.report-aside .hint-actions a{display:block;padding:8px 11px;border-radius:9px;background:#f0f1e7;color:#3b634c;font-size:12px;font-weight:650;text-decoration:none;transition:background .16s}
+.report-aside .hint-actions a:hover{background:var(--book-sage)}
+.report-aside .hint-actions a:first-child{background:#dce8d7;color:#304c3b}
+.report-aside .hint-actions a:first-child:hover{background:#cedec8}
 .report-aside .hint-card.hint-init{border-color:#f0dfb4;background:linear-gradient(180deg,#fffaf0,#fff)}
 .report-aside .hint-card.hint-init .hint-actions a:first-child{background:#b98422}
 .report-aside .hint-card.hint-init .hint-actions a:first-child:hover{background:#a4741b}
 .hint-mark{display:grid;place-items:center;width:34px;height:34px;margin-bottom:11px;border-radius:11px;background:#fdf1d6;color:#a77a1f;font-size:17px;font-weight:800}
-.report-empty{max-width:540px;margin:max(40px,8vh) auto 0;padding:52px 34px 46px;border:1px solid #e9eff6;border-radius:28px;background:#fff;box-shadow:0 20px 55px rgba(52,73,104,.08);text-align:center}
+.report-empty{max-width:540px;margin:max(40px,8vh) auto 0;padding:52px 34px 46px;border:1px solid #e9eff6;border-radius:28px;background:var(--book-paper);box-shadow:0 20px 55px rgba(52,73,104,.08);text-align:center}
 .empty-mark{display:grid;place-items:center;width:66px;height:66px;margin:0 auto 20px;border-radius:21px;background:linear-gradient(145deg,#eef5fd,#e2eefb);color:#4a7db3;font-size:30px;font-weight:800}
 .report-empty h1{font-size:clamp(22px,4vw,28px);letter-spacing:-.5px}
 .report-empty p{margin:11px 0 26px;color:#7c8798;font-size:14px;line-height:1.7}
 .empty-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:10px}
-.empty-actions a{padding:11px 19px;border:1px solid #dbe5f0;border-radius:12px;background:#fff;color:#4a6484;font-size:13px;font-weight:650;text-decoration:none}
+.empty-actions a{padding:11px 19px;border:1px solid #dbe5f0;border-radius:12px;background:var(--book-paper);color:#4a6484;font-size:13px;font-weight:650;text-decoration:none}
 .empty-actions a:hover{background:#f4f8fd}
-.empty-actions a.primary{border-color:transparent;background:#3d74b0;color:#fff;box-shadow:0 8px 20px rgba(61,116,176,.22)}
-.empty-actions a.primary:hover{background:#35679d}
+.empty-actions a.primary{border-color:transparent;background:var(--book-forest);color:#fff;box-shadow:0 8px 20px rgba(61,116,176,.22)}
+.empty-actions a.primary:hover{background:var(--book-forest-dark)}
 @media(max-width:720px){.report-empty{margin-top:18px;padding:38px 20px 34px;border-radius:22px}.report-aside{order:-1}.report-aside .hint-card{padding:15px 16px}}
-@media(max-width:720px){.period-picker{top:52px;width:min(390px,calc(100% - 20px));padding:14px}.picker-day{min-height:36px}.heading-actions{align-items:flex-end;flex-direction:column}.average-pill{display:none}.chart-switch button{padding:6px 9px}.category-overview .section-heading{align-items:center}.category-overview .data-badge{display:none}}
+@media(max-width:720px){.period-picker{top:52px;width:min(390px,calc(100% - 20px));padding:14px}.picker-day{min-height:36px}.heading-actions{align-items:center;flex-wrap:wrap}.average-pill{display:none}.chart-switch button{padding:6px 9px}.category-overview .section-heading{align-items:center}.category-overview .data-badge{display:none}}
+@media(min-width:721px) {
+  .report-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px 12px; }
+  .period-tabs { grid-column: 2; grid-row: 1; gap: clamp(18px, 4vw, 44px); }
+  .filter-row { display: contents; }
+  .date-switcher { grid-column: 1; grid-row: 1; }
+  .type-toggle { grid-column: 3; grid-row: 1; justify-self: end; }
+  .view-tabs { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--book-line); }
+}
+@media(max-width:720px) {
+  .chart-card .average-pill { display: inline-flex; padding: 5px 8px; font-size: 11px; }
+}
+@media(max-width:420px) {
+  .filter-row { flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+  .date-switcher strong { min-width: 0; }
+  .hero-orbit { opacity: .65; width: 105px; height: 105px; }
+  .hero-card > div:first-child { max-width: calc(100% - 28px); }
+  .chart-card .section-heading { margin-bottom: 6px; }
+}
+@media(prefers-reduced-motion:reduce) { .orbit-ring { animation: none; } }
+@media(min-width: 801px) {
+  .report-page.has-brief .report-shell { grid-template-columns: clamp(244px, 25vw, 292px) minmax(0, 1fr); }
+  .has-brief .report-aside { grid-row: 1; grid-column: 1; }
+  .has-brief .report-main { grid-row: 1; grid-column: 2; }
+  .has-brief .category-layout { grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); }
+}
+@media(max-width: 800px) {
+  .has-brief .report-aside { display: contents; }
+  .has-brief .brief-letter { order: -1; }
+}
 </style>

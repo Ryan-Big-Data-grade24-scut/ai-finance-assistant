@@ -45,11 +45,11 @@ def stage_file(path: Path, filename: str, *, password: str | None = None) -> dic
     except ValueError as exc:
         raise ImportError_('PARSE_FAILED', str(exc)) from exc
     if not rows:
-        raise ImportError_('NO_ROWS', '解析成功但没有任何有效数据行。')
+        raise ImportError_('NO_ROWS', '解析成功但没有任何有效数据行。' + '；'.join(issues.display_warnings()))
 
     stage_id = new_id('imp')
     dates = [r.date for r in rows]
-    summary = {'warnings': issues.warnings[:5], 'failed': issues.failed,
+    summary = {'warnings': issues.display_warnings(), 'failed': issues.failed,
                'first_error': issues.first_error}
     _row_path(stage_id).write_text(
         json.dumps([asdict(r) for r in rows], ensure_ascii=False), encoding='utf-8'
