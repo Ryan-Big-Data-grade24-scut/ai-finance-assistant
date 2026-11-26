@@ -93,13 +93,13 @@ PLATFORM_META = {
 }
 
 
-def ensure_platform(conn, platform_id: str) -> None:
+def ensure_platform(conn, platform_id: str, source: str | None = None) -> None:
     """导入时自动注册平台。
 
     不单独做 seed.sql —— 加一个新平台不应该需要改两处地方。
     """
     name, kind, adapter = PLATFORM_META.get(
-        platform_id, (platform_id, "other", "generic_csv")
+        platform_id, (source or platform_id, "other", "generic_csv")
     )
     conn.execute(
         "INSERT OR IGNORE INTO platforms (id, name, kind, adapter) "
@@ -228,7 +228,7 @@ def import_rows(
         raise ValueError("没有可写入的有效交易行")
     issues = issues or ParseIssues()
     pid = platform_id
-    name = PLATFORM_META.get(pid, (pid, "other", "generic_csv"))[0]
+    name = PLATFORM_META.get(pid, (rows[0].source, "other", "generic_csv"))[0]
     batch_id = batch_id or uuid.uuid4().hex[:12]
     dates = [row.date for row in rows]
     inserted = skipped = 0
@@ -249,7 +249,7 @@ def import_rows(
                 first_error=issues.first_error, date_from=row["date_from"], date_to=row["date_to"],
             )
         with (db.transaction(conn) if own else nullcontext(conn)) as c:
-            ensure_platform(c, pid)
+            ensure_platform(c, pid, name)
             for i, row in enumerate(rows, 1):
                 try:
                     cur = c.execute(INSERT_SQL, row.to_sql_tuple(batch_id))

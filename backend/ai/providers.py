@@ -6,6 +6,7 @@ OpenAI-compatible endpoint, leaving other providers unchanged.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -14,6 +15,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import AIConfig
+from . import privacy
 
 
 class AIProviderError(RuntimeError):
@@ -91,8 +93,10 @@ async def complete_json(
     timeout: float = 90.0,
 ) -> dict[str, Any]:
     """Request JSON from a model; never log request headers or raw bill data."""
+    policy = (await asyncio.to_thread(privacy.current)).with_candidates(user_payload)
+    system_prompt = policy.text(system_prompt)
     user_text = "请根据下面的 JSON 数据完成任务，只返回 JSON 对象，不要输出 Markdown。\n" + json.dumps(
-        user_payload, ensure_ascii=False, separators=(",", ":")
+        policy.redact(user_payload, data_keys=True), ensure_ascii=False, separators=(",", ":")
     )
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -156,13 +160,13 @@ async def complete_json(
                     content = "\n".join(
                         part.get("text", "") for part in content if isinstance(part, dict)
                     )
-    except AIProviderError:
-        raise
+    except AIProviderError as exc:
+        raise AIProviderError(policy.text(str(exc))) from exc
     except httpx.TimeoutException as exc:
         raise AIProviderError("模型请求超时，请检查网络或缩小账单批次。") from exc
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise AIProviderError("无法读取模型响应，请检查服务商协议、Base URL 和响应格式。") from exc
-    return _parse_json_text(str(content or ""))
+    return policy.redact(_parse_json_text(str(content or "")))
 
 
 async def test_connection(config: AIConfig) -> dict[str, Any]:

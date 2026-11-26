@@ -1,6 +1,7 @@
 """Persistent AI Finance chat with read-only finance tools and explicit write confirmations."""
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -23,6 +24,7 @@ from ..importer.base import Row
 from ..ledger import loader as ledger_loader
 from ..ledger import service as ledger_service
 from .config import get_secret_config
+from . import privacy
 from .providers import AIProviderError, _safe_provider_error
 from .agent.runtime import AgentRuntime
 from .agent.task_state import TASK_STORE
@@ -121,6 +123,10 @@ def get_conversation(conversation_id: str) -> dict:
                 (conversation_id,),
             )
         ]
+        policy = privacy.current(conn)
+        for message in messages:
+            if message["role"] == "assistant":
+                message["content"] = policy.redact(message["content"])
         actions = [
             {
                 **dict(item),
@@ -872,7 +878,7 @@ def _tool_search_transactions(args: dict) -> dict:
         raise AIChatError("请提供 1 到 100 个字符的搜索关键词。")
     limit = max(1, min(int(args.get("limit") or 10), 20))
     clauses = ["(counterparty LIKE ? OR item LIKE ? OR note LIKE ?)"]
-    pattern = f"%{keyword}%"
+    pattern = f"%{privacy.current().resolve(keyword)}%"
     params: list[Any] = [pattern, pattern, pattern]
     direction = str(args.get("direction") or "")
     if direction:
@@ -3226,9 +3232,10 @@ async def _post_openai(config, messages: list[dict]) -> dict:
         or host.endswith("qwencloudapi.com")
     )
     allow_proposals = _is_mutating_financial_request(latest_user_message)
+    policy = await asyncio.to_thread(privacy.current)
     body: dict[str, Any] = {
         "model": config.model,
-        "messages": messages,
+        "messages": policy.messages(messages),
         "tools": _openai_tools(allow_proposals=allow_proposals),
         # Qwen hybrid-thinking models use auto/none; required is not supported in thinking mode.
         "tool_choice": "auto" if is_qwen_compatible or not require_tool else "required",
@@ -3263,7 +3270,7 @@ async def _post_openai(config, messages: list[dict]) -> dict:
             json=body,
         )
     if response.status_code >= 400:
-        raise AIProviderError(_safe_provider_error(response, config.api_key))
+        raise AIProviderError(policy.text(_safe_provider_error(response, config.api_key)))
     try:
         payload = response.json()
     except ValueError as exc:
@@ -3271,7 +3278,7 @@ async def _post_openai(config, messages: list[dict]) -> dict:
     choices = payload.get("choices") or []
     if not choices or not isinstance(choices[0].get("message"), dict):
         raise AIProviderError("模型响应缺少 choices[0].message。")
-    return choices[0]["message"]
+    return policy.redact(choices[0]["message"])
 
 async def _post_anthropic(config, messages: list[dict], system: str) -> dict:
     anthropic_messages = [
@@ -3281,6 +3288,7 @@ async def _post_anthropic(config, messages: list[dict], system: str) -> dict:
     latest_user_message = _last_user_message(anthropic_messages)
     require_tool = _is_financial_fact_question(latest_user_message)
     allow_proposals = _is_mutating_financial_request(latest_user_message)
+    policy = await asyncio.to_thread(privacy.current)
     url = config.base_url.rstrip("/") + "/messages"
     async with httpx.AsyncClient(timeout=90.0) as client:
         response = await client.post(
@@ -3291,15 +3299,15 @@ async def _post_anthropic(config, messages: list[dict], system: str) -> dict:
                 "Content-Type": "application/json",
             },
             json={
-                "model": config.model, "max_tokens": 1800, "system": system,
-                "messages": anthropic_messages, "tools": _anthropic_tools(allow_proposals=allow_proposals),
+                "model": config.model, "max_tokens": 1800, "system": policy.text(system),
+                "messages": policy.messages(anthropic_messages), "tools": _anthropic_tools(allow_proposals=allow_proposals),
                 "tool_choice": {"type": "any"} if require_tool else {"type": "auto"},
             },
         )
     if response.status_code >= 400:
-        raise AIProviderError(_safe_provider_error(response, config.api_key))
+        raise AIProviderError(policy.text(_safe_provider_error(response, config.api_key)))
     try:
-        return response.json()
+        return policy.redact(response.json())
     except ValueError as exc:
         raise AIProviderError("Anthropic 模型服务返回的内容不是有效 JSON。") from exc
 
@@ -3759,7 +3767,7 @@ def _store_assistant_message(conversation_id: str, answer: str) -> None:
     try:
         conn.execute(
             "INSERT INTO ai_chat_messages(conversation_id,role,content) VALUES(?, 'assistant', ?)",
-            (conversation_id, answer[:12000]),
+            (conversation_id, privacy.current(conn).redact(answer)[:12000]),
         )
         conn.execute(
             "UPDATE ai_chat_conversations SET updated_at=datetime('now') WHERE id=?",
@@ -3774,7 +3782,7 @@ def _conversation_result(conversation_id: str, answer: str) -> dict:
     result = get_conversation(conversation_id)
     return {
         "conversation": result["conversation"],
-        "assistant_message": answer,
+        "assistant_message": privacy.current().redact(answer),
         "messages": result["messages"],
         "actions": result["actions"],
         "agent_task": result.get("agent_task"),

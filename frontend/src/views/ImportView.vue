@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { getActiveLibrary } from '@/api/libraries'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { getActiveLibrary, type LedgerLibrary } from '@/api/libraries'
 import { commitImport, getImportHistory, previewImport } from '@/api/imports'
 import {
   analyzeAIImport, calibrateAIImport, commitAIImport, getAISettings,
@@ -13,7 +13,17 @@ import type { ImportBatch, ImportCommitResp, ImportPreviewResp } from '@/types/i
 /** AI 建议导入暂时从前端下线；代码保留，需要时改回 true 即可恢复。 */
 const SHOW_AI_IMPORT = false
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+type BatchBill = {
+  file: File
+  password: string
+  validationError: string
+  error: string
+  preview: ImportPreviewResp | null
+  confirmed: boolean
+  result: ImportCommitResp | null
+}
 const file = ref<File | null>(null)
+const batchBills = ref<BatchBill[]>([])
 const alipayPassword = ref('')
 const preview = ref<ImportPreviewResp | null>(null)
 const result = ref<ImportCommitResp | null>(null)
@@ -34,7 +44,7 @@ const approvedCategoryPaths = ref<string[]>([])
 const approvedRowIndices = ref<number[]>([])
 const rememberRuleRowIndices = ref<number[]>([])
 const history = ref<ImportBatch[]>([])
-const libraryName = ref('')
+const library = ref<LedgerLibrary | null>(null)
 const busy = ref<'preview' | 'commit' | null>(null)
 const chatBusy = ref(false)
 const error = ref('')
@@ -60,6 +70,19 @@ const imported = computed(() => result.value ?? aiCommitResult.value)
 const successVisible = computed(() => Boolean(imported.value))
 const successInserted = computed(() => imported.value?.inserted ?? 0)
 const successSkipped = computed(() => imported.value?.skipped ?? 0)
+const batchWaitingForPreview = computed(() => batchBills.value.filter(bill => !bill.validationError && !bill.preview))
+const batchReady = computed(() => batchBills.value.filter(bill =>
+  bill.preview && !bill.result && (bill.preview.confidence >= 0.6 || bill.confirmed),
+))
+const batchTotals = computed(() => batchBills.value.reduce((totals, bill) => {
+  if (bill.result) {
+    totals.files += 1
+    totals.inserted += bill.result.inserted
+    totals.skipped += bill.result.skipped
+    totals.failed += bill.result.failed
+  }
+  return totals
+}, { files: 0, inserted: 0, skipped: 0, failed: 0 }))
 
 function resetForChange() {
   previewController?.abort()
@@ -81,32 +104,38 @@ function resetForChange() {
   lastPreviewPassword = ''
 }
 
-function selectFile(selected: File | null) {
+function validateFile(selected: File) {
+  if (!/\.(xlsx|csv|zip)$/i.test(selected.name)) return '请选择 XLSX、CSV 或支付宝 ZIP 账单文件。'
+  if (selected.size > MAX_UPLOAD_BYTES) return '文件不能超过 25 MB。'
+  if (selected.size === 0) return '文件为空，请重新选择。'
+  return ''
+}
+
+function selectFiles(selected: File[]) {
+  if (!selected.length || busy.value === 'commit') return
   resetForChange()
-  file.value = selected
   alipayPassword.value = ''
-  if (selected && !/\.(xlsx|csv|zip)$/i.test(selected.name)) {
-    error.value = '仅支持微信 XLSX、支付宝 CSV / ZIP 账单文件。'
-    file.value = null
-  } else if (selected && selected.size > MAX_UPLOAD_BYTES) {
-    error.value = '文件不能超过 25 MB。'
-    file.value = null
-  } else if (selected && selected.size === 0) {
-    error.value = '文件为空，请重新选择。'
-    file.value = null
+  file.value = null
+  batchBills.value = []
+  if (selected.length === 1) {
+    error.value = validateFile(selected[0])
+    if (!error.value) file.value = selected[0]
+    return
   }
+  batchBills.value = selected.map(file => ({
+    file, password: '', validationError: validateFile(file), error: '', preview: null, confirmed: false, result: null,
+  }))
 }
 
 function onFile(event: Event) {
   const input = event.target as HTMLInputElement
-  selectFile(input.files?.[0] ?? null)
+  selectFiles(Array.from(input.files ?? []))
   input.value = ''
 }
 function openFilePicker() { if (busy.value !== 'commit') fileInput.value?.click() }
 function onDrop(event: DragEvent) {
   dragActive.value = false
-  if (busy.value === 'commit') return
-  selectFile(event.dataTransfer?.files?.[0] ?? null)
+  selectFiles(Array.from(event.dataTransfer?.files ?? []))
 }
 function onPasswordInput(event: Event) {
   const value = (event.target as HTMLInputElement).value
@@ -212,8 +241,56 @@ async function loadAISettings() {
 }
 
 async function loadLibraryState() {
-  try { libraryName.value = (await getActiveLibrary()).name }
-  catch { libraryName.value = '' }
+  try { library.value = await getActiveLibrary() }
+  catch { library.value = null }
+}
+
+function onBatchPasswordInput(bill: BatchBill, event: Event) {
+  bill.password = (event.target as HTMLInputElement).value
+  bill.preview = null
+  bill.confirmed = false
+  bill.error = ''
+}
+
+async function previewBatch() {
+  if (busy.value || !batchWaitingForPreview.value.length) return
+  const controller = new AbortController()
+  previewController = controller
+  busy.value = 'preview'
+  try {
+    for (const bill of batchWaitingForPreview.value) {
+      bill.error = ''
+      try {
+        bill.preview = await previewImport(bill.file, bill.password, controller.signal)
+      } catch (err) {
+        if (controller.signal.aborted) return
+        bill.error = err instanceof Error ? err.message : '账单预览失败'
+      }
+      if (controller.signal.aborted) return
+    }
+  } finally {
+    if (previewController === controller) { previewController = null; busy.value = null }
+  }
+}
+
+async function commitBatch() {
+  const target = library.value
+  if (busy.value || !batchReady.value.length || !target) return
+  busy.value = 'commit'
+  try {
+    for (const bill of batchReady.value) {
+      bill.error = ''
+      try {
+        bill.result = await commitImport(bill.file, bill.password, target.id, bill.preview?.mapping_token)
+        bill.password = ''
+      } catch (err) {
+        bill.error = err instanceof Error ? err.message : '确认导入失败'
+      }
+    }
+    await loadHistory()
+  } finally {
+    busy.value = null
+  }
 }
 
 async function startPreview(forceLegacy = false) {
@@ -313,7 +390,7 @@ async function commit() {
         remember_rule_row_indices: rememberRuleRowIndices.value,
       })
     } else {
-      result.value = await commitImport(file.value, alipayPassword.value)
+      result.value = await commitImport(file.value, alipayPassword.value, undefined, preview.value?.mapping_token)
     }
     alipayPassword.value = ''
     lastPreviewFile = null
@@ -330,6 +407,7 @@ onMounted(async () => {
   if (SHOW_AI_IMPORT) tasks.push(loadAISettings(), loadPendingProposals())
   await Promise.all(tasks)
 })
+onBeforeUnmount(() => previewController?.abort())
 </script>
 
 <template>
@@ -337,7 +415,7 @@ onMounted(async () => {
     <div class="import-main">
     <section class="card">
       <h2>导入账单</h2>
-      <p class="hint">支持微信支付 XLSX、支付宝 CSV / ZIP。文件会先预览解析结果，确认后再写入当前账本。</p>
+      <p class="hint">可以一次选择多份账单。预览解析结果后，再确认写入当前账本。</p>
       <template v-if="SHOW_AI_IMPORT">
         <div class="ai-config-banner" v-if="aiSettings?.configured && aiSettings.allow_external_processing">
           <span class="ai-dot"></span><span>AI 已配置：{{ aiSettings.provider_label }} · {{ aiSettings.model }}</span>
@@ -354,7 +432,7 @@ onMounted(async () => {
       </template>
 
       <label class="input-label" for="bill-file">账单文件</label>
-      <input ref="fileInput" id="bill-file" class="file-input" type="file" accept=".xlsx,.csv,.zip" :disabled="busy === 'commit'" @change="onFile" />
+      <input ref="fileInput" id="bill-file" class="file-input" type="file" accept=".xlsx,.csv,.zip" multiple :disabled="busy === 'commit'" @change="onFile" />
       <div
         class="drop-zone"
         :class="{ active: dragActive, disabled: busy === 'commit' }"
@@ -369,9 +447,10 @@ onMounted(async () => {
         @drop.prevent="onDrop"
       >
         <span class="drop-icon">⇩</span>
-        <strong>把账单文件拖到这里</strong>
-        <small>也可以点击选择文件 · 支持 XLSX、CSV、ZIP · 最大 25 MB</small>
+        <strong>拖入一份或多份账单</strong>
+        <small>也可以点击多选 · XLSX、CSV、支付宝 ZIP · 每份最大 25 MB</small>
       </div>
+      <p class="hint">陌生表头可按 AI 设置授权识别。模型只接收检测到的列名。</p>
       <p v-if="file" class="selected-file">已选择：{{ file.name }}（{{ (file.size / 1024).toFixed(1) }} KB）</p>
 
       <div v-if="isZip" class="password-field">
@@ -380,13 +459,59 @@ onMounted(async () => {
         <p class="hint">密码只用于本次上传，不会保存在页面或浏览器存储中。</p>
       </div>
 
-      <button class="primary" type="button" :disabled="!file || !!busy" @click="startPreview()">
+      <button v-if="!batchBills.length" class="primary" type="button" :disabled="!file || !!busy" @click="startPreview()">
         {{ busy === 'preview' ? '正在解析…' : '预览账单' }}
       </button>
-      <button v-if="SHOW_AI_IMPORT && aiSettings?.configured && aiSettings.allow_external_processing" class="secondary legacy-preview" type="button" :disabled="!file || !!busy" @click="startPreview(true)">
+      <button v-if="!batchBills.length && SHOW_AI_IMPORT && aiSettings?.configured && aiSettings.allow_external_processing" class="secondary legacy-preview" type="button" :disabled="!file || !!busy" @click="startPreview(true)">
         不使用 AI，按普通模式预览
       </button>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
+    </section>
+
+    <section v-if="batchBills.length" class="card" aria-label="批量导入">
+      <h3>已选 {{ batchBills.length }} 份账单</h3>
+      <div class="batch-list">
+        <article v-for="(bill, index) in batchBills" :key="index" class="batch-file">
+          <header class="batch-header">
+            <b>{{ bill.file.name }}</b>
+            <small class="muted">{{ (bill.file.size / 1024).toFixed(1) }} KB</small>
+          </header>
+          <div v-if="!bill.result && !bill.validationError && bill.file.name.toLowerCase().endsWith('.zip')" class="password-field">
+            <label class="input-label" :for="`batch-password-${index}`">支付宝 ZIP 密码（可留空）</label>
+            <input :id="`batch-password-${index}`" type="password" autocomplete="off" :value="bill.password" :disabled="!!busy" @input="onBatchPasswordInput(bill, $event)" />
+          </div>
+          <template v-if="bill.preview && !bill.result">
+            <p class="batch-detail">{{ bill.preview.platform_name }} · {{ bill.preview.total }} 笔有效交易 · {{ bill.preview.date_from }} — {{ bill.preview.date_to }}</p>
+            <div v-if="bill.preview.warnings.length" class="warnings">
+              <p v-for="(warning, index) in bill.preview.warnings" :key="index">{{ warning }}</p>
+            </div>
+            <label v-if="bill.preview.confidence < 0.6" class="low-confidence">
+              <input v-model="bill.confirmed" type="checkbox" :disabled="!!busy" />
+              平台识别置信度较低，我已核对该账单的平台。
+            </label>
+          </template>
+          <template v-if="bill.result">
+            <p class="batch-detail">新增 {{ bill.result.inserted }} 笔 · 重复 {{ bill.result.skipped }} 笔 · 失败 {{ bill.result.failed }} 笔</p>
+            <p v-if="bill.result.first_error" class="error">{{ bill.result.first_error }}</p>
+          </template>
+          <p v-if="bill.validationError || bill.error" class="error" role="alert">{{ bill.validationError || bill.error }}</p>
+        </article>
+      </div>
+      <div class="actions-row">
+        <button class="secondary" type="button" :disabled="!!busy || !batchWaitingForPreview.length" @click="previewBatch">
+          {{ busy === 'preview' ? '正在预览…' : '预览账单' }}
+        </button>
+        <button class="primary" type="button" :disabled="!!busy || !batchReady.length || !library" @click="commitBatch">
+          {{ busy === 'commit' ? '正在导入…' : `确认导入 ${batchReady.length} 份账单` }}
+        </button>
+      </div>
+      <p v-if="!library" class="hint">请确认当前账本已加载。</p>
+      <p v-if="batchReady.length && batchReady.length + batchTotals.files < batchBills.length" class="hint">
+        本次只导入通过预览和确认的文件，其余文件可核查后重试。
+      </p>
+      <p v-if="batchTotals.files" class="import-info" role="status">
+        已处理 {{ batchTotals.files }} / {{ batchBills.length }} 份 · 新增 {{ batchTotals.inserted }} 笔 · 重复 {{ batchTotals.skipped }} 笔 · 失败 {{ batchTotals.failed }} 笔
+      </p>
     </section>
 
     <section v-if="preview" class="card" aria-live="polite">
@@ -605,7 +730,7 @@ onMounted(async () => {
       </section>
       <section class="side-card">
         <span class="side-kicker">当前账本</span>
-        <b class="side-name">{{ libraryName || '当前账本' }}</b>
+        <b class="side-name">{{ library?.name || '当前账本' }}</b>
         <p>导入的流水会写进这本账本。想换账本，点左上角的账本名。</p>
         <RouterLink class="side-link" to="/bill">查看账单报告</RouterLink>
         <RouterLink class="side-link" to="/v2/assistant">询问 ATLAS</RouterLink>
@@ -658,6 +783,12 @@ h3 { font-size: var(--font-lg); margin-bottom: var(--space-3); }
 input[type='password'] { width: min(100%, 380px); padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius); }
 .password-field { margin: var(--space-3) 0; }
 .selected-file { color: var(--color-text); margin-top: var(--space-2); overflow-wrap: anywhere; }
+.batch-list { display: grid; gap: var(--space-2); }
+.batch-file { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); }
+.batch-header { display: flex; justify-content: space-between; gap: var(--space-2); overflow-wrap: anywhere; }
+.batch-header small { flex: none; }
+.batch-detail { margin-top: var(--space-2); color: var(--color-muted); }
+.batch-list + .actions-row button { margin-top: 0; }
 button { padding: var(--space-2) var(--space-3); border-radius: var(--radius); font-weight: 600; cursor: pointer; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 .primary { border: none; background: var(--chart-1); color: white; margin-top: var(--space-3); }

@@ -17,6 +17,16 @@ function Start-AppProcess([string]$Name, [string]$Executable, [string[]]$Argumen
     return $process
 }
 
+function Get-AppListeners([int]$Port) {
+    $lines = & "$env:SystemRoot\System32\netstat.exe" -ano
+    if ($LASTEXITCODE -ne 0) { throw "Could not check TCP port $Port." }
+    foreach ($line in $lines) {
+        if ($line -match "^\s*TCP\s+(\S+):$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+            [pscustomobject]@{ Address = $Matches[1]; Id = [int]$Matches[2] }
+        }
+    }
+}
+
 function Wait-App([string]$Name, [int]$Port, [string]$Path, $Process) {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
@@ -28,14 +38,15 @@ function Wait-App([string]$Name, [int]$Port, [string]$Path, $Process) {
             # The service is not ready yet.
         }
         if ($response.StatusCode -eq 200) {
-            $listener = Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort $Port -ErrorAction SilentlyContinue
-            if ($listener.OwningProcess -eq $Process.Id) { return }
-            # On Windows, the venv Python executable launches the real Python as a child.
-            if ($Name -eq 'backend' -and $listener -and -not $Process.HasExited) {
-                $child = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)"
-                if ($child.ParentProcessId -eq $Process.Id -and $child.CreationDate -ge $Process.StartTime) {
-                    return
-                }
+            $listener = Get-AppListeners $Port | Where-Object Address -eq '127.0.0.1' | Select-Object -First 1
+            $listenerId = $listener.Id
+            if ($listenerId -eq $Process.Id) { return }
+            # The Windows venv interpreter starts Uvicorn in a child process.
+            # Uvicorn reports that child's PID in this launch's stderr log.
+            if ($Name -eq 'backend' -and $listenerId -and -not $Process.HasExited) {
+                $serverPattern = "^INFO:\s+Started server process \[$listenerId\]\s*$"
+                $serverLog = Join-Path $runtimeDir 'backend-error.log'
+                if (Select-String -LiteralPath $serverLog -Pattern $serverPattern -Quiet) { return }
             }
             throw "Port $Port is not listening for the $Name process we started."
         }
@@ -55,9 +66,8 @@ try {
             throw "$name is already running from this directory. Use the one-click stop file first."
         }
     }
-    $ports = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners().Port
     foreach ($port in $BackendPort, $FrontendPort) {
-        if ($port -in $ports) { throw "Port $port is already in use; no existing process was stopped." }
+        if (Get-AppListeners $port) { throw "Port $port is already in use; no existing process was stopped." }
     }
 
     $python = Join-Path $root '.venv\Scripts\python.exe'
@@ -67,7 +77,7 @@ try {
         -not (Test-Path -LiteralPath (Join-Path $frontendDir $vite) -PathType Leaf)) {
         throw 'Missing dependencies. Run scripts\setup.ps1 first.'
     }
-    $node = (Get-Command node.exe -CommandType Application).Source
+    $node = Get-Command node.exe -CommandType Application | Select-Object -First 1 -ExpandProperty Source
     $backend = Start-AppProcess 'backend' $python @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', $BackendPort) $root
     Wait-App 'backend' $BackendPort '/health' $backend
 

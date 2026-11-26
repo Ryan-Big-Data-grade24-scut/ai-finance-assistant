@@ -61,6 +61,19 @@
 .fa-look-label b { font-size: 13px; }
 .fa-look-label small { color: var(--atlas-muted); font-size: 11px; }
 .fa-look-option > svg { position: absolute; top: 5px; right: 5px; color: var(--atlas-accent); font-size: 14px; }
+.fa-session-bar {
+  display: flex; flex: none; align-items: center; gap: 6px; padding: 7px 12px;
+  border-bottom: 1px solid var(--atlas-line); color: var(--atlas-accent);
+}
+.fa-session-select {
+  flex: 1; min-width: 0; max-width: 100%; padding: 6px 8px;
+  border: 1px solid var(--atlas-line); border-radius: 7px; background: var(--atlas-paper);
+  color: var(--atlas-ink); font: inherit; font-size: 12px; text-overflow: ellipsis;
+}
+.fa-session-button { width: 31px; min-height: 31px; padding: 0; border-color: var(--atlas-line); }
+.fa-session-button:disabled { opacity: .45; cursor: default; }
+.fa-session-button:hover:not(:disabled) { background: var(--atlas-tint); }
+.fa-session-delete:hover:not(:disabled) { color: var(--atlas-alert); background: var(--atlas-alert-bg); }
 .fa-context {
   display: flex; flex: none; align-items: baseline; flex-wrap: wrap; gap: 3px 7px;
   padding: 7px 12px; border-bottom: 1px solid var(--atlas-line); background: var(--atlas-wash);

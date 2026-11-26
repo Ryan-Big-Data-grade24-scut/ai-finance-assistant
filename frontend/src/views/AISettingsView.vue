@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { deleteAIKey, getAISettings, saveAISettings, testAISettings, type AISettings } from '@/api/ai'
+import AIPrivacySettings from '@/components/AIPrivacySettings.vue'
 
 const settings = ref<AISettings | null>(null)
 const provider = ref<'openai_compatible' | 'anthropic'>('openai_compatible')
@@ -184,6 +185,7 @@ onMounted(load)
           <p v-if="error" class="workspace-note workspace-note--error feedback" role="alert">{{ error }}</p>
         </section>
       </form>
+      <AIPrivacySettings />
 
       <aside class="workspace-panel settings-card info-card">
         <p class="workspace-kicker">使用前看</p>
@@ -220,12 +222,13 @@ input[type="range"] { width: 100%; }
 input[type="range"], input[type="checkbox"] { accent-color: var(--workspace-accent); }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .feedback { margin-top: 10px; }
-.info-card { background: var(--workspace-tint); overflow-wrap: anywhere; }
+.info-card { grid-column: 2; grid-row: 1; background: var(--workspace-tint); overflow-wrap: anywhere; }
 .info-card ul { margin: 12px 0 0; padding-left: 18px; }
 .info-card li + li { margin-top: 8px; }
 
 @media (max-width: 820px) {
   .settings-layout { grid-template-columns: minmax(0, 1fr); }
+  .info-card { grid-area: auto; }
 }
 @media (max-width: 560px) {
   .two-columns { grid-template-columns: minmax(0, 1fr); gap: 0; }

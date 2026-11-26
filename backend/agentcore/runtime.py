@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import AsyncIterator
 
 from backend.ai import config as ai_config
+from backend.ai import privacy
 
 from . import adapter, compact, prompt, registry, session, truncate
 from .registry import ToolContext
@@ -191,7 +192,7 @@ def _validated_calls(reply: adapter.ModelReply) -> list[tuple[dict, dict]]:
 
 
 def _tool_context(info: dict, assistant_id: int, index: int) -> ToolContext:
-    return ToolContext(session_id=info['session_id'], call_key=f"{info['id']}:{assistant_id}:{index}")
+    return ToolContext(session_id=info['session_id'], run_id=info['id'], call_key=f"{info['id']}:{assistant_id}:{index}")
 
 
 def _tool_result(call: dict, assistant_id: int, step: int, result: dict, is_error: bool,
@@ -229,7 +230,8 @@ def _close_unfinished(info: dict, *, stopped: bool = False) -> tuple[int, dict]:
             else:
                 code = 'STOPPED_BEFORE_CALL' if stopped else 'INTERRUPTED_BEFORE_CALL'
                 text = '这次工具调用未派发。'
-            result = truncate.ok_result(receipt) if receipt is not None else truncate.error_result(text, code=code)
+            result = (truncate.ok_result(privacy.current().redact(receipt, data_keys=True))
+                      if receipt is not None else truncate.error_result(text, code=code))
             session.append(info['session_id'], 'tool', 'tool_result',
                            _tool_result(call, eid, step_at_call, result, receipt is None, recovered=receipt is not None))
     return step, totals
@@ -248,12 +250,14 @@ def recover_interrupted() -> None:
 async def _model(run: _Run, cfg, system: str, messages: list[dict], tools: list[dict]) -> adapter.ModelReply:
     """停止可以取消模型 HTTP；不能取消已派发的业务线程。重试只发生在此处。"""
     run.check_stop()
+    policy = await asyncio.to_thread(privacy.current)
+    messages = policy.messages(messages)
     stopper = asyncio.create_task(run.stop.wait())
     try:
         for attempt in range(MODEL_RETRIES + 1):
             run.check_stop()
             request = asyncio.create_task(adapter.complete(
-                cfg, system=system, messages=messages, tools=tools, cache_key=run.session_id,
+                cfg, system=policy.text(system), messages=messages, tools=tools, cache_key=run.session_id,
             ))
             try:
                 await asyncio.wait((request, stopper), return_when=asyncio.FIRST_COMPLETED)
@@ -262,10 +266,15 @@ async def _model(run: _Run, cfg, system: str, messages: list[dict], tools: list[
                 if reply.stop_reason == 'stop' and not reply.tool_calls and not reply.text.strip():
                     raise adapter.AdapterError('EMPTY_RESPONSE', '模型返回了空内容。', retryable=True)
                 await run.usage(reply.usage)
+                reply.text = policy.redact(reply.text)
+                if reply.reasoning_content is not None:
+                    reply.reasoning_content = policy.text(reply.reasoning_content)
+                if reply.anthropic_blocks is not None:
+                    reply.anthropic_blocks = policy.signed_blocks(reply.anthropic_blocks)
                 return reply
             except adapter.AdapterError as exc:
                 if not exc.retryable or attempt >= MODEL_RETRIES:
-                    raise
+                    raise adapter.AdapterError(exc.code, policy.text(exc.message), retryable=exc.retryable) from exc
                 await run.status(f'模型请求暂未成功（{exc.code}），正在重试…')
                 try:
                     await asyncio.wait_for(run.stop.wait(), timeout=RETRY_DELAY * (attempt + 1))
@@ -350,6 +359,10 @@ async def _loop(run: _Run, cfg, system: str, tools: list[dict]) -> None:
             reply = await _model(run, cfg, system, session.derive(run.messages_log), tools)
         run.check_stop()
         calls = _validated_calls(reply)
+        if calls:
+            policy = await asyncio.to_thread(privacy.current)
+            for call, _ in calls:
+                call['arguments'] = policy.redact(call['arguments'])
         assistant = {'text': reply.text, 'tool_calls': [call for call, _ in calls],
                      'stop': reply.stop_reason, 'step': run.step}
         for key in ('reasoning_content', 'anthropic_blocks'):

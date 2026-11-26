@@ -1,4 +1,4 @@
-"""只读 SQL 跑在流水快照上：全字段可查，模型的 SQL 不接触源库连接。"""
+"""模型的只读 SQL 在脱敏后的流水快照上运行。"""
 from __future__ import annotations
 
 import math
@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 
 from backend import db
+from backend.ai import privacy
 
 from .truncate import json_text
 
@@ -43,7 +44,7 @@ def _quoted(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _copy(source, dest, name: str) -> dict:
+def _copy(source, dest, name: str, policy: privacy.Policy) -> dict:
     # 固定业务表名，列名和类型来自 schema：新增原始字段不需要维护第二份 DDL。
     cols = source.execute(f'PRAGMA table_info({name})').fetchall()
     if not cols:
@@ -55,7 +56,13 @@ def _copy(source, dest, name: str) -> dict:
         declarations.append(f'{_quoted(column)} {_quoted(kind)}' if kind else _quoted(column))
     dest.execute(f'CREATE TABLE {name} ({", ".join(declarations)})')
     marks = ','.join('?' for _ in cols)
-    dest.executemany(f'INSERT INTO {name} VALUES ({marks})', source.execute(f'SELECT * FROM {name}'))
+
+    def private_rows():
+        for row in source.execute(f'SELECT * FROM {name}'):
+            yield tuple(policy.redact(value, data_keys=column == 'raw_json') if isinstance(value, str) else value
+                        for value, (_, column, *_) in zip(row, cols))
+
+    dest.executemany(f'INSERT INTO {name} VALUES ({marks})', private_rows())
     start, end, count = dest.execute(f'SELECT MIN(date), MAX(date), COUNT(*) FROM {name}').fetchone()
     return {'date_from': start, 'date_to': end, 'total': count}
 
@@ -95,7 +102,8 @@ def query(sql: str, *, db_path: Path | None = None) -> dict:
                                          timeout=MAX_SECONDS)) as source:
                 source.set_progress_handler(expired, 1000)
                 source.execute('BEGIN')  # 原始表和分析表来自同一次读事务
-                coverage = {name: _copy(source, mem, name) for name in TABLES}
+                policy = privacy.current(source)
+                coverage = {name: _copy(source, mem, name, policy) for name in TABLES}
 
             mem.set_authorizer(_authorizer)
             # 防止单个表达式分配远超一页的内存；这不是表/列/分析函数权限。

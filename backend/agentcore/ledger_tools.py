@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from contextlib import closing
 
-from backend.ledger2 import facts, service
+from backend.ledger2 import facts, ops, service
 from backend.ledger2.errors import LedgerError
 from backend.ledger2.tx import atomic
 
@@ -240,7 +240,7 @@ _HISTORY_TOP = {
 }
 
 
-def apply(args: dict, *, call_key: str | None = None) -> dict:
+def apply(args: dict, *, call_key: str | None = None, run_id: str | None = None) -> dict:
     """真实执行一次。HTTP 工具批次的调用键只用于恢复/重试，不由模型提供。"""
     with closing(open_conn()) as conn, atomic(conn):
         raw = json.dumps(args, ensure_ascii=False, sort_keys=True)
@@ -261,7 +261,8 @@ def apply(args: dict, *, call_key: str | None = None) -> dict:
             seq = row['seq'] if row else None
             if args.get('expected_seq') is not None and seq != args['expected_seq']:
                 raise ToolInputError('HISTORY_CHANGED', '撤销/重做栈顶不再是指定操作，请重新读账本。')
-        result = actions.run_op(conn, op)
+        with ops.history_run(run_id):
+            result = actions.run_op(conn, op)
         if kind not in _HISTORY_TOP:
             seq = conn.execute(_HISTORY_TOP['undo']).fetchone()['seq']
         receipt = {'state': 'executed', **result, 'seq': seq}

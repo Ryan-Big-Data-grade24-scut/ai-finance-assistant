@@ -8,7 +8,7 @@ from contextlib import closing
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, PositiveInt
 
 from backend import db
 
@@ -54,16 +54,33 @@ class RangeIn(BaseModel):
     date_to: str | None = None
 
 
+class ReplayIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    event_ids: list[PositiveInt]
+
+
 def _conn():
     conn = db.get_conn()
     service.ensure(conn)
     return conn
 
 
+def _tree(conn, date_from: str | None, date_to: str | None) -> dict:
+    conn.execute('BEGIN')
+    return {**service.get_tree(conn, date_from, date_to), 'timeline': service.replay_history(conn)}
+
+
 @router.get('/tree')
 def tree(date_from: str | None = None, date_to: str | None = None):
     with closing(_conn()) as conn:
-        return service.get_tree(conn, date_from, date_to)
+        return _tree(conn, date_from, date_to)
+
+
+@router.post('/replay')
+def replay_steps(data: ReplayIn):
+    with closing(db.get_conn()) as conn:
+        return service.replay_frames(conn, data.event_ids)
 
 
 @router.get('/uninitialized')
@@ -76,7 +93,7 @@ def uninitialized(limit: int = 500):
 def op(data: ApplyIn):
     with closing(_conn()) as conn:
         result = service.apply(conn, data.op.model_dump(exclude_none=True))
-        return {'result': result, **service.get_tree(
+        return {'result': result, **_tree(
             conn, data.date_from, data.date_to)}
 
 
@@ -84,7 +101,7 @@ def op(data: ApplyIn):
 def undo(data: RangeIn):
     with closing(_conn()) as conn:
         result = service.undo(conn)
-        return {'result': result, **service.get_tree(
+        return {'result': result, **_tree(
             conn, data.date_from, data.date_to)}
 
 
@@ -92,5 +109,5 @@ def undo(data: RangeIn):
 def redo(data: RangeIn):
     with closing(_conn()) as conn:
         result = service.redo(conn)
-        return {'result': result, **service.get_tree(
+        return {'result': result, **_tree(
             conn, data.date_from, data.date_to)}

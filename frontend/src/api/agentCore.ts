@@ -5,6 +5,7 @@ export interface AgentSession {
   title: string
   created_at?: string
   updated_at?: string
+  active_run_id?: string | null
 }
 
 export type AgentTerminalState = 'completed' | 'failed' | 'stopped' | 'interrupted'
@@ -176,6 +177,9 @@ export const createSession = (title = '') =>
 
 export const getSession = (id: string) =>
   request<AgentSessionDetail>(`/api/agentcore/sessions/${encodeURIComponent(id)}`)
+
+export const renameSession = (id: string, title: string) =>
+  request<AgentSession>(`/api/agentcore/sessions/${encodeURIComponent(id)}`, { ...json({ title }), method: 'PATCH' })
 
 export const deleteSession = (id: string) =>
   request<{ ok: boolean }>(`/api/agentcore/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })

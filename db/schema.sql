@@ -357,6 +357,18 @@ CREATE INDEX IF NOT EXISTS idx_ai_rules_book_enabled
 -- API Key 只存 Fernet 密文；本机主密钥保存在项目目录之外。
 -- 导入会话暂存归一化交易与 AI 建议，24 小时过期；不写原始交易表。
 -- ============================================================================
+CREATE TABLE IF NOT EXISTS ai_privacy_alias (
+    original TEXT PRIMARY KEY COLLATE NOCASE,
+    alias    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_privacy_seed (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    salt TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO ai_privacy_seed(id, salt) VALUES (1, lower(hex(randomblob(16))));
+
 CREATE TABLE IF NOT EXISTS ai_provider_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     provider TEXT NOT NULL CHECK (provider IN ('openai_compatible','anthropic')),

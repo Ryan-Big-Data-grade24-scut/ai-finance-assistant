@@ -43,6 +43,7 @@ class ImportPreviewResp(BaseModel):
     """导入预览 —— 用户上传文件后，先看这个再决定是否入库"""
 
     batch_id: str = Field(description="本次预览的批次号，确认入库时带上")
+    mapping_token: str | None = Field(default=None, description="通用账单确认导入时复用本次表头映射")
     platform_id: str = Field(description="识别出的平台，如 'wechat' / 'alipay' / 'meituan'")
     platform_name: str = Field(description="平台显示名，如 '微信支付'")
     confidence: float = Field(

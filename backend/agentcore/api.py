@@ -10,13 +10,15 @@ import logging
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StringConstraints
 from starlette.concurrency import run_in_threadpool
 
 from backend import db, uploads
+from backend.ai import privacy
 
 from . import actions, import_tool, memory, runtime, session
 from .store import open_conn
@@ -30,6 +32,11 @@ MAX_TURN_CHARS = 8_000
 class CreateIn(BaseModel):
     model_config = ConfigDict(extra='forbid')
     title: str = ''
+
+
+class RenameIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
 
 
 class TurnIn(BaseModel):
@@ -104,6 +111,14 @@ def list_sessions() -> dict:
     return {'sessions': session.list_sessions()}
 
 
+@router.patch('/sessions/{session_id}')
+def rename_session(session_id: str, data: RenameIn):
+    try:
+        return session.rename(session_id, data.title)
+    except KeyError as exc:
+        return _error(404, 'SESSION_NOT_FOUND', str(exc))
+
+
 @router.delete('/sessions/{session_id}')
 def delete_session(session_id: str):
     try:
@@ -132,12 +147,16 @@ def get_session(session_id: str):
     latest_usage = next((e['payload']['totals'] for e in reversed(run_events)
                          if e['kind'] in {'usage', 'run_finished'}), None)
     _, todos = session.latest_todos(evts)
+    policy = privacy.current()
     return {
         'session': info,
         'run': run,
         'cursor': evts[-1]['id'] if evts else 0,
-        'messages': [item for e in evts if (item := session.chat_item(e)) is not None],
-        'todos': todos,
+        'messages': [
+            item if item['type'] == 'user' else policy.redact(item, data_keys=item['type'] == 'tool')
+            for e in evts if (item := session.chat_item(e)) is not None
+        ],
+        'todos': policy.redact(todos),
         'status': latest_status if run and run['end_id'] is None else '',
         'step': next((e['payload']['step'] for e in reversed(run_events) if e['payload'].get('step') is not None), 0),
         'totals': latest_usage,
@@ -170,10 +189,13 @@ async def turn_events(session_id: str, run_id: str, after: int = Query(0, ge=0, 
 
     async def events():
         try:
+            policy = await run_in_threadpool(privacy.current)
             async for frame in runtime.subscribe(session_id, run_id, after):
                 if frame is None:
                     yield ': keep-alive\n\n'
                 else:
+                    if (item := frame.get('item')) and item['type'] != 'user':
+                        frame['item'] = policy.redact(item, data_keys=item['type'] == 'tool')
                     yield f'id: {frame["cursor"]}\ndata: {json.dumps(frame, ensure_ascii=False)}\n\n'
         except asyncio.CancelledError:
             raise  # 断开的是订阅，不是 worker。

@@ -5,11 +5,38 @@ import sqlite3
 from pathlib import Path
 
 from .errors import LedgerError
+from .tx import atomic
 
 SCHEMA_PATH = Path(__file__).with_name('schema.sql')
 SCHEMA_VERSION = '1'
 ROOT_ID = 'root'
 ROOT_NAME = '总账'
+
+
+def _seed_replay(conn) -> None:
+    """旧库按仍可重建的撤销分支补历史。AI 来源按已提交的工具回执恢复。"""
+    marker = "SELECT 1 FROM ledger2_meta WHERE key='replay_seeded'"
+    if conn.execute(marker).fetchone():
+        return
+    with atomic(conn):
+        if conn.execute(marker).fetchone():
+            return
+        origins = {}
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='agentcore_ledger_receipt'").fetchone():
+            for row in conn.execute(
+                "SELECT call_key, json_extract(result_json, '$.seq') AS seq FROM agentcore_ledger_receipt "
+                "WHERE json_extract(args_json, '$.op') NOT IN ('undo', 'redo')"
+            ):
+                run_id, separator, _ = row['call_key'].partition(':')
+                if separator and run_id.startswith('run_'):
+                    origins[row['seq']] = run_id
+        rows = conn.execute(
+            "SELECT seq, state, created_at FROM ledger2_op_log WHERE state!='discarded' ORDER BY seq"
+        ).fetchall()
+        insert = 'INSERT INTO ledger2_replay_event(op_seq, kind, run_id, created_at) VALUES(?,?,?,?)'
+        conn.executemany(insert, ((r['seq'], 'apply', origins.get(r['seq']), r['created_at']) for r in rows))
+        conn.executemany(insert, ((r['seq'], 'undo', None, r['created_at']) for r in reversed(rows) if r['state'] == 'undone'))
+        conn.execute("INSERT INTO ledger2_meta(key, value) VALUES('replay_seeded', '1')")
 
 
 def connect(path) -> sqlite3.Connection:
@@ -34,6 +61,7 @@ def ensure_schema(conn) -> None:
         (ROOT_ID, ROOT_NAME),
     )
     conn.execute("INSERT OR IGNORE INTO ledger2_meta(key, value) VALUES('schema_version', ?)", (SCHEMA_VERSION,))
+    _seed_replay(conn)
     conn.commit()
 
 

@@ -11,6 +11,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AgentCoreChat from '@/components/AgentCoreChat.vue'
+import AgentSessionSpinner from '@/components/AgentSessionSpinner.vue'
 import AtlasIcon from '@/components/AtlasIcon.vue'
 import AtlasMascot from '@/components/AtlasMascot.vue'
 import { useAgentSession } from '@/composables/useAgentSession'
@@ -19,13 +20,13 @@ import { agentPageState } from '@/utils/agentPageState'
 
 const route = useRoute()
 const open = ref(false)
-const started = ref(false)
 const petButton = ref<HTMLButtonElement | null>(null)
 const closeButton = ref<HTMLButtonElement | null>(null)
 
 const {
   input, detail, currentId, opening, sending, stopping, reconnectText, errorBanner, notice,
-  run, active, items, send, stop, init,
+  sessions, sessionBusy, run, active, items, isSessionRunning, openSession, newSession, removeCurrent,
+  send, stop, init,
 } = useAgentSession({
   pageContext: () => buildAgentPageContext({
     route: agentPageState.route || route.path,
@@ -34,8 +35,14 @@ const {
     dateTo: agentPageState.dateTo,
     selection: agentPageState.selection,
   }),
-  canSend: () => !opening.value && !sending.value,
 })
+
+function chooseSession(event: Event) {
+  const selector = event.target as HTMLSelectElement
+  const id = selector.value
+  selector.value = currentId.value ?? ''
+  if (id) void openSession(id)
+}
 
 const contextLabel = computed(() => {
   const parts: string[] = []
@@ -273,10 +280,7 @@ async function toggle() {
     return
   }
   open.value = true
-  if (!started.value) {
-    started.value = true
-    void init()
-  }
+  void init()
   await nextTick()
   if (open.value && document.activeElement === petButton.value) closeButton.value?.focus({ preventScroll: true })
 }
@@ -340,11 +344,31 @@ onBeforeUnmount(() => {
                   data-testid="floating-close" @click="closePanel"><AtlasIcon name="minus" /></button>
         </div>
       </header>
+      <div class="fa-session-bar" aria-label="会话管理" role="group">
+        <AtlasIcon name="chat" />
+        <select class="fa-session-select" aria-label="切换会话" data-testid="floating-session-select"
+                :value="currentId ?? ''" :disabled="sessionBusy || !sessions.length" @change="chooseSession">
+          <option v-if="!currentId" value="" disabled>{{ opening ? '正在加载会话…' : '选择会话' }}</option>
+          <option v-for="session in sessions" :key="session.id" :value="session.id">
+            {{ session.title || '未命名对话' }}{{ isSessionRunning(session.id) ? ' · 正在运行' : '' }}
+          </option>
+        </select>
+        <AgentSessionSpinner v-if="currentId && isSessionRunning(currentId)" />
+        <button type="button" class="fa-action fa-session-button" title="新建会话" aria-label="新建会话"
+                data-testid="floating-new-session" :disabled="sessionBusy" @click="newSession"><AtlasIcon name="plus" /></button>
+        <button type="button" class="fa-action fa-session-button fa-session-delete" aria-label="删除当前会话"
+                :title="currentId && isSessionRunning(currentId) ? '会话运行中，结束后可删除' : '删除当前会话'"
+                data-testid="floating-delete-session"
+                :disabled="sessionBusy || !currentId || isSessionRunning(currentId)" @click="removeCurrent">
+          <AtlasIcon name="remove" />
+        </button>
+      </div>
       <div v-if="contextLabel" class="fa-context" data-testid="floating-context">
         <AtlasIcon name="ledger" /><b>账本工作台上下文</b><span>{{ contextLabel }}</span>
       </div>
       <AgentCoreChat
         class="fa-chat"
+        :key="currentId ?? 'opening'"
         compact
         :show-header="false"
         v-model:input="input"

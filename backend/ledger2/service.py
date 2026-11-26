@@ -5,10 +5,15 @@
 """
 from __future__ import annotations
 
+import json
+import sqlite3
+from contextlib import closing
+
 from . import facts, invariants, ops, presets, reader
 from .errors import LedgerError
 from .model import GroupRef, TxRef
 from .store import ensure_schema, root_id
+from .tx import atomic
 
 
 def ensure(conn) -> None:
@@ -124,6 +129,12 @@ def _apply_update(conn, op: dict) -> None:
 
 
 def apply(conn, op: dict) -> dict:
+    # 读取原语的旧位置和附加到历史必须处于同一写事务。
+    with atomic(conn):
+        return _apply(conn, op)
+
+
+def _apply(conn, op: dict) -> dict:
     """执行一个用户操作。返回 {'created': {...}}（新建对象的 id），树由调用方再读。
 
     选择语义分三种（见 draft 10）：
@@ -196,3 +207,123 @@ def undo(conn) -> dict:
 
 def redo(conn) -> dict:
     return {'op': 'redo', 'redone': ops.redo(conn)}
+
+
+# ── 回放 ───────────────────────────────────────────────────────────────
+
+def replay_history(conn) -> list[dict]:
+    titles = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='agentcore_run'").fetchone():
+        titles = dict(conn.execute(
+            "SELECT r.id, (SELECT substr(json_extract(m.payload_json, '$.text'), 1, 100) "
+            "FROM agentcore_message m WHERE m.session_id=r.session_id AND m.kind='user_text' "
+            "AND m.id>r.start_id AND (r.end_id IS NULL OR m.id<r.end_id) ORDER BY m.id LIMIT 1) "
+            "FROM agentcore_run r WHERE r.id IN (SELECT run_id FROM ledger2_replay_event)"
+        ))
+    return [{**dict(row), 'request': titles.get(row['run_id'])} for row in conn.execute(
+        "SELECT e.id, e.op_seq AS seq, e.kind, e.run_id, e.created_at AS at, "
+        "json_extract(o.op_json, '$.name') AS name "
+        "FROM ledger2_replay_event e JOIN ledger2_op_log o ON o.seq=e.op_seq ORDER BY e.id"
+    )]
+
+
+def _affected(primitives: list[dict]) -> list[str]:
+    refs = []
+    for primitive in primitives:
+        value = primitive['row'] if primitive['op'] == 'tx_restore' else primitive
+        if 'tx_id' in value:
+            prefix = 'txm' if value.get('role') == 'mirror' else 'tx'
+            refs.append(f"{prefix}:{value['tx_id']}")
+        elif value.get('group_id'):
+            refs.append(f"g:{value['group_id']}")
+        elif value.get('node_id'):
+            refs.append(value['node_id'])
+    return list(dict.fromkeys(refs))
+
+
+def _replay_items(conn, refs: list[str]) -> dict:
+    if not refs:
+        return {}
+    # 按日志里的引用查名称和直接父级，跳过完整树与金额计算。
+    rows = conn.execute(
+        "WITH refs AS (SELECT value AS ref FROM json_each(?)) "
+        "SELECT r.ref, 'node' AS kind, n.name, n.parent_id AS parent, n.note "
+        "FROM refs r JOIN ledger2_node n ON n.id=r.ref "
+        "UNION ALL SELECT r.ref, 'group', COALESCE(NULLIF(g.name,''), '未命名净额组'), g.node_id, g.note "
+        "FROM refs r JOIN ledger2_net_group g ON g.id=substr(r.ref,3) WHERE r.ref LIKE 'g:%' "
+        "UNION ALL SELECT r.ref, 'tx', COALESCE(NULLIF(meta.title,''), NULLIF(t.counterparty,''), "
+        "NULLIF(t.item,''), '#' || t.id), COALESCE('g:' || m.net_group_id, m.node_id), COALESCE(meta.note,'') "
+        "FROM refs r JOIN ledger2_tx m ON m.tx_id=CAST(substr(r.ref,instr(r.ref,':')+1) AS INTEGER) "
+        "AND m.role=(CASE WHEN r.ref LIKE 'txm:%' THEN 'mirror' ELSE 'primary' END) "
+        "JOIN transactions_raw t ON t.id=m.tx_id "
+        "LEFT JOIN ledger2_tx meta ON meta.tx_id=m.tx_id AND meta.role='primary' "
+        "WHERE (r.ref LIKE 'tx:%' OR r.ref LIKE 'txm:%') "
+        "AND NOT EXISTS(SELECT 1 FROM tx_deletions d WHERE d.tx_id=t.id)",
+        (json.dumps(refs, ensure_ascii=False),),
+    )
+    return {row['ref']: dict(row) for row in rows}
+
+
+def _with_parents(conn, items: dict) -> dict:
+    """每个展示项最多补两级，让目标组及其父级同时可见。"""
+    scene = dict(items)
+    frontier = items
+    for _ in range(2):
+        refs = list(dict.fromkeys(row['parent'] for row in frontier.values()
+                                  if row['parent'] and row['parent'] not in scene))
+        frontier = _replay_items(conn, refs)
+        scene.update(frontier)
+    return scene
+
+
+def _replay_step(conn, row) -> dict:
+    primitives = json.loads(row['primitives'])
+    refs = _affected(primitives)
+    before = _with_parents(conn, _replay_items(conn, refs))
+    for primitive in primitives:
+        ops._apply(conn, primitive)
+    after = _with_parents(conn, _replay_items(conn, refs))
+    changed = [ref for ref in refs if before.get(ref) != after.get(ref)]
+
+    def scene(items: dict) -> list[dict]:
+        keys = dict.fromkeys(ref for ref in changed if ref in items)
+        for ref in list(keys):
+            for _ in range(2):
+                ref = items[ref]['parent']
+                if ref not in items:
+                    break
+                keys[ref] = None
+        return [items[ref] for ref in keys]
+
+    return {'id': row['id'], 'changed': changed, 'before': scene(before), 'after': scene(after)}
+
+
+def replay_frames(source, event_ids: list[int]) -> dict:
+    if not event_ids or event_ids != sorted(set(event_ids)):
+        raise LedgerError('REPLAY_RANGE', '请按时间顺序选择连续的操作步骤。')
+
+    with closing(sqlite3.connect(':memory:')) as conn:
+        source.backup(conn)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys = ON')
+        chosen = conn.execute(
+            "SELECT e.id, CASE WHEN e.kind='undo' THEN o.undo_json ELSE json_extract(o.op_json,'$.prims') END AS primitives "
+            'FROM ledger2_replay_event e JOIN ledger2_op_log o ON o.seq=e.op_seq '
+            'WHERE e.id BETWEEN ? AND ? ORDER BY e.id', (event_ids[0], event_ids[-1]),
+        ).fetchall()
+        if [row['id'] for row in chosen] != event_ids:
+            raise LedgerError('REPLAY_RANGE', '所选步骤之间有空缺或历史已更新，请重新选择。')
+
+        try:
+            rewind = conn.execute(
+                "SELECT CASE WHEN e.kind='undo' THEN json_extract(o.op_json,'$.prims') ELSE o.undo_json END "
+                'FROM ledger2_replay_event e JOIN ledger2_op_log o ON o.seq=e.op_seq '
+                'WHERE e.id>=? ORDER BY e.id DESC', (event_ids[0],),
+            )
+            for (primitives,) in rewind:
+                for prim in json.loads(primitives):
+                    ops._apply(conn, prim)
+
+            return {'steps': [_replay_step(conn, row) for row in chosen]}
+        except (sqlite3.IntegrityError, LedgerError) as exc:
+            raise LedgerError('REPLAY_UNAVAILABLE', '相关历史数据已变化，无法还原这段星图。') from exc

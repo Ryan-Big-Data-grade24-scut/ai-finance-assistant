@@ -1,6 +1,7 @@
 /** 与 backend/schemas.py 的 Import*Resp 及 /api/import/history 保持一致。 */
 export interface ImportPreviewResp {
   batch_id: string
+  mapping_token?: string | null
   platform_id: string
   platform_name: string
   confidence: number

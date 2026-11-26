@@ -89,6 +89,49 @@ def check_detail(detail, run, frames):
     assert [m for m in detail['messages'] if m['id'] >= run['start_id']] == [f['item'] for f in frames if 'item' in f]
 
 
+def test_session_list_tracks_renames_active_runs_and_deletions(app, monkeypatch):
+    async def main():
+        model_release = asyncio.Event()
+
+        async def model(_config, **_request):
+            await model_release.wait()
+            return adapter.ModelReply(text='会话运行完成。')
+
+        monkeypatch.setattr(adapter, 'complete', model)
+        async with web(app) as client:
+            first = await create(client, '第一个会话')
+            second = await create(client, '第二个会话')
+            sid = first.rsplit('/', 1)[1]
+            other = second.rsplit('/', 1)[1]
+
+            async def catalog():
+                reply = await body(client.get(f'{AC}/sessions'))
+                return {row['id']: row for row in reply['sessions']}
+
+            assert set(await catalog()) == {sid, other}
+            invalid = await client.patch(first, json={'title': '   '})
+            assert invalid.status_code in (400, 422)
+            run = await body(client.post(f'{first}/turns', json={'text': '查看账本'}), 202)
+            try:
+                renamed = await body(client.patch(first, json={'title': '  已改名  '}))
+                assert renamed['id'] == sid and renamed['title'] == '已改名'
+                rows = await catalog()
+                assert rows[sid]['title'] == '已改名' and rows[sid]['active_run_id'] == run['id']
+                assert rows[other]['active_run_id'] is None
+                rejected = await body(client.delete(first), 409)
+                assert rejected['code'] == 'RUN_ACTIVE'
+                assert (await body(client.get(first)))['session']['title'] == '已改名'
+            finally:
+                model_release.set()
+            await events(client, f"{first}/turns/{run['id']}")
+            assert (await catalog())[sid]['active_run_id'] is None
+            await body(client.delete(first))
+            assert set(await catalog()) == {other}
+            assert (await body(client.patch(first, json={'title': '删除后修改'}), 404))['code'] == 'SESSION_NOT_FOUND'
+
+    asyncio.run(main())
+
+
 def test_startup_upgrades_view_and_two_turns_use_actual_receipts(app, agentcore_paths, agentcore_evidence, monkeypatch):
     old_view = 'CREATE VIEW agentcore_tx AS SELECT id AS tx_id, amount AS old_amount FROM transactions_raw'
     db.init_db()
