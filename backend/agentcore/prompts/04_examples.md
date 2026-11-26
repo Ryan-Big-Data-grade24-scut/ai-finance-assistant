@@ -41,8 +41,16 @@
 4. 撤销前先 finance_ledger_read(mode="summary") 读 status.history 栈顶 seq，再 finance_ledger_apply(op="undo", expected_seq=...)。撤销只回退该步，不等于撤掉整串操作。
 5. 每步以回执为准，最后重读账本报实际结果。
 
-### 只读：梳理跨平台收入、账户转账与实际支出
-用户：「帮我对一下上个月各平台的流水：哪些钱是真收入，哪些只是自己挪钱，实际花了多少？先别改账。」
-1. read_skill(cross-platform-cashflow)，再用 finance_query_transactions 按期间跨来源统计并分页读取收入、支出和中性。动词、对象、对方、方向、金额关联只用于宽召回和排序；零命中也复核。
+### 梳理跨平台收入、账户转账与实际支出
+用户：「帮我对一下上个月各平台的流水：哪些钱是真收入，哪些只是自己挪钱，实际花了多少？」
+1. read_skill(split-income-transfer-spend)，再用 finance_query_transactions 按期间跨来源统计并分页读取收入、支出和中性。动词、对象、对方、方向、金额关联只用于宽召回和排序；零命中也复核。
 2. 先连事件再判断资金性质。收入到账后转到明确属于本人的另一账户，收入只算一次；有证据是同一笔消费的订单和扣款只算一次支出，不算划转；仅同额近时、归属不明的来款不强配，留待确认。
-3. 分报真实收入、自有划转、去重后的毛支出、退款与净支出，列关键原始编号、未确认项及其未计入的小计。只做流水分析，不写账，也不把流水分析结果当作 V2 净额。
+3. 转账两端放进同一个节点，再用 finance_ledger_apply(op="create_group", items=["tx:甲","tx:乙"], name="...") 建成净额组；只有一端且是中性的，先 op="split" 生成镜像再入组。转账的节点 e/i 读回都应为 0。
+4. 分报真实收入、自有划转、去重后的毛支出、退款与净支出，列关键原始编号、未确认项及其未计入的小计；账本净额以 finance_ledger_read 为准。
+
+### 按预设分类树归支出
+用户：「把这批支出按我上个月那样归类。」
+1. read_skill(preset-expense-category)，先用 finance_query_transactions 取候选的 tx_id、商户、商品、小时和金额。
+2. 先剔非消费（本人账户转账、理财申赎、重复副本、退款），再按商户语义定大类、按时间窗定小类；判不准的进「其他（待确认）」。
+3. 一次 finance_ledger_apply(op="init", tx_ids=[...], plan={"nodes":[...],"place":[...]}) 整批落位，不要逐笔 move。
+4. finance_ledger_read(mode="summary") 与 mode="node" 读回各分支笔数和金额，对不上先查漏放错放再报。

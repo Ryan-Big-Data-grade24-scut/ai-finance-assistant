@@ -128,14 +128,14 @@ def test_same_prefix_latest_snapshot_and_skill_on_demand(harness, monkeypatch):
     assert second_log == {'digest': first_log['digest'], 'unchanged': True}
 
 
-def test_cross_platform_cashflow_example_loads_skill_on_demand(harness, monkeypatch):
-    skill_id = 'cross-platform-cashflow'
+def test_split_income_transfer_spend_example_loads_skill_on_demand(harness, monkeypatch):
+    skill_id = 'split-income-transfer-spend'
     provider = stub(monkeypatch, call_reply(tool('skill', 'read_skill', {'skill_id': skill_id})),
-                    adapter.ModelReply(text='已读取只读分析流程'))
-    frames = run_turn(harness, '对一下各平台的收入、转账和实际支出，先别改账。')
+                    adapter.ModelReply(text='已读取分流流程'))
+    frames = run_turn(harness, '对一下各平台的收入、转账和实际支出。')
     first, after_skill = provider.calls
     system = first['system']
-    assert '### 只读：梳理跨平台收入、账户转账与实际支出' in system
+    assert '### 梳理跨平台收入、账户转账与实际支出' in system
     assert f'read_skill({skill_id})' in system and f'- `{skill_id}` —' in system
     assert '## 操作顺序' not in system and '读完不等于判完' not in system
     skill_tool, = (t['function'] for t in first['tools'] if t['function']['name'] == 'read_skill')
@@ -144,7 +144,8 @@ def test_cross_platform_cashflow_example_loads_skill_on_demand(harness, monkeypa
     assert not result['is_error'] and not result['result']['truncated']
     loaded = json.loads(after_skill['messages'][-1]['content'])['content']
     assert loaded.startswith(f'<skill_content name="{skill_id}">')
-    assert '零命中也要复核' in loaded and '多个合理候选不强配' in loaded
+    assert '零命中留在复核队列' in loaded and '多个合理候选不强配' in loaded
+    assert '净额组合' in loaded and '镜像' in loaded
     assert after_skill['system'] == system
 
 
