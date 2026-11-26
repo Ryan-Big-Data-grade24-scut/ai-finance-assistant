@@ -35,13 +35,33 @@ from backend.ledger2 import store as ledger_store
 REPO = Path(__file__).resolve().parents[2]
 REAL_DB = (REPO / "db" / "bills.db").resolve()
 
-# 现有导入器支持的三个平台导出。银行、信用卡、基金等文件不在导入器覆盖面内，
-# 它们只进入答案层，不在这本后端账里。
+# 现有导入器支持的全部渠道导出。
+# 资产快照是某一时点的持仓表，不是流水，不导入。
 IMPORT_GLOBS = (
     ("支付宝", "*.csv"),
     ("微信", "*.xlsx"),
     ("支付宝小荷包", "*.xlsx"),
+    ("银行卡", "*.csv"),
+    ("美团", "*.csv"),
+    ("淘宝天猫", "*.csv"),
+    ("京东", "*.csv"),
+    ("投资", "天天基金_交易确认.csv"),
+    ("投资", "证券_成交明细.csv"),
+    ("投资", "银行理财_收益明细.csv"),
+    ("投资", "微信零钱通理财通收益明细.csv"),
 )
+
+# 电商平台的导入行在答案层里没有自己的交易单号（单号属于钱包那边的凭证），
+# 只能按「文件 + 日期 + 金额」回连答案层。
+ECOMMERCE_PLATFORMS = {"meituan", "taobao", "jd", "ecommerce"}
+# 平台 ID → 数据集里的目录名（答案层用「目录/文件」标注来源）
+_FOLDER_BY_PLATFORM = {
+    "meituan": "美团",
+    "taobao": "淘宝天猫",
+    "jd": "京东",
+}
+ASSET_MOVE_PLATFORMS = {"fund", "broker"}
+YIELD_PLATFORMS = {"yield"}
 
 NEUTRAL_ROLES = {"mirror", "settlement", "asset_move", "refund", "closed", "external_inflow", "tax_refund"}
 NEUTRAL_REASON = {
@@ -136,9 +156,22 @@ def _apply_truth_overrides(conn: sqlite3.Connection, truth_csv: Path) -> dict:
     for row in conn.execute("SELECT id, tx_no FROM transactions_raw WHERE tx_no IS NOT NULL"):
         by_no[row["tx_no"]].append(row["id"])
 
+    truth_rows = _truth_rows(truth_csv)
     matched = unmatched = skipped_neutral = 0
     seen: set[int] = set()
-    for row in _truth_rows(truth_csv):
+
+    def _write(tx_id: int, category: str, neutral: bool, reason: str) -> None:
+        conn.execute(
+            "INSERT INTO tx_overrides"
+            "(tx_id, manual_category, is_exempt, exempt_reason, updated_by) "
+            "VALUES (?,?,?,?, 'synth') "
+            "ON CONFLICT(tx_id) DO UPDATE SET "
+            "manual_category=excluded.manual_category, "
+            "is_exempt=excluded.is_exempt, exempt_reason=excluded.exempt_reason",
+            (tx_id, category, 1 if neutral else 0, reason or None),
+        )
+
+    for row in truth_rows:
         tx_no = row["tx_no"].strip()
         ids = by_no.get(tx_no)
         if not ids:
@@ -153,16 +186,52 @@ def _apply_truth_overrides(conn: sqlite3.Connection, truth_csv: Path) -> dict:
             neutral = row["flow_role"] in NEUTRAL_ROLES
             if neutral:
                 skipped_neutral += 1
-            conn.execute(
-                "INSERT INTO tx_overrides"
-                "(tx_id, manual_category, is_exempt, exempt_reason, updated_by) "
-                "VALUES (?,?,?,?, 'synth') "
-                "ON CONFLICT(tx_id) DO UPDATE SET "
-                "manual_category=excluded.manual_category, "
-                "is_exempt=excluded.is_exempt, exempt_reason=excluded.exempt_reason",
-                (tx_id, category, 1 if neutral else 0,
-                 NEUTRAL_REASON.get(row["flow_role"], "") if neutral else None),
-            )
+            _write(tx_id, category, neutral,
+                   NEUTRAL_REASON.get(row["flow_role"], "") if neutral else "")
+
+    # 没有交易单号的渠道：电商订单、投资成交与收益。
+    # 电商的答案行按「来源文件 + 日期 + 金额」回连，判断它是不是钱包那边的消费副本。
+    by_file_amount: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for row in truth_rows:
+        for source in row["source_exports"].split(";"):
+            key = (source.strip(), row["date"], f"{float(row['amount']):.2f}")
+            by_file_amount[key].append(row)
+
+    ecommerce_mirror = ecommerce_primary = 0
+    asset_moves = yields = 0
+    still_unmapped: list[str] = []
+    for row in conn.execute(
+        "SELECT id, platform_id, source, date, amount FROM transactions_raw "
+        "WHERE id NOT IN (SELECT tx_id FROM tx_overrides)"
+    ):
+        platform_id = row["platform_id"]
+        tx_id = row["id"]
+        if platform_id in ECOMMERCE_PLATFORMS:
+            key = (f"{_FOLDER_BY_PLATFORM.get(platform_id, '')}/{row['source']}",
+                   row["date"], f"{float(row['amount']):.2f}")
+            candidates = by_file_amount.get(key, [])
+            if not candidates:
+                still_unmapped.append(f"{row['source']}#{row['date']}#{row['amount']}")
+                continue
+            truth_row = candidates[0]
+            sources = [s.strip() for s in truth_row["source_exports"].split(";") if s.strip()]
+            has_other_source = len(sources) > 1
+            if has_other_source:
+                # 同一笔消费在钱包或银行卡流水里已经记过，电商这一行是副本。
+                ecommerce_mirror += 1
+                _write(tx_id, "中性/镜像行", True, NEUTRAL_REASON["mirror"])
+            else:
+                ecommerce_primary += 1
+                _write(tx_id, _truth_category(truth_row), False, "")
+        elif platform_id in ASSET_MOVE_PLATFORMS:
+            asset_moves += 1
+            _write(tx_id, "中性/投资理财", True, NEUTRAL_REASON["asset_move"])
+        elif platform_id in YIELD_PLATFORMS:
+            yields += 1
+            _write(tx_id, "收入/投资理财收益", False, "")
+        else:
+            still_unmapped.append(f"{row['source']}#{row['date']}#{row['amount']}")
+
     conn.commit()
     total_imported = conn.execute("SELECT COUNT(*) FROM transactions_raw").fetchone()[0]
     return {
@@ -170,7 +239,13 @@ def _apply_truth_overrides(conn: sqlite3.Connection, truth_csv: Path) -> dict:
         "matched": matched,
         "unmatched_truth_rows": unmatched,
         "neutral_exempted": skipped_neutral,
-        "unmapped_imported": total_imported - matched,
+        "ecommerce_mirror": ecommerce_mirror,
+        "ecommerce_primary": ecommerce_primary,
+        "asset_moves": asset_moves,
+        "yields": yields,
+        "unmapped_imported": total_imported - matched - ecommerce_mirror
+                            - ecommerce_primary - asset_moves - yields,
+        "unmapped_samples": still_unmapped[:10],
     }
 
 

@@ -21,7 +21,7 @@ import openpyxl
 from typing import Callable, Iterator
 
 from .. import db
-from . import alipay, alipay_wallet, wechat
+from . import alipay, alipay_wallet, statements, wechat
 from .base import INSERT_SQL, ParseIssues, Row
 
 
@@ -43,6 +43,29 @@ ADAPTERS: dict[str, Callable[[Path], Iterator[Row]]] = {
     "wechat": wechat.parse,
     "alipay": alipay.parse,
     "alipay_wallet": alipay_wallet.parse,
+    # 银行卡 / 电商 / 投资：同一套解析逻辑，按平台 ID 绑定各自的 platform_id。
+    "bank_cmb_savings": lambda p, issues=None: statements.parse_bank_debit(
+        p, "bank_cmb_savings", issues),
+    "bank_cmb_credit": lambda p, issues=None: statements.parse_bank_credit(
+        p, "bank_cmb_credit", issues),
+    "bank_icbc": lambda p, issues=None: statements.parse_bank_debit(
+        p, "bank_icbc", issues),
+    "bank_ccb": lambda p, issues=None: statements.parse_bank_debit(
+        p, "bank_ccb", issues),
+    "bank_cgb_credit": lambda p, issues=None: statements.parse_bank_credit(
+        p, "bank_cgb_credit", issues),
+    "bank_debit": lambda p, issues=None: statements.parse_bank_debit(
+        p, "bank_debit", issues),
+    "bank_credit": lambda p, issues=None: statements.parse_bank_credit(
+        p, "bank_credit", issues),
+    "meituan": lambda p, issues=None: statements.parse_ecommerce(p, "meituan", issues),
+    "taobao": lambda p, issues=None: statements.parse_ecommerce(p, "taobao", issues),
+    "jd": lambda p, issues=None: statements.parse_ecommerce(p, "jd", issues),
+    "ecommerce": lambda p, issues=None: statements.parse_ecommerce(p, "ecommerce", issues),
+    "fund": lambda p, issues=None: statements.parse_fund(p, "fund", issues),
+    "broker": lambda p, issues=None: statements.parse_broker(p, "broker", issues),
+    "yield": lambda p, issues=None: statements.parse_yield(p, "yield", issues),
+    "asset_snapshot": lambda p, issues=None: statements.parse_snapshot(p, "asset_snapshot", issues),
 }
 
 # platform_id → (显示名, 类别, 适配器)
@@ -51,6 +74,21 @@ PLATFORM_META = {
     "alipay": ("支付宝", "wallet", "alipay"),
     # 小荷包是独立导出（两列金额、订单号空间独立），按独立平台接入。
     "alipay_wallet": ("支付宝小荷包", "wallet", "alipay_wallet"),
+    "bank_cmb_savings": ("招商银行储蓄卡", "bank", "bank_debit"),
+    "bank_cmb_credit": ("招商银行信用卡", "bank", "bank_credit"),
+    "bank_icbc": ("工商银行", "bank", "bank_debit"),
+    "bank_ccb": ("建设银行", "bank", "bank_debit"),
+    "bank_cgb_credit": ("广发银行信用卡", "bank", "bank_credit"),
+    "bank_debit": ("银行卡", "bank", "bank_debit"),
+    "bank_credit": ("信用卡账单", "bank", "bank_credit"),
+    "meituan": ("美团", "ecommerce", "ecommerce"),
+    "taobao": ("淘宝天猫", "ecommerce", "ecommerce"),
+    "jd": ("京东", "ecommerce", "ecommerce"),
+    "ecommerce": ("电商订单", "ecommerce", "ecommerce"),
+    "fund": ("基金交易", "investment", "fund"),
+    "broker": ("证券成交", "investment", "broker"),
+    "yield": ("理财收益", "investment", "yield"),
+    "asset_snapshot": ("资产快照", "investment", "asset_snapshot"),
     "manual": ("手动记账", "other", "manual"),
 }
 
@@ -113,13 +151,39 @@ def detect(path: Path, alipay_password: str | None = None) -> tuple[str, float]:
         if detected:
             return detected, 0.99
 
+    if suffix == ".csv":
+        # 银行卡 / 电商 / 投资账单：先看表头证据，再退回文件名。
+        detected = statements.detect_csv_platform(path)
+        if detected:
+            return detected, 0.95
+        if "微信" in name or "wechat" in name:
+            return "wechat", 0.90
+        if "小荷包" in name:
+            return "alipay_wallet", 0.90
+        if "支付宝" in name or "alipay" in name:
+            return "alipay", 0.90
+        if "美团" in name:
+            return "meituan", 0.90
+        if "淘宝" in name or "天猫" in name:
+            return "taobao", 0.90
+        if "京东" in name:
+            return "jd", 0.90
+        if "基金" in name:
+            return "fund", 0.90
+        if "证券" in name or "成交" in name:
+            return "broker", 0.90
+        if "收益" in name:
+            return "yield", 0.90
+        # 认不出来的 CSV 保持旧行为：按支付宝主账单试，解析失败会明确报错。
+        return "alipay", 0.60
+
     if "微信" in name or "wechat" in name:
         return "wechat", 0.98
     if "小荷包" in name:
         return "alipay_wallet", 0.98
     if "支付宝" in name or "alipay" in name:
         return "alipay", 0.98
-    if suffix in {".csv", ".zip"}:
+    if suffix == ".zip":
         return "alipay", 0.60
 
     raise ValueError(

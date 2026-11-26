@@ -10,7 +10,7 @@ from collections import Counter
 
 import pytest
 
-from scripts.synth import generate, write_all
+from scripts.synth import backend_check, generate, write_all
 from scripts.synth.backend_ledger import (
     NEUTRAL_ROLES,
     REAL_DB,
@@ -31,6 +31,22 @@ def _expected_by_class(truth_csv, imported_nos: set[str]) -> Counter:
     return expected
 
 
+def _expected_yields(dataset_dir) -> float:
+    """收益类流水在答案层不在 postings 里（钱包里那几行是镜像），单独补上。"""
+    total = 0.0
+    for name, amount_field in (
+        ("ground_truth_wechat_yield.csv", "amount"),
+        ("ground_truth_wealth.csv", "amount"),
+    ):
+        path = dataset_dir / "ground_truth" / name
+        if not path.exists():
+            continue
+        with path.open(encoding="utf-8-sig", newline="") as fh:
+            for row in csv.DictReader(fh):
+                total += float(row[amount_field])
+    return total
+
+
 def test_backend_ledger_rebuilds_truth_from_imports(tmp_path):
     dataset_dir = tmp_path / "synth"
     dataset = generate(seed=777, months=2)
@@ -47,10 +63,13 @@ def test_backend_ledger_rebuilds_truth_from_imports(tmp_path):
     # 平台分类必须系统性出错，而不是个别噪声。
     assert noisy["platform_mismatch"]["rate"] >= 0.5
 
-    # 答案层按 tx_no 覆盖到了每一笔导入行，没有漏网的平台分类。
-    assert truth["truth"]["matched"] == inserted
-    assert truth["truth"]["unmapped_imported"] == 0
-    assert truth["truth"]["neutral_exempted"] > 0
+    # 答案层按 tx_no 覆盖到每一笔导入行；电商与投资两类的导入行没有自己的
+    # 交易单号，按来源文件回连答案层，也必须全部有归属。
+    info = truth["truth"]
+    assert info["matched"] + info["ecommerce_mirror"] + info["ecommerce_primary"] \
+        + info["asset_moves"] + info["yields"] == inserted
+    assert info["unmapped_imported"] == 0
+    assert info["neutral_exempted"] > 0
 
     # 账本里实际计入的金额（剔除镜像/划转）必须逐类等于答案层。
     truth_csv = dataset_dir / "ground_truth" / "ground_truth_postings.csv"
@@ -59,6 +78,7 @@ def test_backend_ledger_rebuilds_truth_from_imports(tmp_path):
             "SELECT tx_no FROM transactions_raw WHERE tx_no IS NOT NULL"
         )}
     expected = _expected_by_class(truth_csv, imported_nos)
+    expected["收入"] += _expected_yields(dataset_dir)
 
     counted = truth["ledger"]["bucket_totals_counted"]
     assert set(counted) == set(expected)
@@ -70,8 +90,9 @@ def test_backend_ledger_rebuilds_truth_from_imports(tmp_path):
     assert all_totals["中性"] > 0
     assert "中性" not in counted
     assert report["coverage"]["supported_source_rows"] >= inserted
-    assert len(report["coverage"]["supported_files"]) == 6
-    assert len(report["coverage"]["unsupported_files"]) == 13
+    # 18 份原始流水全部能进导入器；资产快照是持仓表，不是流水，不入库。
+    assert len(report["coverage"]["supported_files"]) == 18
+    assert len(report["coverage"]["unsupported_files"]) == 1
     refunds = truth["refund_coverage"]
     originals = {p.event_id: p for p in dataset.postings if p.flow_role == "primary"}
     pairs = [p for p in dataset.postings if p.flow_role == "refund" and p.tx_no in imported_nos
@@ -89,3 +110,16 @@ def test_backend_ledger_rebuilds_truth_from_imports(tmp_path):
 def test_backend_ledger_refuses_real_database(tmp_path):
     with pytest.raises(RuntimeError):
         _guard(REAL_DB)
+
+
+def test_backend_check_reproduces_answer_totals(tmp_path):
+    """真实导入器 + 真实账本引擎复算出来的账，必须和答案层逐类相等。"""
+    dataset_dir = tmp_path / "synth"
+    dataset = generate(seed=888, months=2)
+    write_all(dataset, dataset_dir)
+
+    summary = backend_check.check(dataset_dir)
+    assert summary["ok"], summary["rows"]
+    for row in summary["rows"]:
+        assert row["status"] == "PASS", row
+    assert summary["imported_rows"] > 0
