@@ -98,6 +98,8 @@ PAYABLE_FUNDING = {
     "wechat": ("零钱", "零钱通"),
 }
 
+PAYMENT_FLOOR = {"余额宝": Decimal("15000.00"), "零钱通": Decimal("5000.00")}
+
 HUABEI_LIMIT = Decimal("20000.00")       # 花呗额度，和信用卡额度分开
 QINQING_LIMIT = Decimal("1500.00")       # 支付宝亲情卡每月额度
 QINSHU_LIMIT = Decimal("1000.00")        # 微信亲属卡每月额度

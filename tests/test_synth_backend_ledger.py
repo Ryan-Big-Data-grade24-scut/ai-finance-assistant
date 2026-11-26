@@ -69,6 +69,21 @@ def test_backend_ledger_rebuilds_truth_from_imports(tmp_path):
     all_totals = truth["ledger"]["bucket_totals"]
     assert all_totals["中性"] > 0
     assert "中性" not in counted
+    assert report["coverage"]["supported_source_rows"] >= inserted
+    assert len(report["coverage"]["supported_files"]) == 6
+    assert len(report["coverage"]["unsupported_files"]) == 13
+    refunds = truth["refund_coverage"]
+    originals = {p.event_id: p for p in dataset.postings if p.flow_role == "primary"}
+    pairs = [p for p in dataset.postings if p.flow_role == "refund" and p.tx_no in imported_nos
+             and originals[dataset.journal.by_id[p.event_id].original].tx_no in imported_nos]
+    assert refunds["refund_relation_counts"]["paired"] == len(pairs)
+    for cls, values in refunds["by_class"].items():
+        returned = sum(p.amount for p in pairs if originals[dataset.journal.by_id[p.event_id].original].expense_class == cls)
+        assert float(values["paired_refunds"]) == float(returned)
+        assert float(values["net_of_paired"]) == pytest.approx(counted.get(cls, 0) - float(returned), abs=0.001)
+
+    with pytest.raises(FileExistsError):
+        build_report(dataset_dir, tmp_path / "backend")
 
 
 def test_backend_ledger_refuses_real_database(tmp_path):

@@ -23,7 +23,7 @@ from .engine import Dataset, Posting, WALLET_DOMAINS, WALLET_NAME, money
 
 # ── 通用 ──────────────────────────────────────────────────────
 def _running(dataset: Dataset, account: str) -> list[tuple[Posting, Decimal]]:
-    balance = D.ACCOUNTS[account].opening
+    balance = dataset.journal.accounts[account].opening
     out = []
     for p in sorted(dataset.by_account(account), key=lambda x: (x.when, x.tx_no)):
         if p.effect == "out":
@@ -155,7 +155,7 @@ def write_wechat_xlsx(dataset: Dataset, path: Path) -> int:
             "transfer": "转账", "refund": "退款", "income": "其他",
         }.get(p.kind, "商户消费")
         if p.kind == "refund":
-            status = "已全额退款"
+            status = "已全额退款" if p.refund_full else "已部分退款"
         elif p.platform_type:
             status = p.status or "支付成功"
         elif p.kind == "income":
@@ -169,8 +169,7 @@ def write_wechat_xlsx(dataset: Dataset, path: Path) -> int:
             status, p.tx_no, p.merchant_no or "/", p.remark or "/",
         ])
 
-    wb.save(path)
-    wb.close()
+    _save_xlsx(wb, path)
     return len(rows)
 
 
@@ -179,20 +178,18 @@ WALLET_HEADER = ["订单号", "交易时间", "交易说明", "备注", "操作�
                  "收入金额", "支出金额"]
 
 
-def _force_dimension(path: Path, ref: str = "A1") -> None:
-    """真实小荷包导出把工作表尺寸错报成 A1；生成的样本保留这个坑。"""
-    tmp = path.with_name(path.name + ".tmp")
-    tag = f'<dimension ref="{ref}"/>'.encode()
-    with zipfile.ZipFile(path) as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
-        for item in src.infolist():
-            data = src.read(item.filename)
-            if item.filename == "xl/worksheets/sheet1.xml":
-                if b"<dimension" in data:
-                    data = re.sub(rb'<dimension ref="[^"]*"\s*/>', tag, data, count=1)
-                else:
-                    data = re.sub(rb"(<worksheet[^>]*>)", rb"\1" + tag, data, count=1)
-            dst.writestr(item, data)
-    tmp.replace(path)
+def _save_xlsx(workbook, path, *, wallet=False):
+    buf = io.BytesIO()
+    workbook.save(buf)
+    workbook.close()
+    with zipfile.ZipFile(buf) as src, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as dst:
+        for name in src.namelist():
+            data = src.read(name)
+            if name == "docProps/core.xml":
+                data = re.sub(rb"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", b"2026-01-01T00:00:00Z", data)
+            if wallet and name == "xl/worksheets/sheet1.xml":
+                data = re.sub(rb'<dimension ref="[^"]*"\s*/>', b'<dimension ref="A1"/>', data, count=1)
+            dst.writestr(zipfile.ZipInfo(name), data, compress_type=zipfile.ZIP_DEFLATED)
 
 
 def write_wallet_xlsx(dataset: Dataset, account: str, path: Path) -> int:
@@ -232,9 +229,7 @@ def write_wallet_xlsx(dataset: Dataset, account: str, path: Path) -> int:
             float(expense) if expense is not None else "",
         ])
 
-    wb.save(path)
-    wb.close()
-    _force_dimension(path)
+    _save_xlsx(wb, path, wallet=True)
     return len(rows)
 
 
@@ -282,7 +277,9 @@ def _write_credit_csv(dataset: Dataset, account: str, path: Path, title: str,
            ["交易日", "记账日", "交易类型", "交易金额", "卡号后四位", "商户名称",
             "商户编号", "交易描述", "交易流水号"]]
     for p in rows:
-        if p.item == "信用卡分期还款":
+        if p.kind == "refund":
+            tx_type = "退款"
+        elif p.item == "信用卡分期还款":
             tx_type = "分期"
         elif p.kind == "transfer" and p.direction == "收入":
             tx_type = "还款"
@@ -308,7 +305,7 @@ def write_cgb_credit_csv(dataset: Dataset, path: Path) -> int:
 # ── 电商订单（近似格式）────────────────────────────────────
 def _order_rows(dataset: Dataset, channel: str) -> list[Posting]:
     return sorted([p for p in dataset.postings
-                   if p.order_channel == channel and p.kind == "purchase"],
+                   if p.order_channel == channel and p.kind in {"purchase", "closed"}],
                   key=lambda p: (p.when, p.tx_no))
 
 
@@ -329,7 +326,7 @@ def write_meituan_csv(dataset: Dataset, path: Path) -> int:
         store = p.merchant or p.counterparty
         out.append([p.merchant_no, _iso(p), store, D.merchant_id(store), p.item,
                     "已完成", f"{p.amount:.2f}", f"{p.amount:.2f}",
-                    _pay_label(p), "0.00"])
+                    _pay_label(p), f"{p.refunded:.2f}"])
     _write_csv(path, out)
     return len(rows)
 
@@ -342,9 +339,10 @@ def write_taobao_csv(dataset: Dataset, path: Path) -> int:
             "商品数量", "订单金额", "实付金额", "支付方式", "运费"]]
     for p in rows:
         store = p.merchant or ("天猫超市" if p.order_channel == "tmall" else "淘宝店铺")
-        out.append([p.merchant_no, "交易成功", _iso(p), p.item, store,
-                    D.merchant_id(store),
-                    1, f"{p.amount:.2f}", f"{p.amount:.2f}", _pay_label(p), "0.00"])
+        out.append([p.merchant_no, "交易关闭" if p.kind == "closed" else "交易成功", _iso(p), p.item, store,
+                    D.merchant_id(store), 1, f"{p.amount:.2f}",
+                    "0.00" if p.kind == "closed" else f"{p.amount:.2f}",
+                    "" if p.kind == "closed" else _pay_label(p), "0.00"])
     _write_csv(path, out)
     return len(rows)
 
@@ -399,11 +397,13 @@ def write_wealth_csv(dataset: Dataset, path: Path) -> int:
 
 def write_snapshot_csv(dataset: Dataset, path: Path) -> int:
     out = [["# 月末资产快照（虚构样本）"],
-           ["日期", "账户类型", "账户名称", "市值", "成本", "浮动盈亏", "盈亏率(%)"]]
+           ["日期", "账户类型", "账户名称", "持仓市值", "持仓成本", "浮动盈亏", "浮动盈亏率(%)",
+            "现金及已派发收益", "已实现盈亏及收益", "合计盈亏及收益"]]
     for row in dataset.snapshots:
         out.append([row["date"], row["account"], row["name"],
                     f"{row['market_value']:.2f}", f"{row['cost']:.2f}",
-                    f"{row['pnl']:.2f}", f"{row['pnl_pct']:.2f}"])
+                    f"{row['pnl']:.2f}", f"{row['pnl_pct']:.2f}", f"{row['cash']:.2f}",
+                    f"{row['realized']:.2f}", f"{row['total_pnl']:.2f}"])
     _write_csv(path, out)
     return len(dataset.snapshots)
 
@@ -424,6 +424,7 @@ def write_wechat_yield_csv(dataset: Dataset, path: Path) -> int:
 def write_summary(dataset: Dataset, path: Path, counts: dict[str, int]) -> None:
     from . import truth
     payload = {
+        "schema_version": 3,
         "seed": dataset.seed,
         "period": [dataset.start.isoformat(), dataset.end.isoformat()],
         "digest": dataset.digest(),
@@ -441,7 +442,7 @@ def write_summary(dataset: Dataset, path: Path, counts: dict[str, int]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-README = """# 虚构账单数据集（v2）
+README = """# 虚构账单数据集（v3）
 
 本目录下全部为**程序生成的虚构数据**，人物、账户、商户、单号均为编造，
 不含任何真实个人信息，也不对应任何真实账户。模型说明见 `scripts/synth/MODEL.md`。
@@ -528,8 +529,11 @@ README = """# 虚构账单数据集（v2）
 
 def write_all(dataset: Dataset, out_dir: Path) -> dict[str, int]:
     from . import truth
-    truth.annotate(dataset)
     out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if any(out_dir.iterdir()):
+        raise FileExistsError(f"输出目录非空：{out_dir}")
+    truth.annotate(dataset)
     dirs = {
         "alipay": out_dir / "支付宝",
         "wechat": out_dir / "微信",

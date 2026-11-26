@@ -34,7 +34,7 @@
 > **时间：** 只读分类约 20–40 分钟；写账检查另加 10 分钟。
 > **通过标准：** 逐笔分类与答案表一致，或差异能由商品说明解释；金额复算一致；只读阶段账本没有被改动。
 >
-> 不接模型也能验收：见[无 AI 操作验收](docs/验收/无AI操作验收.md)（完全虚构账单，16 笔主线 + 异常 + 批量）。
+> 不接模型也能验收：见[无 AI 操作验收](docs/验收/无AI操作验收.md)（完全虚构账单，16 笔主线 + 异常 + 批量）。需要大规模盲测数据时，见[虚构账单生成方法](synthetic-data/README.md)。
 
 > **EN — Start here.** The acceptance case is [`docs/验收/饮食支出梳理-AI.md`](docs/验收/饮食支出梳理-AI.md). It uses a real-source, sanitized October 2025 statement (210 expenses) and checks whether ATLAS can find every possible food row, split it into *meal / snack & drink / needs review* with reasons, keep campus stores, transfers, red packets and refunds out, and recompute totals from the listed rows. The sanitized package is supplied separately through the course channel; the repository contains no per-row bills. For a no-AI check, see the [fictional-data walkthrough](docs/验收/无AI操作验收.md).
 

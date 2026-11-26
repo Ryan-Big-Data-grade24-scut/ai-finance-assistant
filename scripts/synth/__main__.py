@@ -1,9 +1,9 @@
 """命令行入口：
 
     python -m scripts.synth --months 12 --seed 20261126
-    python -m scripts.synth --months 3 --out ../.runtime/synthetic/last3
+    python -m scripts.synth --months 3 --out ../synthetic-data/last3
 
-输出目录默认仓库上一级的 .runtime/synthetic/<seed>/，不放在工作区里。
+输出目录默认仓库上一级的 synthetic-data/<seed>-v3/，拒绝覆盖旧输出。
 """
 from __future__ import annotations
 
@@ -28,7 +28,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     start = date.fromisoformat(args.start)
-    out = Path(args.out) if args.out else Path("../.runtime/synthetic") / str(args.seed)
+    output_root = Path(__file__).resolve().parents[3] / "synthetic-data"
+    out = Path(args.out) if args.out else output_root / f"{args.seed}-v3"
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        parser.error(f"输出目录非空或不是目录：{out}")
 
     dataset = generate(seed=args.seed, start=start, months=args.months)
     counts = write_all(dataset, out)
