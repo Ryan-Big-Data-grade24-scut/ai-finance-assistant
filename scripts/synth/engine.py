@@ -14,16 +14,12 @@ import hashlib
 import random
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 
-from . import data as D
-
-
-TWO = Decimal("0.01")
-
-
-def money(value: float | Decimal) -> Decimal:
-    return Decimal(str(value)).quantize(TWO, rounding=ROUND_HALF_UP)
+from . import actors as A, data as D
+from .investments import Investments
+from .journal import Change, Event, Journal, ZERO, money
+from .settlement import Settlement
 
 
 def _fmt(value: Decimal) -> str:
@@ -64,6 +60,10 @@ class Posting:
     flow_role: str = ""              # income/primary/mirror/settlement/asset_move/...
     mirror_of: str = ""              # 镜像行的主流水 truth_id
     truth_id: str = ""               # 稳定答案键
+    event_id: str = ""
+    secondary: bool = False
+    refunded: Decimal = ZERO
+    refund_full: bool = False
 
 
 @dataclass
@@ -82,6 +82,7 @@ class Dataset:
     wallet_products: dict[str, Decimal]
     huabei_used: Decimal
     wechat_yield_rows: list[dict]
+    journal: Journal
 
     def by_account(self, *accounts: str) -> list[Posting]:
         wanted = set(accounts)
@@ -107,7 +108,7 @@ class Dataset:
         """各平台导出文件的总行数：记账笔数 + 电商平台自己的订单行。"""
         counts = self.monthly_counts()
         for p in self.postings:
-            if p.order_channel and p.kind == "purchase":
+            if p.order_channel and p.kind in {"purchase", "closed"}:
                 key = p.when.strftime("%Y-%m")
                 counts[key] += 1
         return dict(sorted(counts.items()))
@@ -129,30 +130,26 @@ WALLET_NAME = {
 }
 
 
-class Ledger:
+class Ledger(Settlement):
     def __init__(self, seed: int, start: date, end: date):
         self.seed = seed
         self.rng = random.Random(seed)
         self.start = start
         self.end = end
         self.postings: list[Posting] = []
-        self.bal = {aid: acct.opening for aid, acct in D.ACCOUNTS.items()}
-        # 钱包不是单一余额：支付宝有余额/余额宝/理财，微信有零钱/零钱通/理财通。
-        self.products = {key: p.opening for key, p in D.WALLET_PRODUCTS.items()}
-        self._sync_wallet("alipay")
-        self._sync_wallet("wechat")
-        # 每张信用卡独立计额度、独立账单；credit_used 只是合计，用于报表。
-        self.credit_used_by = {aid: Decimal("0.00") for aid in D.CREDIT_ACCOUNTS}
-        self.credit_used = Decimal("0.00")
-        self.bills = {aid: Decimal("0.00") for aid in D.CREDIT_ACCOUNTS}
-        self.huabei_used = Decimal("0.00")
-        self.huabei_bill = Decimal("0.00")
-        self.qinqing_used = Decimal("0.00")
-        self.qinshu_used = Decimal("0.00")
-        self.salary_amount = D.SALARY
+        self.journal = Journal()
+        A.setup(self.journal)
+        self.journal.state(f"tax:{start.year - 1}:refundable_withholding", money("3000"))
         self.counter = 0
+        self.statement_at: dict[str, datetime] = {}
+        self.sales: dict[str, tuple[Event, Posting, str]] = {}
+        self.refunded: dict[str, Decimal] = {}
         self.wechat_yield_rows: list[dict] = []
-        self.invest = Investments(self.rng, start, end)
+        self.invest = Investments(self.rng, self.journal)
+
+    @property
+    def bal(self):
+        return self.journal.cash
 
     # ── 单号 ────────────────────────────────────────────────
     def order_no(self, account: str, when: datetime, *, width: int = 18) -> str:
@@ -169,239 +166,46 @@ class Ledger:
             return (f"{when:%Y%m%d}{tail}"[:20]).ljust(20, "0")
         return (f"{when:%Y%m%d}{tail}"[:width]).ljust(width, "0")
 
-    # ── 钱包内部产品 ────────────────────────────────────────
-    def _sync_wallet(self, account: str) -> None:
-        total = sum((v for k, v in self.products.items()
-                     if k.startswith(f"{account}:")), Decimal("0.00"))
-        self.bal[account] = money(total)
-
     def _product(self, account: str, funding: str) -> Decimal:
-        return self.products.get(f"{account}:{funding}", Decimal("0.00"))
-
-    def _adjust_product(self, account: str, funding: str, delta: Decimal) -> bool:
-        key = f"{account}:{funding}"
-        if key not in self.products:
-            return False
-        value = self.products[key] + delta
-        if value < 0:
-            return False
-        self.products[key] = money(value)
-        self._sync_wallet(account)
-        return True
+        return self.journal.cash.get(f"{account}:{funding}", ZERO)
 
     def _payable(self, account: str) -> Decimal:
-        return sum((self._product(account, name) for name in D.PAYABLE_FUNDING[account]),
-                   Decimal("0.00"))
+        return sum((self._product(account, name) for name in D.PAYABLE_FUNDING[account]), ZERO)
 
-    def _default_funding(self, account: str, prefer: str = "") -> str:
-        """优先用指定的可付款产品；不够时再退回同平台其他可付款产品。"""
-        if prefer and self._product(account, prefer) > 0:
-            return prefer
-        for name in D.PAYABLE_FUNDING[account]:
-            if self._product(account, name) > 0:
-                return name
-        return D.DEFAULT_FUNDING[account]
-
-    # ── 记账原语 ────────────────────────────────────────────
-    @staticmethod
-    def _effect(direction: str, effect: str | None) -> str:
-        if effect:
-            return effect
-        return {"支出": "out", "收入": "in"}.get(direction, "none")
-
-    def _post(self, account: str, when: datetime, direction: str, amount: Decimal,
-              category: str, counterparty: str, item: str, **kwargs) -> Posting | None:
-        amount = money(amount)
-        if amount <= 0:
-            return None
-        acct = D.ACCOUNTS[account]
-        effect = self._effect(direction, kwargs.pop("effect", None))
-        funding = kwargs.pop("funding", "")
-        if account in D.PAYABLE_FUNDING and effect in {"in", "out"}:
-            funding = funding or self._default_funding(account)
-            delta = amount if effect == "in" else -amount
-            if not self._adjust_product(account, funding, delta):
-                return None
-        elif effect == "out":
-            if acct.kind == "credit":
-                if self.credit_used_by[account] + amount > (acct.limit or Decimal("0")):
-                    return None
-                self.credit_used_by[account] += amount
-                self.credit_used += amount
-            else:
-                if self.bal[account] < amount:
-                    return None
-                self.bal[account] -= amount
-        elif effect == "in":
-            if acct.kind == "credit":
-                paid = min(amount, self.credit_used_by[account])
-                self.credit_used_by[account] -= paid
-                self.credit_used = max(Decimal("0.00"), self.credit_used - paid)
-            else:
-                self.bal[account] += amount
-
-        account_no = kwargs.pop("counterparty_account", "") or D.party_account(counterparty)
-        posting = Posting(
-            account=account, when=when, direction=direction, amount=amount,
-            category=category, counterparty=counterparty, item=item,
-            tx_no=kwargs.pop("tx_no", "") or self.order_no(account, when),
-            wallet_domain=WALLET_DOMAINS.get(account, ""),
-            effect=effect, funding=funding, counterparty_account=account_no, **kwargs,
+    def _project(self, event: Event, account: str, direction: str, counterparty: str,
+                 *, when=None, item=None, mirror=False, amount=None, **view) -> Posting:
+        when = when or event.at
+        p = Posting(
+            account, when, direction, event.amount if amount is None else amount,
+            event.business.category, counterparty, event.business.item if item is None else item,
+            tx_no=self.order_no(account, when), wallet_domain=WALLET_DOMAINS.get(account, ""),
+            effect=view.pop("effect", {"支出": "out", "收入": "in"}.get(direction, "none")),
+            counterparty_account=view.pop("counterparty_account", "") or D.party_account(counterparty),
+            event_id=event.id, secondary=mirror, **view,
         )
-        self.postings.append(posting)
-        return posting
-
-    def income(self, account: str, when: datetime, amount: Decimal, category: str,
-               counterparty: str, item: str, **kwargs) -> Posting | None:
-        return self._post(account, when, "收入", amount, category, counterparty, item, **kwargs)
-
-    def spend(self, account: str, when: datetime, amount: Decimal, category: str,
-              counterparty: str, item: str, **kwargs) -> Posting | None:
-        amount = money(amount)
-        kwargs.pop("channel", None)  # 直接指定账户时，channel 只是调用方注释
-        acct = D.ACCOUNTS[account]
-        # 信用卡/花呗付款在钱包账单里也要留一行，但这笔钱不从钱包余额扣。
-        if kwargs.get("effect") != "none":
-            if account in D.PAYABLE_FUNDING:
-                funding = kwargs.get("funding") or self._default_funding(account)
-                if self._product(account, funding) < amount:
-                    return None
-            elif acct.kind != "credit" and self.bal[account] < amount:
-                return None
-        return self._post(account, when, "支出", amount, category, counterparty, item, **kwargs)
-
-    def transfer(self, when: datetime, src: str, dst: str, amount: Decimal,
-                 item: str = "转账", counterparty: str = "") -> bool:
-        """两边成对记账；源账户余额不足则整笔放弃。"""
-        amount = money(amount)
-        src_acct = D.ACCOUNTS[src]
-        dst_acct = D.ACCOUNTS[dst]
-        src_funding = ""
-        if src in D.PAYABLE_FUNDING:
-            prefer = "余额宝" if src == "alipay" else "零钱通"
-            src_funding = self._default_funding(src, prefer)
-            if self._product(src, src_funding) < amount:
-                return False
-        elif src_acct.kind != "credit" and self.bal[src] < amount:
-            return False
-        if src_acct.kind == "credit" \
-                and self.credit_used_by[src] + amount > (src_acct.limit or Decimal("0")):
-            return False
-
-        pair = str(self.rng.randint(10 ** 9, 10 ** 10 - 1))
-
-        src_dir = "支出" if src_acct.platform in {"cmb_debit", "icbc_debit", "ccb_debit"} else "中性"
-        if not self._post(src, when, src_dir, amount, "转账红包",
-                          counterparty or dst_acct.name, item, kind="transfer",
-                          merchant_no=pair, effect="out", funding=src_funding):
-            return False
-
-        dst_funding = ""
-        dst_pay = ""
-        if dst in D.PAYABLE_FUNDING:
-            dst_funding = "余额" if dst == "alipay" else "零钱"
-            if src_acct.mask:
-                dst_pay = f"{src_acct.name}({src_acct.mask.replace(' ', '')[-4:]})"
-            else:
-                dst_pay = src_acct.name
-        if dst_acct.platform == "alipay":
-            dst_dir, dst_item = "中性", "充值"
-        elif dst_acct.platform == "wechat":
-            dst_dir, dst_item = "中性", "零钱充值"
-        else:
-            dst_dir, dst_item = "收入", item
-        # 收款方看到的是付款账户名，而不是付款方账单里填的收款对象。
-        self._post(dst, when + timedelta(seconds=45), dst_dir, amount, "转账红包",
-                   src_acct.name, dst_item, kind="transfer",
-                   merchant_no=pair, effect="in", funding=dst_funding,
-                   pay_method=dst_pay)
-        return True
-
-    # ── 付款：选通道、可能同时产生信用卡流水 ─────────────────
-    def _wallet_pay(self, wallet: str, pay_method: str, when: datetime, amount: Decimal,
-                    category: str, counterparty: str, item: str, **kwargs) -> bool:
-        credit_for_label = {label: aid for aid, label in D.CREDIT_LABEL.items()}
-        if pay_method in credit_for_label:
-            aid = credit_for_label[pay_method]
-            limit = D.ACCOUNTS[aid].limit or Decimal("0")
-            if self.credit_used_by[aid] + amount > limit:
-                return False
-            if not self.spend(wallet, when, amount, category, counterparty, item,
-                              pay_method=pay_method, effect="none", funding="信用卡",
-                              **kwargs):
-                return False
-            return self.spend(aid, when, amount, category, counterparty, item,
-                              pay_method="", kind=kwargs.get("kind", "purchase")) is not None
-
-        if pay_method == "花呗":
-            if self.huabei_used + amount > D.HUABEI_LIMIT:
-                return False
-            if not self.spend(wallet, when, amount, category, counterparty, item,
-                              pay_method=pay_method, effect="none", funding="花呗",
-                              **kwargs):
-                return False
-            self.huabei_used += amount
-            return True
-
-        if pay_method.startswith("亲情卡"):
-            if self.qinqing_used + amount > D.QINQING_LIMIT:
-                return False
-            if not self.spend(wallet, when, amount, category, counterparty, item,
-                              pay_method=pay_method, funding="余额宝", **kwargs):
-                return False
-            self.qinqing_used += amount
-            return True
-
-        if pay_method.startswith("亲属卡"):
-            if self.qinshu_used + amount > D.QINSHU_LIMIT:
-                return False
-            if not self.spend(wallet, when, amount, category, counterparty, item,
-                              pay_method=pay_method, funding="零钱通", **kwargs):
-                return False
-            self.qinshu_used += amount
-            return True
-
-        # 小荷包也是支付宝的一种付款方式：主账单留一行（付款方式写小荷包），
-        # 钱从小荷包余额扣，并在小荷包自己的账单里再出现一次。
-        if pay_method.startswith("支付宝小荷包"):
-            if not self.spend(wallet, when, amount, category, counterparty, item,
-                              pay_method=pay_method, effect="none", funding="小荷包",
-                              **kwargs):
-                return False
-            return self.spend("wallet_family", when, amount, category,
-                              counterparty, item, **kwargs) is not None
-
-        # 余额宝/零钱通同时是理财账户，真实用户不会为了付款把它清零；
-        # 低于保留金额时改用花呗/信用卡，等下次转入再恢复。
-        if pay_method == "余额宝" and self._product(wallet, pay_method) - amount < Decimal("15000"):
-            return False
-        if pay_method == "零钱通" and self._product(wallet, pay_method) - amount < Decimal("5000"):
-            return False
-
-        funding = {"账户余额": "余额", "余额": "余额", "零钱": "零钱"}.get(pay_method, pay_method)
-        return self.spend(wallet, when, amount, category, counterparty, item,
-                          pay_method=pay_method, funding=funding, **kwargs) is not None
+        self.postings.append(p)
+        return p
 
     def pay(self, when: datetime, amount: Decimal, category: str, counterparty: str,
             item: str, *, channel: str | None = None, order_channel: str = "",
             kind: str = "purchase", merchant_no: str = "",
-            merchant: str = "") -> Posting | None:
+            merchant: str = "", purpose: str = "") -> Posting | None:
         amount = money(amount)
         auto_channel = channel is None
         if auto_channel:
             channel = self.choose_channel(amount, counterparty)
         # 个人转账不会直接刷信用卡；自动选到信用卡时改走微信/支付宝余额。
         # 显式指定 channel="credit" 的分期扣款不受影响。
-        if auto_channel and kind == "transfer" and channel == "credit":
+        if auto_channel and purpose == "gift" and channel in D.CREDIT_ACCOUNTS:
             channel = "wechat" if self.rng.random() < 0.5 else "alipay"
         kwargs = {"kind": kind, "order_channel": order_channel,
-                  "merchant_no": merchant_no, "merchant": merchant}
+                  "merchant_no": merchant_no, "merchant": merchant, "purpose": purpose}
 
         # 小荷包消费要同时出现在支付宝主账单和小荷包账单里，
         # 不能只落到小荷包账户；余额不够时退回普通支付宝付款。
-        if channel == "wallet_family" and kind != "transfer":
-            if self._wallet_pay("alipay", "支付宝小荷包(家庭开销)", when, amount,
-                                category, counterparty, item, **kwargs):
+        if channel in WALLET_NAME and purpose != "gift":
+            if self._wallet_pay("alipay", f"支付宝小荷包({WALLET_NAME[channel]})", when, amount,
+                                category, counterparty, item, wallet_account=channel, **kwargs):
                 return self._last_post("alipay", when)
             channel = "alipay"
 
@@ -409,7 +213,7 @@ class Ledger:
         # 直接走账户分支会绕掉「付款方式」和信用卡联动。
         if channel == "alipay":
             # 转账/红包不能刷信用卡或花呗，只能用余额或余额宝。
-            if kind == "transfer":
+            if purpose == "gift":
                 for method in ("余额宝", "账户余额"):
                     if self._wallet_pay("alipay", method, when, amount, category,
                                         counterparty, item, **kwargs):
@@ -417,7 +221,7 @@ class Ledger:
                 return None
             r = self.rng.random()
             if r < 0.04 and amount <= Decimal("300") \
-                    and self.qinqing_used + amount <= D.QINQING_LIMIT:
+                    and self.journal.values["allowance:parent"] + amount <= D.QINQING_LIMIT:
                 method = "亲情卡(周母)"
             elif r < 0.58:
                 method = "余额宝"
@@ -445,7 +249,7 @@ class Ledger:
 
         if channel == "wechat":
             # 微信转账/红包同样不能刷信用卡，只能用零钱或零钱通。
-            if kind == "transfer":
+            if purpose == "gift":
                 for method in ("零钱通", "零钱"):
                     if self._wallet_pay("wechat", method, when, amount, category,
                                         counterparty, item, **kwargs):
@@ -453,7 +257,7 @@ class Ledger:
                 return None
             r = self.rng.random()
             if r < 0.05 and amount <= Decimal("200") \
-                    and self.qinshu_used + amount <= D.QINSHU_LIMIT:
+                    and self.journal.values["allowance:child"] + amount <= D.QINSHU_LIMIT:
                 method = "亲属卡(周小满)"
             elif r < 0.57:
                 method = "零钱通"
@@ -499,6 +303,12 @@ class Ledger:
 
     # ── 每日推进 ────────────────────────────────────────────
     def run(self) -> Dataset:
+        actions = {"income": self.receipt, "spend": self.pay, "closed": self._closed,
+                   "move": self._move, "yield": self._yield, "statement": self._statement,
+                   "repay": self._repay, "transfer": self.transfer, "refund": self._refund_action,
+                   "reset": self._reset, "raise": self._raise, "market": self.invest.mark,
+                   "sip": self.invest.sip, "redeem": self.invest.redeem, "trade": self.invest.trade,
+                   "snapshot": self.invest.snapshot}
         d = self.start
         while d <= self.end:
             intents: list[tuple[datetime, str, dict]] = []
@@ -507,218 +317,82 @@ class Ledger:
             self._plan_fixed(d, intents)
             self._plan_travel(d, intents)
             self._plan_daily(d, intents)
+            self.invest.plan(d, self.end, intents)
             for when, kind, payload in sorted(intents, key=lambda x: x[0]):
-                if kind == "transfer":
-                    self.transfer(when, **payload)
-                elif kind == "income":
-                    self.income(**payload)
-                elif kind == "spend":
-                    self.pay(**payload)
-                elif kind == "closed":
-                    self._post_closed(**payload)
-                elif kind == "move":
-                    self._move(**payload)
-                elif kind == "accrue":
-                    self._accrue(**payload)
-                elif kind == "bill_huabei":
-                    self.huabei_bill = self.huabei_used
-                elif kind == "repay_huabei":
-                    self._repay_huabei(**payload)
-                elif kind == "yield_wechat":
-                    self._yield_wechat(**payload)
-                elif kind == "wechat_withdraw":
-                    self._wechat_withdraw(**payload)
-            self.invest.step(d, self)
+                if kind in {"sip", "redeem"}:
+                    actions[kind](when, self)
+                else:
+                    actions[kind](**(payload | {"when": when}))
             d += timedelta(days=1)
 
-        # 投资账户的期末余额取市值，而不是开户时的本金。
-        self.bal["fund"] = self.invest.fund_value()
-        self.bal["broker"] = self.invest.broker_value()
-        self.bal["wealth"] = self.invest.wealth
-        for account in ("alipay", "wechat"):
-            self._sync_wallet(account)
+        return self.dataset()
+
+    def dataset(self) -> Dataset:
+        balances = {k: self.bal[k] for k in D.ACCOUNTS if k in self.bal}
+        balances.update({account: sum((self.bal[k] for k, p in D.WALLET_PRODUCTS.items()
+                                        if p.account == account), ZERO) for account in D.PAYABLE_FUNDING})
+        balances.update(fund=self.invest.fund_value(), broker=self.invest.broker_value())
+        credit = {k: max(ZERO, self.journal.values[f"credit:{k}"]) for k in D.CREDIT_ACCOUNTS}
+        balances.update(dict.fromkeys(credit, ZERO))
         return Dataset(
-            postings=self.postings, balances=self.bal, credit_used=self.credit_used,
-            credit_used_by=dict(self.credit_used_by),
-            snapshots=self.invest.snapshots, fund_rows=self.invest.fund_rows,
+            postings=self.postings, balances=balances, credit_used=sum(credit.values(), ZERO),
+            credit_used_by=credit, snapshots=self.invest.snapshots, fund_rows=self.invest.fund_rows,
             broker_rows=self.invest.broker_rows, wealth_rows=self.invest.wealth_rows,
-            start=self.start, end=self.end, seed=self.seed,
-            wallet_products=dict(self.products), huabei_used=self.huabei_used,
+            start=self.start, end=self.end, seed=self.seed, journal=self.journal,
+            wallet_products={k: self.bal[k] for k in D.WALLET_PRODUCTS},
+            huabei_used=max(ZERO, self.journal.values["credit:huabei"]),
             wechat_yield_rows=self.wechat_yield_rows,
         )
 
-    def _post_closed(self, **kwargs) -> None:
-        """被取消的订单：出现在导出里，但不影响余额。"""
-        when = kwargs.pop("when")
-        counterparty = kwargs.pop("counterparty")
-        p = Posting(account=kwargs.pop("account"), when=when, direction="支出",
-                    amount=money(kwargs.pop("amount")), status="交易关闭",
-                    category=kwargs.pop("category"), counterparty=counterparty,
-                    counterparty_account=kwargs.pop("counterparty_account", "")
-                    or D.party_account(counterparty),
-                    item=kwargs.pop("item"), kind="closed", effect="none",
-                    **kwargs)
-        p.tx_no = self.order_no(p.account, when)
-        self.postings.append(p)
+    def _closed(self, when, account, amount, category, counterparty, item, order_channel):
+        merchant = "淘宝虚构服饰店"
+        seller = A.external(self.journal, merchant, "merchant")
+        order = str(self.rng.randint(10**15, 10**16 - 1))
+        e = self.journal.record(when, self._business("closed", item, category,
+                                                    reference=f"order:{order_channel}:{order}"),
+                                amount, payer=A.OWNER, payee=seller, status="closed")
+        self._project(e, account, "支出", counterparty, kind="closed", effect="none",
+                      status="交易关闭", order_channel=order_channel, merchant=merchant, merchant_no=order)
 
-    # ── 钱包内部划转、收益与账单 ────────────────────────────
-    def _move(self, account: str, when: datetime, src: str, dst: str, amount: Decimal,
-              *, item: str, counterparty: str, category: str = "投资理财",
-              pay_method: str = "", platform_type: str = "",
-              status: str = "交易成功", counterparty_account: str = "/",
-              remark: str = "") -> Posting | None:
-        """同一个平台内部的产品划转：余额→余额宝、零钱→零钱通等。"""
-        amount = money(amount)
-        if amount <= 0 or self._product(account, src) < amount:
-            return None
-        p = self._post(account, when, "中性", amount, category, counterparty, item,
-                       kind="transfer", effect="none", funding=src,
-                       pay_method=pay_method, platform_type=platform_type,
-                       status=status, counterparty_account=counterparty_account,
-                       remark=remark)
-        if not p:
-            return None
-        self._adjust_product(account, src, -amount)
-        if not self._adjust_product(account, dst, amount):
-            self._adjust_product(account, src, amount)
-            self.postings.remove(p)
-            return None
-        return p
+    def _reset(self, when):
+        keys = ("allowance:parent", "allowance:child")
+        self.journal.record(when, self._business("control", "亲属卡月度额度重置", "信用借还"),
+                            ZERO, payer=A.OWNER, payee=A.OWNER,
+                            changes=tuple(Change(k, -self.journal.values[k]) for k in keys))
 
-    def _accrue(self, account: str, when: datetime, funding: str, amount: Decimal,
-                *, item: str, counterparty: str, category: str = "投资理财",
-                pay_method: str = "", platform_type: str = "",
-                status: str = "交易成功", counterparty_account: str = "/",
-                **kwargs) -> Posting | None:
-        """货币基金/理财收益：账单里是「不计收支」，但产品余额确实增加。"""
-        amount = money(amount)
-        if amount <= 0:
-            return None
-        p = self._post(account, when, "中性", amount, category, counterparty, item,
-                       kind="income", effect="none", funding=funding,
-                       pay_method=pay_method, platform_type=platform_type,
-                       status=status, counterparty_account=counterparty_account,
-                       **kwargs)
-        if not p:
-            return None
-        self._adjust_product(account, funding, amount)
-        return p
-
-    def _repay_huabei(self, when: datetime, amount: Decimal) -> Posting | None:
-        amount = min(money(amount), self.huabei_used)
-        if amount <= 0:
-            return None
-        source = next((name for name in ("余额宝", "余额")
-                       if self._product("alipay", name) >= amount), "")
-        if not source:
-            return None
-        pay = "余额宝" if source == "余额宝" else "账户余额"
-        p = self._post("alipay", when, "中性", amount, "信用借还", "花呗",
-                       f"花呗主动还款-{when:%Y年%m月}账单", kind="transfer",
-                       effect="none", funding=source, pay_method=pay,
-                       status="还款成功", counterparty_account="/")
-        if not p:
-            return None
-        self._adjust_product("alipay", source, -amount)
-        self.huabei_used = max(Decimal("0.00"), self.huabei_used - amount)
-        return p
-
-    def _yield_wechat(self, when: datetime, funding: str, amount: Decimal) -> None:
-        """微信支付账单不列零钱通/理财通收益，只在收益明细里体现。"""
-        amount = money(amount)
-        if amount <= 0 or not self._adjust_product("wechat", funding, amount):
-            return
-        self.wechat_yield_rows.append({
-            "date": when.date().isoformat(),
-            "product": funding,
-            "amount": amount,
-            "balance": self._product("wechat", funding),
-        })
-
-    def _wechat_withdraw(self, when: datetime, amount: Decimal) -> bool:
-        amount = money(amount)
-        if self._product("wechat", "零钱") < amount:
-            return False
-        pair = str(self.rng.randint(10 ** 9, 10 ** 10 - 1))
-        p = self._post("wechat", when, "中性", amount, "转账红包",
-                       "招商银行储蓄卡(0371)", "/", kind="transfer",
-                       effect="out", funding="零钱", pay_method="零钱",
-                       platform_type="零钱提现", status="提现已到账",
-                       counterparty_account="/", merchant_no=pair)
-        if not p:
-            return False
-        self.income("salary", when + timedelta(seconds=45), amount, "转账红包",
-                    "微信零钱", "零钱提现", kind="transfer", merchant_no=pair)
-        return True
+    def _raise(self, when):
+        key = "employment:net_salary"
+        salary = self.journal.values[key]
+        self.journal.record(when, self._business("control", "调薪", "收入", reference="employment"),
+                            ZERO, payer="employer", payee=A.OWNER,
+                            changes=(Change(key, money(salary * D.RAISE_RATE) - salary),))
 
     def _plan_products(self, d: date, intents: list) -> None:
         """余额宝/零钱通收益、花呗账单、平台内部划转。"""
         def at(h: int, m: int = 0) -> datetime:
             return datetime.combine(d, time(h, m, self.rng.randint(0, 59)))
 
-        # 花呗每月 1 日出账、10 日还款；亲情卡/亲属卡额度每月重置。
         if d.day == 1:
-            self.huabei_bill = self.huabei_used
-            self.qinqing_used = Decimal("0.00")
-            self.qinshu_used = Decimal("0.00")
-
-        # 余额宝收益每天入账，账单口径为「不计收支」。
-        yuebao = self._product("alipay", "余额宝")
-        yield_amount = money(yuebao * D.WALLET_PRODUCTS["alipay:余额宝"].annual_yield
-                             / Decimal("365"))
-        if yield_amount >= Decimal("0.01"):
-            ts = at(4, 5)
-            intents.append((ts, "accrue", {
-                "account": "alipay", "when": ts, "funding": "余额宝",
-                "amount": yield_amount, "item": f"余额宝-{d:%Y.%m.%d}-收益发放",
-                "counterparty": D.YUEBAO_FUND, "pay_method": "余额宝",
-                "counterparty_account": "/",
-            }))
-
-        # 微信零钱通收益不进入支付账单，只在单独的收益明细里。
-        change_yield = money(self._product("wechat", "零钱通")
-                             * D.WALLET_PRODUCTS["wechat:零钱通"].annual_yield
-                             / Decimal("365"))
-        if change_yield >= Decimal("0.01"):
-            intents.append((at(4, 10), "yield_wechat", {
-                "when": datetime.combine(d, time(4, 10)), "funding": "零钱通",
-                "amount": change_yield,
-            }))
-
-        # 理财按月结息。
-        if d.day == 1:
-            amount = money(self._product("alipay", "理财")
-                           * D.WALLET_PRODUCTS["alipay:理财"].annual_yield
-                           / Decimal("12"))
-            if amount >= Decimal("0.01"):
-                ts = at(3, 0)
-                intents.append((ts, "accrue", {
-                    "account": "alipay", "when": ts, "funding": "理财",
-                    "amount": amount, "item": "理财-收益发放",
-                    "counterparty": D.ALIPAY_WEALTH, "pay_method": "",
-                    "counterparty_account": "/",
-                }))
-            amount = money(self._product("wechat", "理财通")
-                           * D.WALLET_PRODUCTS["wechat:理财通"].annual_yield
-                           / Decimal("12"))
-            if amount >= Decimal("0.01"):
-                intents.append((at(3, 5), "yield_wechat", {
-                    "when": datetime.combine(d, time(3, 5)), "funding": "理财通",
-                    "amount": amount,
-                }))
-
-        if d.day == 10 and self.huabei_bill > 0:
-            ts = at(9, 25)
-            intents.append((ts, "repay_huabei", {
-                "when": ts, "amount": self.huabei_bill,
-            }))
+            intents.extend([(datetime.combine(d, time(0, 0)), "reset", {}),
+                            (datetime.combine(d, time(0, 0)), "statement", {"credit": "huabei"}),
+                            (at(3), "yield", {"account": "alipay", "funding": "理财", "divisor": 12,
+                                               "item": "理财-收益发放", "counterparty": D.ALIPAY_WEALTH,
+                                               "counterparty_account": "/"}),
+                            (at(3, 5), "yield", {"account": "wechat", "funding": "理财通", "divisor": 12})])
+        intents.extend([(at(4, 5), "yield", {"account": "alipay", "funding": "余额宝",
+                                             "item": f"余额宝-{d:%Y.%m.%d}-收益发放",
+                                             "counterparty": D.YUEBAO_FUND, "pay_method": "余额宝",
+                                             "counterparty_account": "/"}),
+                        (at(4, 10), "yield", {"account": "wechat", "funding": "零钱通"})])
+        if d.day == 10:
+            intents.append((at(9, 25), "repay", {"credit": "huabei"}))
 
         if d.day == 11:
             available = self._product("alipay", "余额") - Decimal("1500.00")
             amount = min(available, Decimal("10000.00"))
             if amount >= Decimal("100.00"):
                 intents.append((at(7, 0), "move", {
-                    "account": "alipay", "when": at(7, 0), "src": "余额",
+                    "account": "alipay", "src": "余额",
                     "dst": "余额宝", "amount": amount, "item": "余额宝-自动转入",
                     "counterparty": D.YUEBAO_COMPANY, "pay_method": "",
                     "counterparty_account": "/",
@@ -727,7 +401,7 @@ class Ledger:
         if d.day == 15 \
                 and self._product("alipay", "余额宝") - Decimal("1000.00") >= Decimal("15000.00"):
             intents.append((at(10, 0), "move", {
-                "account": "alipay", "when": at(10, 0), "src": "余额宝",
+                "account": "alipay", "src": "余额宝",
                 "dst": "理财", "amount": Decimal("1000.00"), "item": "理财产品申购",
                 "counterparty": D.ALIPAY_WEALTH, "pay_method": "余额宝",
                 "counterparty_account": "/",
@@ -736,7 +410,7 @@ class Ledger:
         if d.month in (3, 6, 9, 12) and d.day == 20 \
                 and self._product("alipay", "理财") >= Decimal("1500.00"):
             intents.append((at(20, 0), "move", {
-                "account": "alipay", "when": at(20, 0), "src": "理财",
+                "account": "alipay", "src": "理财",
                 "dst": "余额宝", "amount": Decimal("1500.00"), "item": "理财产品赎回",
                 "counterparty": D.ALIPAY_WEALTH, "pay_method": "",
                 "counterparty_account": "/",
@@ -745,7 +419,7 @@ class Ledger:
         if d.day == 25 and self._product("alipay", "余额") < Decimal("800.00") \
                 and self._product("alipay", "余额宝") > Decimal("2000.00"):
             intents.append((at(8, 0), "move", {
-                "account": "alipay", "when": at(8, 0), "src": "余额宝",
+                "account": "alipay", "src": "余额宝",
                 "dst": "余额", "amount": Decimal("1500.00"),
                 "item": "余额宝-转出到余额", "counterparty": "余额宝",
                 "pay_method": "账户余额", "counterparty_account": "jij***@southernfund.com",
@@ -753,7 +427,7 @@ class Ledger:
 
         if d.day == 12 and self._product("wechat", "零钱") > Decimal("3000.00"):
             intents.append((at(7, 0), "move", {
-                "account": "wechat", "when": at(7, 0), "src": "零钱",
+                "account": "wechat", "src": "零钱",
                 "dst": "零钱通", "amount": Decimal("3000.00"),
                 "item": "转入零钱通-来自零钱", "counterparty": "/", "pay_method": "零钱",
                 "platform_type": "转入零钱通-来自零钱", "status": "支付成功",
@@ -763,7 +437,7 @@ class Ledger:
         if d.day == 16 \
                 and self._product("wechat", "零钱通") - Decimal("800.00") >= Decimal("5000.00"):
             intents.append((at(10, 0), "move", {
-                "account": "wechat", "when": at(10, 0), "src": "零钱通",
+                "account": "wechat", "src": "零钱通",
                 "dst": "理财通", "amount": Decimal("800.00"), "item": "活期＋",
                 "counterparty": "理财通", "pay_method": "零钱通",
                 "platform_type": "购买理财通", "status": "支付成功",
@@ -772,12 +446,12 @@ class Ledger:
 
         # 每月把理财赎回到可付款产品，保持余额宝/零钱通的最低水位。
         if d.day == 21:
-            gap = Decimal("12000.00") - self._product("alipay", "余额宝")
+            gap = Decimal("16000.00") - self._product("alipay", "余额宝")
             spare = self._product("alipay", "理财") - Decimal("5000.00")
             gap = min(gap, spare)
             if gap >= Decimal("100.00"):
                 intents.append((at(9, 30), "move", {
-                    "account": "alipay", "when": at(9, 30), "src": "理财",
+                    "account": "alipay", "src": "理财",
                     "dst": "余额宝", "amount": gap, "item": "理财产品赎回",
                     "counterparty": D.ALIPAY_WEALTH, "pay_method": "",
                     "counterparty_account": "/",
@@ -787,7 +461,7 @@ class Ledger:
             gap = min(gap, spare)
             if gap >= Decimal("100.00"):
                 intents.append((at(9, 35), "move", {
-                    "account": "wechat", "when": at(9, 35), "src": "理财通",
+                    "account": "wechat", "src": "理财通",
                     "dst": "零钱通", "amount": gap, "item": "活期＋",
                     "counterparty": "理财通", "pay_method": "零钱通",
                     "platform_type": "理财通赎回", "status": "已到账",
@@ -797,7 +471,7 @@ class Ledger:
         if d.month in (3, 6, 9, 12) and d.day == 20 \
                 and self._product("wechat", "理财通") >= Decimal("1000.00"):
             intents.append((at(14, 0), "move", {
-                "account": "wechat", "when": at(14, 0), "src": "理财通",
+                "account": "wechat", "src": "理财通",
                 "dst": "零钱通", "amount": Decimal("1000.00"), "item": "活期＋",
                 "counterparty": "理财通", "pay_method": "零钱通",
                 "platform_type": "理财通赎回", "status": "已到账",
@@ -807,7 +481,7 @@ class Ledger:
         if d.day == 18 and self._product("wechat", "零钱") < Decimal("400.00") \
                 and self._product("wechat", "零钱通") > Decimal("1000.00"):
             intents.append((at(18, 0), "move", {
-                "account": "wechat", "when": at(18, 0), "src": "零钱通",
+                "account": "wechat", "src": "零钱通",
                 "dst": "零钱", "amount": Decimal("800.00"), "item": "/",
                 "counterparty": "/", "pay_method": "零钱通",
                 "platform_type": "零钱通转出-到零钱", "status": "资金已到账",
@@ -816,8 +490,9 @@ class Ledger:
 
         if d.month in (3, 6, 9, 12) and d.day == 22 \
                 and self._product("wechat", "零钱") >= Decimal("500.00"):
-            intents.append((at(16, 0), "wechat_withdraw", {
-                "when": at(16, 0), "amount": Decimal("500.00"),
+            intents.append((at(16, 0), "transfer", {
+                "src": "wechat", "dst": "salary", "source_funding": "零钱", "withdraw": True,
+                "amount": Decimal("500.00"), "item": "零钱提现", "counterparty": "招商银行储蓄卡(0371)",
             }))
 
     def _plan_funding(self, d: date, intents: list) -> None:
@@ -847,9 +522,9 @@ class Ledger:
         if d.month == 1 and d.day == 20:
             ts = at(10, 20)
             intents.append((ts, "income", {
-                "account": "salary", "when": ts, "amount": D.BONUS,
+                "account": "salary", "amount": D.BONUS,
                 "category": "收入", "counterparty": "启明科技有限公司",
-                "item": "年终奖金", "kind": "income",
+                "action": "bonus", "item": "年终奖金", "kind": "income",
             }))
 
         if d.month == 1 and d.day == 22:
@@ -860,17 +535,18 @@ class Ledger:
                 (money(self.rng.uniform(1500, 2500)), "春节礼品", "alipay", "文化休闲"),
             ):
                 intents.append((ts, "spend", {
-                    "when": ts, "amount": amount, "category": category,
+                    "amount": amount, "category": category,
                     "counterparty": "春节年货" if "年货" in item else
                                     ("亲友红包" if "红包" in item else "春节礼品"),
                     "item": item, "channel": channel,
                     "kind": "transfer" if "红包" in item else "purchase",
+                    "purpose": "gift" if "红包" in item else "",
                 }))
                 ts += timedelta(minutes=7)
 
         # 4 月调薪 5%，只影响之后的工资；年终奖仍按 3 个月基数发。
         if d.month == D.RAISE_MONTH and d.day == 10:
-            self.salary_amount = money(self.salary_amount * D.RAISE_RATE)
+            intents.append((datetime.combine(d, time(0, 1)), "raise", {}))
 
         if d.month == 4 and d.day == 15:
             ts = at(11, 20)
@@ -878,14 +554,14 @@ class Ledger:
                 "account": "salary", "when": ts,
                 "amount": money(self.rng.uniform(800, 2600)),
                 "category": "收入", "counterparty": "国家税务总局",
-                "item": "个税汇算退税", "kind": "income",
+                "action": "tax_refund", "item": "个税汇算退税", "kind": "income",
             }))
 
         # 半年：4/10 月车辆保养
         if d.month in (4, 10) and d.day == 15:
             ts = at(14, 10)
             intents.append((ts, "spend", {
-                "when": ts, "amount": money(self.rng.uniform(1200, 2000)),
+                "amount": money(self.rng.uniform(1200, 2000)),
                 "category": "汽车", "counterparty": "广州鹏辉汽车服务",
                 "item": "车辆保养", "channel": "credit2",
             }))
@@ -894,16 +570,18 @@ class Ledger:
         if d.month == 6 and d.day == 18:
             ts = at(20, 0)
             intents.append((ts, "spend", {
-                "when": ts, "amount": money(self.rng.uniform(6000, 8000)),
+                "amount": money(self.rng.uniform(6000, 8000)),
                 "category": "服饰装扮", "counterparty": "天猫",
-                "item": "618 大促购物", "channel": "credit",
+                "item": "618 大促购物", "channel": "credit", "order_channel": "tmall",
+                "merchant": "岭南生活旗舰店",
             }))
         if d.month == 11 and d.day == 11:
             ts = at(20, 0)
             intents.append((ts, "spend", {
-                "when": ts, "amount": money(self.rng.uniform(8000, 11000)),
+                "amount": money(self.rng.uniform(8000, 11000)),
                 "category": "服饰装扮", "counterparty": "京东",
-                "item": "双 11 大促购物", "channel": "credit",
+                "item": "双 11 大促购物", "channel": "credit", "order_channel": "jd",
+                "merchant": "京东自营家居",
             }))
 
         # 年缴保险
@@ -911,41 +589,43 @@ class Ledger:
             if d.month == month and d.day == day:
                 ts = at(11, 0)
                 intents.append((ts, "spend", {
-                    "when": ts, "amount": amount, "category": "保险",
+                    "amount": amount, "category": "保险",
                     "counterparty": counterparty, "item": item,
-                    "channel": "credit",
+                    "channel": "credit", "purpose": "contract",
                 }))
 
         # ── 每季度 ────────────────────────────────────────────
         if d.month in (1, 4, 7, 10) and d.day == 5:
             ts = at(10, 20)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.PROPERTY_FEE, "category": "房租物业",
-                "counterparty": "锦园物业", "item": "物业费", "channel": "wallet_family",
+                "amount": D.PROPERTY_FEE, "category": "房租物业",
+                "counterparty": "锦园物业", "item": "物业费", "channel": "wallet_family", "purpose": "contract",
             }))
             ts += timedelta(minutes=5)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.PARKING_FEE, "category": "交通出行",
-                "counterparty": "锦园物业", "item": "停车位租金", "channel": "alipay",
+                "amount": D.PARKING_FEE, "category": "交通出行",
+                "counterparty": "锦园物业", "item": "停车位租金", "channel": "alipay", "purpose": "contract",
             }))
 
         if d.month in (1, 4, 7, 10) and d.day == 10:
             ts = at(13, 0)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.TUITION, "category": "教育培训",
-                "counterparty": "育才实验学校", "item": "学杂费",
+                "amount": D.TUITION, "category": "教育培训",
+                "counterparty": "育才实验学校", "item": "学杂费", "purpose": "contract",
                 "channel": "salary", "kind": "transfer",
             }))
 
         # ── 每月 ──────────────────────────────────────────────
-        if d.day == 5:
-            # 主卡账单日；当天及之后的消费进下期账单。
-            self.bills["credit"] = self.credit_used_by["credit"]
+        for credit, (statement, due) in D.CREDIT_CYCLE.items():
+            if d.day == statement:
+                intents.append((datetime.combine(d, time(0, 0)), "statement", {"credit": credit}))
+            if d.day == due:
+                intents.append((at(20, 30), "repay", {"credit": credit}))
 
         if d.day == 8:
             ts = at(9, 0)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.CAR_LOAN,
+                "amount": D.CAR_LOAN,
                 "category": "交通出行", "counterparty": "招商银行汽车金融",
                 "item": "汽车贷款月供", "channel": "salary", "kind": "transfer",
             }))
@@ -959,16 +639,16 @@ class Ledger:
             }))
             ts = at(10, 5)
             intents.append((ts, "income", {
-                "account": "salary", "when": ts, "amount": self.salary_amount,
+                "account": "salary", "amount": D.SALARY,
                 "category": "收入", "counterparty": "启明科技有限公司",
-                "item": "工资", "kind": "income",
+                "action": "salary", "item": "工资", "kind": "income",
             }))
             # 配偶每月转入家庭小荷包，体现共同承担。
             ts = at(10, 40)
             intents.append((ts, "income", {
-                "account": "wallet_family", "when": ts, "amount": D.SPOUSE_TRANSFER,
+                "account": "wallet_family", "amount": D.SPOUSE_TRANSFER,
                 "category": "转账红包", "counterparty": "林知夏",
-                "item": "转入小荷包", "kind": "transfer",
+                "action": "contribution", "item": "转入小荷包", "kind": "transfer",
             }))
             # 发薪后向钱包、生活缴费卡分散。
             ts = at(12, 30)
@@ -988,8 +668,6 @@ class Ledger:
                     "item": "转入小荷包", "counterparty": D.ACCOUNTS[dst].name,
                 }))
                 ts += timedelta(seconds=40)
-            # 广发卡账单日。
-            self.bills["credit2"] = self.credit_used_by["credit2"]
 
         if d.day == 11:
             # 家庭小荷包承担一部分日常开销，月初把预算转回支付平台。
@@ -1005,19 +683,19 @@ class Ledger:
         if d.day == 12:
             ts = at(9, 0)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.CONSUMER_LOAN_MONTHLY,
+                "amount": D.CONSUMER_LOAN_MONTHLY,
                 "category": "投资理财", "counterparty": "招联消费金融",
                 "item": "消费贷分期扣款", "channel": "salary", "kind": "transfer",
             }))
             ts += timedelta(minutes=2)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.CREDIT_LOAN_MONTHLY,
+                "amount": D.CREDIT_LOAN_MONTHLY,
                 "category": "投资理财", "counterparty": "招商银行",
                 "item": "信用贷分期扣款", "channel": "salary", "kind": "transfer",
             }))
             ts += timedelta(minutes=2)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.CREDIT_INSTALLMENT_MONTHLY,
+                "amount": D.CREDIT_INSTALLMENT_MONTHLY,
                 "category": "投资理财", "counterparty": "招商银行信用卡",
                 "item": "信用卡分期还款", "channel": "credit", "kind": "transfer",
             }))
@@ -1025,7 +703,7 @@ class Ledger:
         if d.day == 15:
             ts = at(9, 30)
             intents.append((ts, "spend", {
-                "when": ts, "amount": D.MORTGAGE, "category": "房租物业",
+                "amount": D.MORTGAGE, "category": "房租物业",
                 "counterparty": "中国工商银行", "item": "个人住房贷款还款",
                 "channel": "mortgage_card", "kind": "transfer",
             }))
@@ -1037,40 +715,19 @@ class Ledger:
                 ("中国电信", "宽带及话费", 220, 320),
             ):
                 intents.append((ts, "spend", {
-                    "when": ts, "amount": money(self.rng.uniform(low, high)),
-                    "category": "生活缴费", "counterparty": counterparty,
+                    "amount": money(self.rng.uniform(low, high)),
+                    "category": "生活缴费", "counterparty": counterparty, "purpose": "contract",
                     "item": item, "channel": "living_card",
                 }))
                 ts += timedelta(seconds=35)
-
-        if d.day == 23 and self.bills["credit"] > 0:
-            amount = min(self.bills["credit"], self.credit_used_by["credit"])
-            # 工资卡不够就保留账单，下期继续还；不能把未还账单抹掉。
-            if amount > 0 and self.bal["salary"] >= amount:
-                ts = at(20, 40)
-                intents.append((ts, "transfer", {
-                    "src": "salary", "dst": "credit", "amount": amount,
-                    "item": "信用卡还款", "counterparty": "招商银行信用卡",
-                }))
-                self.bills["credit"] = Decimal("0.00")
-
-        if d.day == 28 and self.bills["credit2"] > 0:
-            amount = min(self.bills["credit2"], self.credit_used_by["credit2"])
-            if amount > 0 and self.bal["salary"] >= amount:
-                ts = at(20, 30)
-                intents.append((ts, "transfer", {
-                    "src": "salary", "dst": "credit2", "amount": amount,
-                    "item": "信用卡还款", "counterparty": "广发银行信用卡",
-                }))
-                self.bills["credit2"] = Decimal("0.00")
 
         # 订阅：每月 1—4 号各扣一笔
         if d.day <= len(D.SUBSCRIPTIONS):
             name, item, amount = D.SUBSCRIPTIONS[d.day - 1]
             ts = at(12, 10)
             intents.append((ts, "spend", {
-                "when": ts, "amount": amount, "category": "文化休闲",
-                "counterparty": name, "item": item, "channel": "alipay",
+                "amount": amount, "category": "文化休闲",
+                "counterparty": name, "item": item, "channel": "alipay", "purpose": "contract",
             }))
 
     def _plan_travel(self, d: date, intents: list) -> None:
@@ -1086,24 +743,24 @@ class Ledger:
                     "item": "转入小荷包", "counterparty": "小荷包·旅行基金",
                 }))
                 intents.append((at(9), "spend", {
-                    "when": at(9), "amount": money(self.rng.uniform(480, 620) * 2),
+                    "amount": money(self.rng.uniform(480, 620) * 2),
                     "category": "交通出行", "counterparty": "中国铁路",
-                    "item": f"高铁票-{city}", "channel": "credit2",
+                    "item": f"高铁票-{city}", "channel": "credit2", "purpose": "travel",
                 }))
             intents.append((at(12), "spend", {
-                "when": at(12), "amount": money(self.rng.uniform(380, 860)),
+                "amount": money(self.rng.uniform(380, 860)),
                 "category": "文化休闲", "counterparty": f"{city}栖迟酒店",
-                "item": "酒店住宿", "channel": "credit2",
+                "item": "酒店住宿", "channel": "credit2", "purpose": "travel",
             }))
             intents.append((at(13), "spend", {
-                "when": at(13), "amount": money(self.rng.uniform(80, 260)),
+                "amount": money(self.rng.uniform(80, 260)),
                 "category": "餐饮美食", "counterparty": f"{city}老街小馆",
-                "item": "旅游餐饮", "channel": "wallet_travel",
+                "item": "旅游餐饮", "channel": "wallet_travel", "purpose": "travel",
             }))
             intents.append((at(15), "spend", {
-                "when": at(15), "amount": money(self.rng.uniform(60, 320)),
+                "amount": money(self.rng.uniform(60, 320)),
                 "category": "文化休闲", "counterparty": f"{city}景区",
-                "item": "景点门票", "channel": "alipay",
+                "item": "景点门票", "channel": "alipay", "purpose": "travel",
             }))
 
     def _plan_daily(self, d: date, intents: list) -> None:
@@ -1131,7 +788,7 @@ class Ledger:
                     and amount >= 15:
                 amount *= season
             intents.append((t, "spend", {
-                "when": t, "amount": money(amount), "category": category,
+                "amount": money(amount), "category": category,
                 "counterparty": counterparty, "item": item, **kw,
             }))
 
@@ -1204,236 +861,31 @@ class Ledger:
                   pick(D.HAIRCUT), pick(D.HAIRCUT_ITEMS))
         if maybe(0.1):
             spend(12, 21, rng.uniform(50, 520), "转账红包", pick(D.WECHAT_FRIENDS),
-                  "转账备注:微信转账", kind="transfer")
+                  "转账备注:微信转账", kind="transfer", purpose="gift")
         if maybe(0.1):
-            self._maybe_refund(d, intents, at)
+            intents.append((at(9, 21), "refund", {}))
 
         if maybe(0.04):
             t = at(10, 22)
             intents.append((t, "closed", {
-                "when": t, "account": "alipay", "amount": money(rng.uniform(20, 300)),
+                "account": "alipay", "amount": money(rng.uniform(20, 300)),
                 "category": "服饰装扮", "counterparty": "淘宝", "item": "订单已取消",
                 "order_channel": "taobao",
             }))
 
-    def _maybe_refund(self, d: date, intents: list, at) -> None:
-        start = datetime.combine(d - timedelta(days=6), time(0, 0))
-        stop = datetime.combine(d, time(23, 59))
-        candidates = [p for p in self.postings
-                      if p.kind == "purchase" and p.account in {"alipay", "wechat"}
-                      and p.effect != "none" and start <= p.when <= stop]
-        if not candidates:
-            return
-        orig = self.rng.choice(candidates)
-        when = at(9, 21)
-        intents.append((when, "income", {
-            "account": orig.account, "when": when, "amount": orig.amount,
-            "category": orig.category, "counterparty": orig.counterparty,
-            "item": f"退款-{orig.item}", "kind": "refund",
-            "pay_method": orig.pay_method, "status": "退款成功",
-        }))
-
-
-class Investments:
-    """基金 / 券商 / 银行理财。只生成投资平台自己的流水与月末资产快照。"""
-
-    def __init__(self, rng: random.Random, start: date, end: date):
-        self.rng = rng
-        self.start = start
-        self.end = end
-        self.funds = []
-        per = money(Decimal("86000") / len(D.FUNDS))
-        for code, name in D.FUNDS:
-            nav = money(rng.uniform(1.2, 3.6))
-            shares = money(per / nav)
-            self.funds.append({
-                "code": code, "name": name, "nav": nav, "shares": shares,
-                "cost": money(shares * nav), "bias": rng.uniform(-0.004, 0.006),
-            })
-        self.fund_principal = Decimal("86000.00")
-
-        # 券商账户共 5.4 万：先用其中约 4.2 万建仓，剩约 1.2 万现金。
-        # 持仓集中在三只低价股，保证每次 100 股整数倍的买卖都买得起。
-        self.broker_cash = Decimal("54000.00")
-        self.positions = {}
-        for code, name, base in D.BROKER_STOCKS:
-            price = money(base * Decimal(str(rng.uniform(0.97, 1.03))))
-            self.positions[code] = {"name": name, "qty": Decimal("0"),
-                                    "cost": Decimal("0.00"), "price": price}
-        for code in sorted(self.positions,
-                           key=lambda c: self.positions[c]["price"])[:3]:
-            pos = self.positions[code]
-            qty = Decimal(int(Decimal("14000") / pos["price"] // 100) * 100)
-            if qty <= 0:
-                continue
-            pos["qty"] = qty
-            pos["cost"] = money(qty * pos["price"])
-            self.broker_cash -= pos["cost"]
-        self.broker_principal = Decimal("54000.00")
-
-        self.wealth = Decimal("120000.00")
-        self.wealth_principal = Decimal("120000.00")
-        self.fund_rows: list[dict] = []
-        self.broker_rows: list[dict] = []
-        self.wealth_rows: list[dict] = []
-        self.snapshots: list[dict] = []
-        self._last_month: date | None = None
-
-    def step(self, d: date, ledger: Ledger) -> None:
-        for f in self.funds:
-            drift = f["bias"] / 30 + self.rng.gauss(0, 0.006)
-            f["nav"] = max(Decimal("0.5"), money(f["nav"] * Decimal(str(1 + drift))))
-        for pos in self.positions.values():
-            drift = self.rng.gauss(0.0002, 0.015)
-            pos["price"] = max(Decimal("1"), money(pos["price"] * Decimal(str(1 + drift))))
-
-        if d.day == 15:
-            self._sip(d, ledger)
-        if d.month in (3, 6, 9, 12) and d.day == 25:
-            self._redeem(d, ledger)
-        if d.day in (4, 11, 18, 24) and self.rng.random() < 0.8:
-            self._trade(d)
-
-        if d.day == 1:
-            if self._last_month is not None:
-                self._wealth_interest(self._last_month, d)
-            self._last_month = d
-
-        if d == _month_end(d) or d == self.end:
-            self._snapshot(d)
-
-    def _sip(self, d: date, ledger: Ledger) -> None:
-        amount = D.FUND_SIP
-        when = datetime.combine(d, time(9, 40))
-        if not ledger.spend("salary", when, amount, "投资理财", "天天基金",
-                            "基金定投扣款", channel="salary", kind="investment"):
-            return
-        picks = self.rng.sample(self.funds, 2)
-        left = amount
-        for i, f in enumerate(picks):
-            part = left if i == len(picks) - 1 else money(amount / 2)
-            left -= part
-            fee = money(part * Decimal("0.0015"))
-            shares = money((part - fee) / f["nav"])
-            f["shares"] += shares
-            f["cost"] += part
-            self.fund_principal += part
-            self.fund_rows.append({
-                "date": d.isoformat(), "code": f["code"], "name": f["name"],
-                "business": "申购确认", "amount": part, "shares": shares,
-                "nav": f["nav"], "fee": fee,
-            })
-
-    def _redeem(self, d: date, ledger: Ledger) -> None:
-        amount = Decimal("1500.00")
-        f = max(self.funds, key=lambda x: x["shares"] * x["nav"])
-        if f["shares"] * f["nav"] < amount:
-            return
-        fee = money(amount * Decimal("0.005"))
-        net = money(amount - fee)
-        shares = money(net / f["nav"])
-        avg_cost = f["cost"] / f["shares"] if f["shares"] else Decimal("0")
-        f["shares"] -= shares
-        f["cost"] = max(Decimal("0.00"), f["cost"] - money(avg_cost * shares))
-        when = datetime.combine(d, time(14, 30))
-        if not ledger.income("salary", when, net, "投资理财", "天天基金",
-                             "基金赎回款", kind="investment"):
-            return
-        self.fund_principal = max(Decimal("0.00"), self.fund_principal - amount)
-        self.fund_rows.append({
-            "date": d.isoformat(), "code": f["code"], "name": f["name"],
-            "business": "赎回确认", "amount": amount, "shares": shares,
-            "nav": f["nav"], "fee": fee,
-        })
-
-    def _trade(self, d: date) -> None:
-        code = self.rng.choice(list(self.positions))
-        pos = self.positions[code]
-        price = max(Decimal("1"), money(pos["price"] * Decimal(str(1 + self.rng.gauss(0, 0.01)))))
-        pos["price"] = price
-
-        # 每笔 3000~15000 元，按 100 股整数倍取整；买不起就跳过。
-        target = money(self.rng.uniform(3000, 15000))
-        lots = int(target / price // 100)
-        side = "买入" if self.rng.random() < 0.6 else "卖出"
-
-        if side == "买入":
-            lots = min(lots, int(self.broker_cash // (price * 100)))
-            if lots <= 0:
-                return
-            qty = Decimal(lots * 100)
-            gross = money(qty * price)
-            fee = money(max(Decimal("5"), gross * Decimal("0.00025")))
-            if gross + fee > self.broker_cash:
-                return
-            self.broker_cash -= gross + fee
-            pos["qty"] += qty
-            pos["cost"] += gross + fee
-            pnl = None
-        else:
-            lots = min(lots, int(pos["qty"] // 100))
-            if lots <= 0:
-                return
-            qty = Decimal(lots * 100)
-            gross = money(qty * price)
-            stamp = money(gross * Decimal("0.0005"))
-            fee = money(max(Decimal("5"), gross * Decimal("0.00025")) + stamp)
-            avg = pos["cost"] / pos["qty"] if pos["qty"] else Decimal("0")
-            pos["qty"] -= qty
-            pos["cost"] = max(Decimal("0.00"), pos["cost"] - money(avg * qty))
-            self.broker_cash += gross - fee
-            pnl = money(gross - fee - avg * qty)
-        self.broker_rows.append({
-            "date": d.isoformat(), "code": code, "name": pos["name"], "side": side,
-            "qty": int(qty), "price": price, "amount": gross, "fee": fee,
-            "pnl": "" if pnl is None else _fmt(pnl),
-        })
-
-    def _wealth_interest(self, month_first: date, today: date) -> None:
-        interest = money(self.wealth * Decimal("0.0026"))
-        self.wealth += interest
-        self.wealth_rows.append({
-            "date": today.isoformat(), "amount": interest,
-            "balance": self.wealth, "note": "理财收益",
-        })
-
-    def fund_value(self) -> Decimal:
-        return money(sum((f["shares"] * f["nav"] for f in self.funds), Decimal("0")))
-
-    def broker_value(self) -> Decimal:
-        return money(self.broker_cash + sum(
-            (p["qty"] * p["price"] for p in self.positions.values()), Decimal("0")))
-
-    def _snapshot(self, d: date) -> None:
-        for f in self.funds:
-            value = money(f["shares"] * f["nav"])
-            pnl = money(value - f["cost"])
-            pct = (pnl / f["cost"] * 100) if f["cost"] else Decimal("0")
-            self.snapshots.append({
-                "date": d.isoformat(), "account": "基金", "name": f["name"],
-                "market_value": value, "cost": money(f["cost"]),
-                "pnl": pnl, "pnl_pct": pct.quantize(Decimal("0.01")),
-            })
-        # 券商快照按账户总资产（现金 + 持仓市值）算，成本就是初始投入，期间无出入金。
-        value = self.broker_value()
-        cost = self.broker_principal
-        self.snapshots.append({
-            "date": d.isoformat(), "account": "证券", "name": "华泰证券账户",
-            "market_value": value, "cost": cost,
-            "pnl": money(value - cost),
-            "pnl_pct": ((value - cost) / cost * 100).quantize(Decimal("0.01")),
-        })
-        self.snapshots.append({
-            "date": d.isoformat(), "account": "理财", "name": "招行理财",
-            "market_value": money(self.wealth), "cost": money(self.wealth_principal),
-            "pnl": money(self.wealth - self.wealth_principal),
-            "pnl_pct": ((self.wealth - self.wealth_principal) / self.wealth_principal * 100)
-            .quantize(Decimal("0.01")),
-        })
+    def _refund_action(self, when):
+        start = when - timedelta(days=7)
+        candidates = [e for e, _, _ in self.sales.values()
+                      if start <= e.at < when and self.refunded.get(e.id, ZERO) < e.amount]
+        if candidates:
+            sale = self.rng.choice(candidates)
+            self.refund(when, sale.id, sale.amount - self.refunded.get(sale.id, ZERO))
 
 
 def generate(seed: int = 20261126, start: date | None = None,
              months: int = 12) -> Dataset:
+    if months < 1:
+        raise ValueError("months must be positive")
     start = start or date(2026, 1, 1)
     # 结束日 = start + months 个月 - 1 天
     y, m = divmod(start.month - 1 + months, 12)

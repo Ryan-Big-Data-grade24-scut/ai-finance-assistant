@@ -11,8 +11,8 @@
 用法（仓库根目录）::
 
     python -m scripts.synth.backend_ledger \
-        --dataset ../.runtime/synthetic/20261126 \
-        --out ../.runtime/synthetic/20261126/backend
+        --dataset ../synthetic-data/20261126-v3 \
+        --out ../synthetic-data/20261126-v3/backend
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import csv
 import json
 import sqlite3
 from collections import Counter, defaultdict
+from decimal import Decimal
 from pathlib import Path
 
 from backend import db
@@ -42,7 +43,7 @@ IMPORT_GLOBS = (
     ("支付宝小荷包", "*.xlsx"),
 )
 
-NEUTRAL_ROLES = {"mirror", "settlement", "asset_move", "refund", "closed", "external_inflow"}
+NEUTRAL_ROLES = {"mirror", "settlement", "asset_move", "refund", "closed", "external_inflow", "tax_refund"}
 NEUTRAL_REASON = {
     "mirror": "镜像行：同一笔消费已在主流水记账，避免重复",
     "settlement": "账户间划转/还款，不计收支",
@@ -50,6 +51,7 @@ NEUTRAL_REASON = {
     "refund": "退款冲减，不计收入",
     "closed": "关闭/取消订单，不计支出",
     "external_inflow": "家庭外部转入，不计个人收入",
+    "tax_refund": "历史预扣的税款退回，不计本期新增所得",
 }
 
 
@@ -278,13 +280,13 @@ def _mismatch(conn: sqlite3.Connection, truth_csv: Path) -> dict:
     for row in _truth_rows(truth_csv):
         truth[row["tx_no"]] = row
     classified = wrong = 0
-    for row in conn.execute(
-        "SELECT t.tx_no, COALESCE(NULLIF(TRIM(o.manual_category), ''), "
-        "NULLIF(TRIM(t.tx_type), ''), '其他') AS category "
-        "FROM transactions_raw t LEFT JOIN tx_overrides o ON o.tx_id=t.id"
-    ):
+    for row in conn.execute("SELECT tx_no FROM transactions_raw"):
         gt = truth.get(row["tx_no"])
-        if gt is None:
+        if gt is None or gt["kind"] != "purchase" or gt["flow_role"] == "mirror":
+            continue
+        if gt["account"] not in {"alipay", "wechat"} or not gt["platform_category"]:
+            continue
+        if gt["account"] == "wechat" and gt["platform_category"] not in {"商户消费", "扫二维码付款"}:
             continue
         classified += 1
         if gt["platform_mismatch"] == "1":
@@ -296,13 +298,53 @@ def _mismatch(conn: sqlite3.Connection, truth_csv: Path) -> dict:
     }
 
 
+def _refund_coverage(conn: sqlite3.Connection, truth_csv: Path) -> dict:
+    """独立对账报告，不把净额冒充 Ledger2 原生统计。"""
+    imported = {row["tx_no"]: Decimal(str(row["amount"])) for row in conn.execute(
+        "SELECT tx_no, amount FROM transactions_raw")}
+    gross, paired, original_only, refund_only = (Counter() for _ in range(4))
+    counts = Counter()
+    rows = _truth_rows(truth_csv)
+    originals = {}
+    classes = ("义务支出", "刚性支出", "弹性支出")
+    for row in rows:
+        amount = Decimal(row["amount"])
+        tx = row["tx_no"]
+        if tx in imported and imported[tx] != amount:
+            raise AssertionError(f"导入金额与答案不同：{tx}")
+        if row["flow_role"] == "primary" and row["expense_class"] in classes:
+            originals[row["event_id"]] = tx
+            if tx in imported:
+                gross[row["expense_class"]] += amount
+    for row in rows:
+        if row["flow_role"] != "refund":
+            continue
+        has_original = originals[row["original_event"]] in imported
+        has_refund = row["tx_no"] in imported
+        bucket = {(True, True): "paired", (True, False): "original_only",
+                  (False, True): "refund_only", (False, False): "neither"}[has_original, has_refund]
+        counts[bucket] += 1
+        totals = {"paired": paired, "original_only": original_only, "refund_only": refund_only}.get(bucket)
+        if totals is not None:
+            totals[row["original_class"]] += Decimal(row["amount"])
+    return {
+        "method": "按已入库主流水对账；净额仅冲减两边均入库的退款，不是全账净额或 Ledger2 原生净额",
+        "refund_relation_counts": {k: counts[k] for k in ("paired", "original_only", "refund_only", "neither")},
+        "by_class": {
+            cls: {key: f"{amount:.2f}" for key, amount in (
+                ("gross", gross[cls]), ("paired_refunds", paired[cls]),
+                ("original_only_refunds_not_imported", original_only[cls]),
+                ("refund_only_not_netted", refund_only[cls]), ("net_of_paired", gross[cls] - paired[cls]),
+            )} for cls in classes
+        },
+    }
+
+
 def _build(dataset: Path, out_dir: Path, name: str,
            truth_csv: Path | None, mismatch_csv: Path | None = None) -> dict:
     db_path = _guard(out_dir / f"{name}.db")
-    for suffix in ("", "-wal", "-shm"):
-        candidate = Path(str(db_path) + suffix)
-        if candidate.exists():
-            candidate.unlink()
+    if any(Path(str(db_path) + suffix).exists() for suffix in ("", "-wal", "-shm")):
+        raise FileExistsError(f"拒绝覆盖已有数据库：{db_path}")
     db.init_db(db_path)
     conn = db.get_conn(db_path)
     try:
@@ -321,6 +363,7 @@ def _build(dataset: Path, out_dir: Path, name: str,
             "truth": truth_info,
             "ledger": _tree_report(conn, hierarchical=truth_csv is not None),
             "platform_mismatch": _mismatch(conn, mismatch_csv) if mismatch_csv else None,
+            "refund_coverage": _refund_coverage(conn, truth_csv) if truth_csv else None,
         }
     finally:
         conn.close()
@@ -330,17 +373,34 @@ def build_report(dataset: Path, out_dir: Path,
                  truth_csv: Path | None = None) -> dict:
     dataset = Path(dataset).resolve()
     out_dir = Path(out_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
     _guard(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if any(out_dir.iterdir()):
+        raise FileExistsError(f"后端输出目录非空：{out_dir}")
     truth_csv = Path(truth_csv) if truth_csv else (
         dataset / "ground_truth" / "ground_truth_postings.csv"
     )
     if not truth_csv.is_file():
         raise FileNotFoundError(f"找不到答案层：{truth_csv}")
 
+    supported = {path.relative_to(dataset).as_posix() for path in _source_files(dataset)}
+    source = json.loads((dataset / "reconciliation.json").read_text(encoding="utf-8"))
+    if not source["ok"]:
+        raise AssertionError("原始文件未通过对账")
+    coverage = {
+        "supported_files": sorted(supported),
+        "unsupported_files": sorted(row["file"] for row in source["rows"] if row["file"] not in supported),
+        "source_rows": source["export_rows"],
+        "supported_source_rows": sum(row["export_rows"] for row in source["rows"] if row["file"] in supported),
+    }
     noisy = _build(dataset, out_dir, "noisy", None, mismatch_csv=truth_csv)
     truth = _build(dataset, out_dir, "truth", truth_csv)
-    report = {"dataset": str(dataset), "noisy": noisy, "truth": truth}
+    for book in (noisy, truth):
+        if any(row["failed"] or row["skipped"] for row in book["imports"]):
+            raise AssertionError("隔离导入有失败或重复行")
+    if truth["truth"]["unmapped_imported"]:
+        raise AssertionError("存在未映射到答案的导入行")
+    report = {"dataset": str(dataset), "coverage": coverage, "noisy": noisy, "truth": truth}
     (out_dir / "ledger_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )

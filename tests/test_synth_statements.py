@@ -127,17 +127,20 @@ def test_platform_internal_products_are_visible(dataset):
 
 
 def test_cross_account_transfers_are_paired(dataset):
+    events = dataset.journal.by_id
     groups: dict[str, list] = defaultdict(list)
     for p in dataset.postings:
-        if p.kind == "transfer" and len(p.merchant_no) == 10:
-            groups[p.merchant_no].append(p)
+        if events[p.event_id].business.kind == "settlement" and not events[p.event_id].credit:
+            groups[p.event_id].append(p)
     assert groups
-    for pair_id, rows in groups.items():
-        assert len(rows) == 2, (pair_id, [r.account for r in rows])
-        left, right = rows
-        assert left.amount == right.amount
-        assert abs((left.when - right.when).total_seconds()) <= 60
-        assert left.account != right.account
+    for event_id, rows in groups.items():
+        outgoing, incoming = sorted(rows, key=lambda p: p.when)
+        assert (outgoing.effect, incoming.effect) == ("out", "in")
+        assert outgoing.amount == incoming.amount == events[event_id].amount
+        assert 0 < (incoming.when - outgoing.when).total_seconds() <= 60
+        assert outgoing.account != incoming.account
+        assert outgoing.tx_no != incoming.tx_no
+        assert not outgoing.merchant_no and not incoming.merchant_no
 
 
 def test_salary_bonus_and_fixed_obligations(dataset):
@@ -225,15 +228,16 @@ def test_wechat_columns_and_yield_detail(tmp_path: Path, dataset):
 
 def test_verified_formats_roundtrip_through_importer(tmp_path: Path, isolated_db: Path):
     ds = generate(seed=20261126, months=12)
-    write_all(ds, tmp_path)
+    dataset_dir = tmp_path / "synth"
+    write_all(ds, dataset_dir)
 
     cases = [
-        ("alipay", tmp_path / "支付宝" / "支付宝交易明细(20260101-20261231).csv"),
-        ("wechat", tmp_path / "微信" / "微信支付账单(20260101-20261231).xlsx"),
-        ("wallet_family", tmp_path / "支付宝小荷包" / "小荷包收支明细_家庭开销.xlsx"),
-        ("wallet_travel", tmp_path / "支付宝小荷包" / "小荷包收支明细_旅行基金.xlsx"),
-        ("wallet_auto", tmp_path / "支付宝小荷包" / "小荷包收支明细_自动攒.xlsx"),
-        ("wallet_education", tmp_path / "支付宝小荷包" / "小荷包收支明细_教育金.xlsx"),
+        ("alipay", dataset_dir / "支付宝" / "支付宝交易明细(20260101-20261231).csv"),
+        ("wechat", dataset_dir / "微信" / "微信支付账单(20260101-20261231).xlsx"),
+        ("wallet_family", dataset_dir / "支付宝小荷包" / "小荷包收支明细_家庭开销.xlsx"),
+        ("wallet_travel", dataset_dir / "支付宝小荷包" / "小荷包收支明细_旅行基金.xlsx"),
+        ("wallet_auto", dataset_dir / "支付宝小荷包" / "小荷包收支明细_自动攒.xlsx"),
+        ("wallet_education", dataset_dir / "支付宝小荷包" / "小荷包收支明细_教育金.xlsx"),
     ]
     total_parsed = 0
     for account, path in cases:
@@ -328,8 +332,11 @@ def test_mirror_rows_link_back_and_do_not_double_count(dataset):
                    and p.expense_class in {"义务支出", "刚性支出", "弹性支出"}),
                   Decimal("0"))
     assert row["income"] == income
+    refunds = sum((p.amount for p in dataset.postings if p.flow_role == "refund"), Decimal("0"))
     assert row["outflow"] == outflow
-    assert row["net"] == income - outflow
+    assert row["refunds"] == refunds > 0
+    assert row["net_outflow"] == outflow - refunds
+    assert row["net"] == income - outflow + refunds
 
 
 def test_ground_truth_reconstructs_every_export_row(tmp_path: Path, dataset):
@@ -360,12 +367,25 @@ def test_answer_document_is_a_plain_language_ledger(tmp_path: Path, dataset):
     periods = (tmp_path / "ground_truth" / "ground_truth_periods.csv").read_text(
         encoding="utf-8-sig")
     header, *lines = periods.splitlines()
-    assert header == "granularity,period,income,obligation,rigid,flexible,outflow,net"
+    assert header == ",".join(["granularity", "period", *truth.PERIOD_TOTALS])
     assert sum(1 for ln in lines if ln.startswith("day,")) == 365
     assert sum(1 for ln in lines if ln.startswith("month,")) == 12
     assert sum(1 for ln in lines if ln.startswith("quarter,")) == 4
     assert sum(1 for ln in lines if ln.startswith("half,")) == 2
     assert sum(1 for ln in lines if ln.startswith("year,")) == 1
+    rows = list(csv.DictReader(io.StringIO(periods)))
+    groups = {kind: {r["period"]: r for r in rows if r["granularity"] == kind}
+              for kind in ("day", "month", "quarter", "half", "year")}
+    month_for = lambda r: r["period"][:7]
+    quarter_for = lambda r: f"2026-Q{(int(r['period'][5:7]) - 1) // 3 + 1}"
+    half_for = lambda r: f"2026-H{1 if r['period'][-1] in '12' else 2}"
+    for children, parents, key_of in (("day", "month", month_for), ("month", "quarter", quarter_for),
+                                      ("quarter", "half", half_for), ("half", "year", lambda r: "2026")):
+        for key, parent in groups[parents].items():
+            picked = [r for r in groups[children].values() if key_of(r) == key]
+            assert picked
+            for col in truth.PERIOD_TOTALS:
+                assert sum(Decimal(r[col]) for r in picked) == Decimal(parent[col]), (children, key, col)
 
 
 def test_no_unmasked_personal_identifiers(tmp_path: Path, dataset):
