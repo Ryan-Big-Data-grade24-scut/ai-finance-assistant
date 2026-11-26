@@ -6,6 +6,7 @@ export interface ImportPreviewResp {
   platform_name: string
   confidence: number
   total: number
+  failed?: number
   by_status: Record<string, number>
   by_direction: Record<string, number>
   date_from: string

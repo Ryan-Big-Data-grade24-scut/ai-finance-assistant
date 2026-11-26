@@ -8,6 +8,7 @@ Known bugs are marked xfail so the suite is usable before the fixes land.
 """
 from __future__ import annotations
 
+import csv
 import inspect
 import zipfile
 from pathlib import Path
@@ -64,6 +65,60 @@ def count_rows() -> int:
         return conn.execute('SELECT COUNT(*) FROM transactions_raw').fetchone()[0]
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize('extension', ['xlsx', 'csv'])
+def test_payment_export_blocks_invalid_rows_and_duplicate_groups(isolated_db: Path, extension: str):
+    file = isolated_db / ('确定性异常样例.' + extension)
+    header = ['交易时间', '交易类型' if extension == 'xlsx' else '交易分类',
+              '收/支', '金额(元)', '当前状态' if extension == 'xlsx' else '交易状态',
+              '交易单号' if extension == 'xlsx' else '交易订单号']
+    normal = ['2024-09-12 10:00:00', '餐饮', '支出', '18.50', '交易成功', 'mock-001']
+    altered = {
+        0: ('2099-01-01 00:00:00', '2024-10-01 00:00:00', None, '2024-09-31 00:00:00'),
+        1: ('',),
+        2: ('', '未知'),
+        3: ('-1.00', '18.12345', 'NaN'),
+        4: ('', '???'),
+        5: ('', '@@!#'),
+    }
+    invalid = []
+    for col, values in altered.items():
+        for value in values:
+            row = [*normal[:-1], f'mock-invalid-{len(invalid)}']
+            row[col] = value
+            invalid.append(row)
+    duplicate = [*normal[:-1], 'mock-duplicate']
+    conflict = [*normal[:-1], 'mock-conflict']
+    changed = conflict.copy()
+    changed[3] = '19.00'
+    invalid.extend([duplicate, duplicate, conflict, changed])
+    rows = [
+        ['微信支付账单明细' if extension == 'xlsx' else '支付宝交易记录明细查询'],
+        ['起始时间：[2024-09-01 00:00:00] 终止时间：[2024-09-30 23:59:59]'],
+        header, normal, *invalid,
+    ]
+    if extension == 'xlsx':
+        workbook = openpyxl.Workbook()
+        for row in rows:
+            workbook.active.append(row)
+        workbook.save(file)
+        workbook.close()
+    else:
+        with file.open('w', encoding='utf-8-sig', newline='') as stream:
+            csv.writer(stream).writerows(rows)
+    with TestClient(app) as client:
+        files = {'file': (file.name, file.read_bytes())}
+        preview = client.post('/api/import/preview', files=files)
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert (body['total'], body['failed']) == (1, len(invalid))
+        assert [int(entry.split()[1]) for entry in body['warnings']] == list(range(5, 5 + len(invalid)))
+        assert any('重复且记录冲突' in entry for entry in body['warnings'])
+        assert any('金额精度' in entry for entry in body['warnings'])
+        commit = client.post('/api/import/commit', files=files).json()
+        assert (commit['inserted'], commit['failed'], commit['skipped']) == (1, len(invalid), 0)
+        assert count_rows() == 1
 
 
 def test_wechat_insert_and_drop_closed(isolated_db: Path):

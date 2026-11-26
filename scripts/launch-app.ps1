@@ -8,13 +8,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/app-processes.ps1"
 
 function Start-AppProcess([string]$Name, [string]$Executable, [string[]]$Arguments, [string]$Directory) {
-    $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WorkingDirectory $Directory `
-        -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtimeDir "$Name.log") `
-        -RedirectStandardError (Join-Path $runtimeDir "$Name-error.log")
-    $record = @{ id = $process.Id; started = $process.StartTime.ToFileTimeUtc() }
-    $started[$Name] = $record
-    $record | ConvertTo-Json | Set-Content -LiteralPath (Get-RecordPath $Name) -Encoding UTF8
-    return $process
+    return $job.Start($Executable, $Arguments, $Directory,
+        (Join-Path $runtimeDir "$Name.log"), (Join-Path $runtimeDir "$Name-error.log"))
 }
 
 function Get-AppListeners([int]$Port) {
@@ -39,15 +34,7 @@ function Wait-App([string]$Name, [int]$Port, [string]$Path, $Process) {
         }
         if ($response.StatusCode -eq 200) {
             $listener = Get-AppListeners $Port | Where-Object Address -eq '127.0.0.1' | Select-Object -First 1
-            $listenerId = $listener.Id
-            if ($listenerId -eq $Process.Id) { return }
-            # The Windows venv interpreter starts Uvicorn in a child process.
-            # Uvicorn reports that child's PID in this launch's stderr log.
-            if ($Name -eq 'backend' -and $listenerId -and -not $Process.HasExited) {
-                $serverPattern = "^INFO:\s+Started server process \[$listenerId\]\s*$"
-                $serverLog = Join-Path $runtimeDir 'backend-error.log'
-                if (Select-String -LiteralPath $serverLog -Pattern $serverPattern -Quiet) { return }
-            }
+            if ($listener -and $job.Contains($listener.Id)) { return }
             throw "Port $Port is not listening for the $Name process we started."
         }
         Start-Sleep -Milliseconds 250
@@ -56,14 +43,16 @@ function Wait-App([string]$Name, [int]$Port, [string]$Path, $Process) {
 }
 
 $lock = $null
-$started = @{}
+$job = $null
+$backend = $null
+$frontend = $null
 $frontendUrl = "http://127.0.0.1:$FrontendPort"
 try {
     $lock = Lock-App
     if ($BackendPort -eq $FrontendPort) { throw 'Backend and frontend ports must be different.' }
     foreach ($name in 'backend', 'frontend') {
         if (Get-RecordedProcess (Read-AppRecord $name)) {
-            throw "$name is already running from this directory. Use the one-click stop file first."
+            throw "$name was started by an older launcher. Run scripts\stop-app.ps1 before using this launcher."
         }
     }
     foreach ($port in $BackendPort, $FrontendPort) {
@@ -78,25 +67,31 @@ try {
         throw 'Missing dependencies. Run scripts\setup.ps1 first.'
     }
     $node = Get-Command node.exe -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+    Add-Type -Path (Join-Path $PSScriptRoot 'AppProcessJob.cs')
+    $job = [AppProcessJob]::new()
     $backend = Start-AppProcess 'backend' $python @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', $BackendPort) $root
     Wait-App 'backend' $BackendPort '/health' $backend
 
     $env:API_TARGET = "http://127.0.0.1:$BackendPort"
     $frontend = Start-AppProcess 'frontend' $node @($vite, '--host', '127.0.0.1', '--port', $FrontendPort, '--strictPort') $frontendDir
     Wait-App 'frontend' $FrontendPort '/' $frontend
-} catch {
-    Write-Host "Startup failed: $($_.Exception.Message)" -ForegroundColor Red
-    foreach ($name in 'frontend', 'backend') {
-        if ($started.ContainsKey($name)) {
-            try { Stop-AppProcess $name $started[$name] } catch { Write-Warning $_.Exception.Message }
-        }
+
+    Write-Host "Started: $frontendUrl (logs: $runtimeDir)" -ForegroundColor Green
+    Write-Host 'Close this window or press Ctrl+C to stop the app.'
+    if (-not $NoBrowser) {
+        try { Start-Process $frontendUrl } catch { Write-Warning "Open $frontendUrl in your browser." }
     }
+    while (-not $backend.HasExited -and -not $frontend.HasExited) {
+        Start-Sleep -Milliseconds 500
+    }
+    $name = if ($backend.HasExited) { 'backend' } else { 'frontend' }
+    throw "$name exited. See $runtimeDir\$name-error.log."
+} catch {
+    Write-Host "App stopped: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 } finally {
+    if ($job) { $job.Dispose() }
+    if ($frontend) { $frontend.Dispose() }
+    if ($backend) { $backend.Dispose() }
     if ($lock) { $lock.Dispose() }
-}
-
-Write-Host "Started: $frontendUrl (logs: $runtimeDir)" -ForegroundColor Green
-if (-not $NoBrowser) {
-    try { Start-Process $frontendUrl } catch { Write-Warning "Open $frontendUrl in your browser." }
 }

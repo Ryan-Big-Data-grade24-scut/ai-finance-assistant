@@ -66,6 +66,39 @@ def test_auto_screening_and_aliases_in_query_snapshot(agentcore_ready):
     assert privacy.current().text(PRIVATE) == entry['alias']
 
 
+def test_extended_name_screening_and_persistent_dismissal(app):
+    names = ('小明', '陈', '李*', '王老师', 'Alice', 'John Smith', 'Saoirse')
+    merchants = ('张家食堂', '李家网店', 'Green Coffee', 'Walmart')
+
+    async def run():
+        async with web(app) as client:
+            with closing(make_db(db.DB_PATH, rows=[
+                dict(id=i, tx_time='2026-01-05 10:00:00', direction='支出',
+                     amount=12, tx_type='聚餐', counterparty=name)
+                for i, name in enumerate(names + merchants, start=1)
+            ])):
+                pass
+            items = (await body(client.get(PRIVACY_URL)))['entries']
+            assert {entry['original'] for entry in items} == set(names)
+            policy = privacy.current()
+            assert all(policy.text(name) != name for name in names)
+            assert policy.text('Malice 和陈列室') == 'Malice 和陈列室'
+
+            await body(client.put(PRIVACY_URL, json={'original': 'Alice', 'alias': ''}))
+            assert any(entry['mode'] == 'keep' and entry['original'] == 'Alice' for entry in privacy.settings())
+            deleted = await body(client.request('DELETE', PRIVACY_URL, json={'original': 'ALICE'}))
+            assert all(entry['original'] != 'Alice' for entry in deleted['entries'])
+            db.init_db()
+            assert all(entry['original'] != 'Alice' for entry in (await body(client.get(PRIVACY_URL)))['entries'])
+            assert privacy.current().with_candidates({'counterparty': 'ALICE'}).text('ALICE') == 'ALICE'
+            assert (await body(client.get('/api/tx/5')))['raw']['counterparty'] == 'Alice'
+
+            await body(client.put(PRIVACY_URL, json={'original': 'alice', 'alias': '同学A'}))
+            assert privacy.current().text('Alice') == '同学A'
+
+    asyncio.run(run())
+
+
 def test_settings_keep_local_views_original_and_mask_atlas(app, monkeypatch):
     async def fake_model(_config, **request):
         text = json.dumps(request['messages'], ensure_ascii=False)

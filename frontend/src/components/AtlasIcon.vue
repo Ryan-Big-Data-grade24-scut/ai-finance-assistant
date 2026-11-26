@@ -6,6 +6,7 @@ const paths = {
   ledger: 'M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm2 0v18m4-13h4m-4 4h4',
   file: 'M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10Zm0 0v7h7M8 14h8m-8 3h5',
   list: 'M9 6h12M9 12h12M9 18h12M3 6l1 1 2-2m-3 7l1 1 2-2m-3 7l1 1 2-2',
+  calendar: 'M7 3v4m10-4v4M4 10h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm3 9h2m4 0h2m-8 3h2',
   history: 'M3 5v5h5m-4-1a9 9 0 1 1 .3 8m7.7-9v5l3 2',
   remove: 'M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5',
   expand: 'M13 4h7v7m0-7-9 9m7 1v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',

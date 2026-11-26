@@ -7,7 +7,7 @@ function Lock-App {
     try {
         return [IO.File]::Open((Join-Path $runtimeDir 'one-click.lock'), 'OpenOrCreate', 'Write', 'None')
     } catch [IO.IOException] {
-        throw 'Cannot lock the app state. Another start or stop may be in progress.'
+        throw 'Another launcher is using the app state. Close its window before starting again.'
     }
 }
 

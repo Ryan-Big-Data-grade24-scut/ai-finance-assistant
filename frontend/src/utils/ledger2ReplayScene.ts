@@ -1,5 +1,39 @@
 import type { Ledger2ReplayItem, Ledger2ReplayStep } from '@/api/ledger2'
 
+export function describeReplay(step: Ledger2ReplayStep) {
+  const before = new Map(step.before.map(item => [item.ref, item]))
+  const after = new Map(step.after.map(item => [item.ref, item]))
+  const changed = new Set(step.changed)
+  const created = step.after.filter(item => item.kind !== 'tx' && !before.has(item.ref) && changed.has(item.ref))
+  const removed = step.before.filter(item => item.kind !== 'tx' && !after.has(item.ref) && changed.has(item.ref))
+  const moves = step.changed.flatMap(ref => {
+    const from = before.get(ref)
+    const to = after.get(ref)
+    return from && to && from.parent !== to.parent ? [{ ref, from, to }] : []
+  })
+  const routes = new Map(moves.map(({ from, to }) => [
+    JSON.stringify([from.parent, to.parent]),
+    { from: before.get(from.parent ?? '')?.name ?? '总账', to: after.get(to.parent ?? '')?.name ?? '总账' },
+  ]))
+  const rename = step.changed.map(ref => [before.get(ref), after.get(ref)] as const)
+    .find(([from, to]) => from && to && from.name !== to.name)
+  const names = (items: Ledger2ReplayItem[]) => items.length === 1 ? items[0].name : items.length + ' 个分组'
+  const route = routes.values().next().value
+  const summary = created.length ? '新建 · ' + names(created)
+    : removed.length ? '解散 · ' + names(removed)
+    : routes.size > 1 ? routes.size + ' 条移动路径'
+    : route ? route.from + ' → ' + route.to
+    : rename ? (rename[0]?.name ?? '') + ' → ' + (rename[1]?.name ?? '')
+    : step.changed.length ? '更新节点' : '本步无可见变化'
+  return {
+    summary,
+    sources: new Set(moves.flatMap(({ from }) => from.parent ? [from.parent] : [])),
+    preview: !!(created.length || moves.length),
+    settle: !!(removed.length && moves.length),
+    removing: new Set(removed.map(item => item.ref)),
+  }
+}
+
 /** Keep large batches of identical transfers readable on the star map. */
 export function replayScene(step: Ledger2ReplayStep) {
   const before = new Map(step.before.map(item => [item.ref, item]))

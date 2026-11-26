@@ -12,6 +12,7 @@
  * - 单选时右侧「详细信息」面板显示它的命名 / 备注和交易的其它字段。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import AtlasIcon from '@/components/AtlasIcon.vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   applyLedger2Op, getLedger2Tree, getLedger2Uninitialized, redoLedger2, undoLedger2,
@@ -1172,6 +1173,10 @@ onMounted(() => {
 
 <template>
   <section class="l2">
+    <header class="l2-heading">
+      <span class="l2-heading-icon"><AtlasIcon name="ledger" /></span>
+      <h1>账本工作台</h1>
+    </header>
     <div class="l2-layout">
       <!-- 左：视图切换 -->
       <nav class="l2-tabs" data-testid="view-select" aria-label="视图">
@@ -1294,7 +1299,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <Ledger2Graph v-else :key="replayStep ? `replay-${replayStep.id}` : 'live'"
+        <Ledger2Graph v-else :key="replayStep ? 'replay' : 'live'"
                       :tree="data?.tree ?? null" :expanded="expanded" :selected="selected"
                       :replay-step="replayStep" :replay-phase="replayPhase" :read-only="replayActive"
                       :dragging="replayStep ? null : dragging" :drop-target="replayStep ? '' : dropTarget?.key ?? ''"
@@ -1305,13 +1310,13 @@ onMounted(() => {
       <!-- 右：时间 / 操控 / 详情 / 历史 -->
       <aside class="l2-side">
         <section class="panel panel--date" :inert="replayActive">
-          <h3 class="panel-title"><i class="dot dot--date" />时间区间</h3>
+          <h3 class="panel-title"><span class="panel-icon"><AtlasIcon name="calendar" /></span>时间区间</h3>
           <div class="field-row">
             <label class="field">从<input v-model="dateFrom" type="date" data-testid="date-from"></label>
             <label class="field">到<input v-model="dateTo" type="date" data-testid="date-to"></label>
           </div>
           <div class="mini-grid">
-            <button :disabled="!canLoad" data-testid="apply-range" @click="load">按范围读</button>
+            <button class="scope-apply" :disabled="!canLoad" data-testid="apply-range" @click="load">按范围读</button>
             <button :disabled="loading" @click="thisMonth">本月</button>
             <button :disabled="loading || !lastMonth" @click="setMonth(lastMonth)">最近有数据</button>
             <button :disabled="loading" @click="showAll">全部</button>
@@ -1336,7 +1341,7 @@ onMounted(() => {
         </section>
 
         <section class="panel panel--ops" data-testid="console" :inert="replayActive">
-          <h3 class="panel-title"><i class="dot dot--ops" />操作面板</h3>
+          <h3 class="panel-title"><span class="panel-icon"><AtlasIcon name="list" /></span>操作面板</h3>
           <!-- 筛选：只在当前范围里把匹配项选出来，不改账本 scope。 -->
           <div class="ops-filter" data-testid="filter-bar">
             <div class="ops-filter-head">
@@ -1426,7 +1431,7 @@ onMounted(() => {
         </section>
 
         <section class="panel panel--detail" data-testid="detail" :inert="replayActive">
-          <h3 class="panel-title"><i class="dot dot--detail" />详细信息</h3>
+          <h3 class="panel-title"><span class="panel-icon"><AtlasIcon name="file" /></span>详细信息</h3>
           <template v-if="single">
             <div class="detail-head">
               <span class="pill">{{ singleLabel }}</span>
@@ -1474,7 +1479,7 @@ onMounted(() => {
         </section>
 
         <section class="panel panel--hist" data-testid="history">
-          <h3 class="panel-title"><i class="dot dot--hist" />操作历史</h3>
+          <h3 class="panel-title"><span class="panel-icon"><AtlasIcon name="history" /></span>操作历史</h3>
           <Ledger2History :steps="timeline" :busy="replayActive || loading"
                           :current-id="replayStep?.id ?? null" :label="historyLabel" @play="playHistory" />
         </section>
@@ -1625,27 +1630,33 @@ onMounted(() => {
 <style scoped>
 /* 整页高度 = 视口 − 顶栏(70) − 主区上下内边距(18+34)；页面本身不滚动，滚动都在视图内部。 */
 .l2 {
-  display: flex; flex-direction: column;
+  display: flex; flex-direction: column; gap: 12px;
   height: calc(100dvh - 122px); min-height: 420px; overflow: hidden;
+}
+.l2-heading { display: flex; align-items: center; gap: 10px; flex: none; }
+.l2-heading h1 { font-size: clamp(20px, 2.3vw, 27px); line-height: 1.15; letter-spacing: -.03em; }
+.l2-heading-icon {
+  display: grid; place-items: center; width: 33px; height: 33px; border-radius: 10px;
+  background: var(--book-paper); color: var(--book-forest); box-shadow: var(--surface-shadow); font-size: 19px;
 }
 .l2-layout {
   flex: 1; min-height: 0;
-  display: grid; grid-template-columns: 64px minmax(0, 1fr) 320px; gap: 12px;
+  display: grid; grid-template-columns: 62px minmax(0, 1fr) clamp(304px, 26vw, 348px); gap: 14px;
 }
 
 /* 左侧视图切换 */
 .l2-tabs { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .l2-tab {
   display: flex; flex-direction: column; align-items: center; gap: 5px;
-  padding: 13px 4px; border: 1px solid var(--color-border); border-radius: 12px;
-  background: var(--color-card); color: var(--color-muted); font-size: 13px; cursor: pointer;
+  padding: 13px 4px; border: 1px solid var(--book-line); border-radius: 14px;
+  background: var(--book-paper); color: #516457; font-size: 13px; font-weight: 600; cursor: pointer;
   transition: background .15s, color .15s, border-color .15s;
 }
 .l2-tab .ico { font-size: 18px; line-height: 1; }
 .l2-tab:hover:not(.active) { background: #eef3f9; color: var(--color-text); }
 .l2-tab.active {
-  background: #1d5fa8; border-color: #1d5fa8; color: #fff;
-  box-shadow: 0 6px 16px rgba(29, 95, 168, .22);
+  background: linear-gradient(145deg, #285346, #41725c); border-color: transparent; color: #fff;
+  box-shadow: 0 8px 18px #28534636;
 }
 
 /* 中间视图 */
@@ -1655,58 +1666,73 @@ onMounted(() => {
 /* 操作面板里的筛选：常用字段 + 跨字段搜索；只选出匹配项，不改账本范围。 */
 .ops-filter {
   display: flex; flex-direction: column; gap: 6px;
-  margin-bottom: 8px; padding: 8px;
-  background: var(--color-card);
-  border: 1px solid var(--color-border); border-radius: 8px;
+  margin-bottom: 10px; padding: 10px;
+  background: #f1f1e7;
+  border: 1px solid var(--book-line); border-radius: 12px;
 }
 .ops-filter-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
-  color: var(--color-muted); font-size: var(--font-sm, 13px);
+  color: var(--color-muted); font-size: 12px;
 }
-.ops-filter-head b { color: var(--color-text); }
+.ops-filter-head b { color: var(--color-text); font-size: 13px; }
 .filter-box { display: flex; gap: 6px; align-items: center; min-width: 0; }
 .filter-box > select,
 .filter-box > input { min-width: 0; flex: 1; }
 .filter-box--search { flex-wrap: wrap; }
-.filter-box--search .filter-text { flex: 1 1 100%; }
+.filter-box--search .filter-text { flex: 1 1 130px; }
+.filter-box:has(> input:is([type='date'], [type='time'])) {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+.filter-box:has(> input:is([type='date'], [type='time'])) > select { grid-column: 1 / -1; }
+.filter-box > input:is([type='date'], [type='time']) { width: 100%; }
 .filter-value { min-width: 0; }
 .filter-field { flex: 0 0 auto; }
 
 /* 右侧栏 */
 .l2-side {
-  min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
-  padding-right: 2px;
+  min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  padding: 1px 4px 10px 1px;
+  scrollbar-width: thin; scrollbar-color: #b8cddd transparent;
 }
 .panel {
-  flex: none; background: var(--color-card); border: 1px solid var(--color-border);
-  border-radius: 10px; padding: 10px 12px;
+  --panel-accent: var(--book-forest);
+  --panel-tint: var(--book-sage);
+  flex: none; min-width: 0; background: var(--book-paper);
+  border: 1px solid var(--book-line); border-radius: 16px; padding: 12px 14px;
+  box-shadow: 0 3px 12px #2946630c;
 }
+.panel--date { --panel-accent: #216d66; --panel-tint: #e6f4ef; }
+.panel--detail { --panel-accent: #8b6942; --panel-tint: #f4ecdb; }
+.panel--hist { --panel-accent: #546a54; --panel-tint: #edf0e5; }
 .panel-title {
-  display: flex; align-items: center; gap: 6px; margin: 0 0 8px;
-  font-size: 13px; font-weight: 650; color: #344054;
+  display: flex; align-items: center; gap: 8px; margin: 0 0 10px;
+  font-size: 14px; font-weight: 700; color: #243951;
 }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.dot--date { background: #0d9488; }
-.dot--ops { background: #2563eb; }
-.dot--detail { background: #7c6cf0; }
-.dot--hist { background: #94a3b8; }
+.panel-icon {
+  display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 9px;
+  font-size: 16px; background: var(--panel-tint); color: var(--panel-accent);
+}
 
-.field-row { display: flex; flex-direction: column; gap: 4px; }
-.field { font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
-.field input[type='date'] { flex: 1; min-width: 0; }
-.mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px; }
+.field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.field { font-size: 12px; font-weight: 650; color: #50667d; display: grid; gap: 4px; min-width: 0; }
+.field input[type='date'] { width: 100%; min-width: 0; }
+.mini-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-top: 7px; }
 .mini-grid button, .op-line button { width: 100%; }
-.scope-line { margin: 8px 0 0; line-height: 1.5; }
-.btn--init { margin-top: 6px; width: 100%; border-color: #1d5fa8; color: #1d5fa8; line-height: 1.35; }
+.scope-line { margin: 8px 0 0; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.btn--init { margin-top: 6px; width: 100%; border-color: var(--book-forest); color: var(--book-forest); line-height: 1.35; }
 .btn--ask { margin-top: 6px; width: 100%; }
 
 
-.sel-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
-.op-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 8px 0; }
+.sel-line {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px;
+  padding: 6px 9px; border-radius: 8px; color: #35567b; background: #edf4fb;
+}
+.op-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
 .op-grid button { width: 100%; }
-.op-line { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
-.op-line select { flex: 1; min-width: 0; }
-.hint-line { margin: 8px 0 0; line-height: 1.55; }
+.op-line { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; align-items: center; margin-top: 6px; }
+.op-line:has(> select) { grid-template-columns: minmax(0, 1fr) 72px; }
+.op-line select { min-width: 0; }
+.hint-line { margin: 9px 0 0; line-height: 1.6; }
 
 .detail-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .pill {
@@ -1749,7 +1775,7 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  background: linear-gradient(115deg, #ffffff 0%, #f7faff 100%);
+  background: linear-gradient(115deg, #ffffff 0%, #f5f5eb 100%);
   border-bottom: 1px solid #e8edf5;
 }
 .ledger-toolbar__heading { display: flex; align-items: center; gap: 11px; min-width: 0; }
@@ -1826,37 +1852,37 @@ onMounted(() => {
   background: #ffffff;
   transition: background-color .14s ease, box-shadow .14s ease;
 }
-.row--tx:nth-child(even) { background: #fcfdff; }
-.row:hover { background: #f3f8ff; }
-.row--node { font-weight: 650; background: #f7faff; }
+.row--tx:nth-child(even) { background: #fdfbf4; }
+.row:hover { background: #ecf2e7; }
+.row--node { font-weight: 650; background: #f5f5eb; }
 .row--node:not(.row--root):not(.row--category) { box-shadow: inset 3px 0 0 #b4cbed; }
 .row--root {
   min-height: 45px;
-  color: #153e70;
-  background: linear-gradient(90deg, #e5f0ff, #f1f7ff 80%);
-  border-bottom-color: #d4e2f3;
+  color: var(--book-forest-dark);
+  background: linear-gradient(90deg, #dce9d8, #eef3e6 80%);
+  border-bottom-color: #d4dece;
   box-shadow: inset 4px 0 0 #2b6eb9;
 }
 .row--root .name { font-size: 14px; font-weight: 750; }
 .row--root .c-num { font-size: 14px; font-weight: 750; }
 .row--category {
   min-height: 41px;
-  background: #f4f8fe;
+  background: #f3f4eb;
   box-shadow: inset 3px 0 0 #91b8e9;
 }
-.row--category .name { color: #244d7d; font-weight: 700; }
+.row--category .name { color: #37533f; font-weight: 700; }
 .row--group { background: #f8f7fd; box-shadow: inset 3px 0 0 #a8a0da; }
 .row--group .name { font-weight: 600; }
 /* 双层类名是为了压住斑马纹 .row--tx:nth-child(even)，避免选中行一半蓝一半白。 */
 .row.row--sel, .row.row--sel:hover {
-  background: #e6f1ff;
+  background: #dfebd9;
   box-shadow: inset 3px 0 0 #337bce;
 }
 .row--drag { opacity: .45; }
 .row--drop, .row--drop:hover {
   outline: 2px solid #256fb9;
   outline-offset: -2px;
-  background: #d7e9fe;
+  background: #cfdfcc;
   box-shadow: inset 3px 0 0 #256fb9;
 }
 .c-grip { display: flex; justify-content: center; }
@@ -1873,7 +1899,7 @@ onMounted(() => {
   width: 14px;
   height: 14px;
   margin: 0;
-  accent-color: #286cb6;
+  accent-color: var(--book-forest);
   cursor: pointer;
 }
 .c-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
@@ -1885,7 +1911,7 @@ onMounted(() => {
   cursor: default;
 }
 .name--tx { font-weight: 450; }
-.name--root { color: #183f6b; }
+.name--root { color: var(--book-forest-dark); }
 .c-note {
   min-width: 0;
   overflow: hidden;
@@ -1940,7 +1966,7 @@ button.twisty:hover:not(:disabled) { background: #e1edfc; color: #255f9f; }
   background: #edf1f7;
   color: #586b84;
 }
-.tag--cat { color: #245d9c; background: #e1edfb; border: 1px solid #c9ddf6; }
+.tag--cat { color: #3a614b; background: #e4eddc; border: 1px solid #c9ddf6; }
 .tag--net { color: #6955a6; background: #efebfc; border: 1px solid #ded5fa; }
 .tag--m { color: #946316; background: #fff1d9; border: 1px solid #f6dfb7; }
 .pad { padding: 16px; }
@@ -1952,19 +1978,35 @@ button {
 }
 button:hover:not(:disabled) { background: #f0f4f9; }
 button:disabled { opacity: .45; cursor: not-allowed; }
-button.link { border: 0; background: none; padding: 0 4px; color: #1d5fa8; text-decoration: underline; }
-.btn--primary { background: #1d5fa8; color: #fff; border-color: #1d5fa8; }
+button.link { border: 0; background: none; padding: 0 4px; color: var(--book-forest); text-decoration: underline; }
+.btn--primary { background: var(--book-forest); color: #fff; border-color: var(--book-forest); }
 .btn--primary:hover:not(:disabled) { background: #174a83; }
 input[type='text'], input:not([type]), input[type='date'], select {
   border: 1px solid var(--color-border); border-radius: var(--radius-sm, 8px); padding: 4px 8px; font-size: 13px;
   background: #fff; color: var(--color-text);
 }
+.l2-side :is(input, select, button:not(.link)) {
+  min-height: 29px; min-width: 0; border: 1px solid #d6e3ee; border-radius: 8px;
+  background: #fff; color: #344d68; padding: 4px 7px; font-size: 12px;
+}
+.l2-side input::placeholder { color: #657a90; }
+.l2-side button:not(.link) { font-weight: 650; }
+.l2-side button:not(.link):hover:not(:disabled) { background: var(--panel-tint); border-color: #bccfdf; }
+.l2-side button:not(.link):disabled { opacity: 1; background: #f3f7fa; color: #74869b; border-color: #e2eaf0; }
+.l2-side button.scope-apply:not(:disabled) {
+  background: #e3f2ee; color: #225f5a; border-color: #c8e5dd;
+}
+.l2-side button.btn--init:not(:disabled) { color: #2e5e8c; background: #edf5fc; border-color: #cddff0; }
+.l2-side button.btn--ask:not(:disabled) { color: #fff; background: #2b635f; border-color: #2b635f; }
+.l2-side button.btn--ask:hover:not(:disabled) { background: #204f4b; }
+.l2-side .muted { font-size: 12px; }
+.l2-side :is(input, select):focus-visible { outline: 2px solid var(--panel-accent); outline-offset: 1px; }
 .banner { margin: 0; padding: 8px 12px; border-radius: var(--radius-sm, 8px); font-size: 13px; list-style: none; }
 .banner--err { background: #fdecec; color: #b42318; }
 .banner--ok { background: #e8f6ee; color: #1a7f4b; }
 .banner--warn { background: #fff4e0; color: #9a5b00; }
 
-.band { position: fixed; border: 1px solid #1d5fa8; background: rgba(29, 95, 168, .12); pointer-events: none; z-index: 60; }
+.band { position: fixed; border: 1px solid var(--book-forest); background: rgba(29, 95, 168, .12); pointer-events: none; z-index: 60; }
 .drag-hint {
   position: fixed; z-index: 80; pointer-events: none;
   background: #101828; color: #fff; font-size: 12px; padding: 4px 8px; border-radius: 6px; max-width: 320px;
@@ -1991,7 +2033,7 @@ input[type='text'], input:not([type]), input[type='date'], select {
   border: 1px solid var(--color-border); border-radius: 9px; cursor: pointer;
   font-size: 13px; line-height: 1.45;
 }
-.init-option:has(input:checked) { border-color: #1d5fa8; background: #f3f8ff; }
+.init-option:has(input:checked) { border-color: var(--book-forest); background: #ecf2e7; }
 .init-option input { margin-top: 2px; flex: none; }
 .init-option span { display: flex; flex-direction: column; gap: 2px; }
 .init-option small { color: var(--color-muted); font-size: 12px; }

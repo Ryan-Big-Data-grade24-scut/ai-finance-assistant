@@ -118,8 +118,12 @@ class ParseIssues:
         self.failed += 1
         if self.first_error is None:
             self.first_error = message
-        if len(self.warnings) < 5:
+        if len(self.warnings) < 100:
             self.warnings.append(message)
+
+    def display_warnings(self) -> list[str]:
+        omitted = self.failed - len(self.warnings)
+        return self.warnings + ([f"还有 {omitted} 行异常未展开，均已跳过。"] if omitted > 0 else [])
 
 
 INSERT_SQL = """
@@ -147,7 +151,7 @@ def norm_direction(value: Any) -> str:
     return DIRECTION_MAP.get(clean(value), "中性")
 
 
-def norm_amount(value: Any) -> float | None:
+def norm_amount(value: Any, *, exact: bool = False) -> float | None:
     """金额归一化：仅接收有限正数，统一保留两位小数。"""
     s = clean(value).replace("¥", "").replace("￥", "").replace(",", "").replace("元", "")
     if not s:
@@ -156,10 +160,10 @@ def norm_amount(value: Any) -> float | None:
         amount = Decimal(s)
         if not amount.is_finite():
             return None
-        amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if amount <= 0:
+        cents = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if cents <= 0 or (exact and amount != cents):
             return None
-        return float(amount)
+        return float(cents)
     except (InvalidOperation, ValueError, OverflowError):
         return None
 

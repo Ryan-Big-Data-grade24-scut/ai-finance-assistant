@@ -602,14 +602,14 @@ def test_mcp_cold_start_over_stdio(agentcore_paths, agentcore_evidence):
                 assert handshake.serverInfo.name == 'ai-finance-ledger'
                 tools = (await client.list_tools()).tools
                 expected = registry.openai_tools(scope='business')
-                assert len(tools) == len(expected) == 6
+                assert 'finance_report_brief_write' in {t.name for t in tools}
                 assert [(t.name, t.description, t.inputSchema) for t in tools] == [
                     (t['function']['name'], t['function']['description'], t['function']['parameters']) for t in expected
                 ]
                 evidence = Evidence(agentcore_evidence, agentcore_paths, 'E_MCP_stdio冷启动与直写')
                 evidence.step('启动独立 stdio 子进程并发送 `initialize` / `tools/list`',
                               '不是内存 SDK 会话；从只有基础 schema 的临时库走真正入口。',
-                              '握手成功，五个业务工具名称、描述、参数 schema 与 Web registry 完全一致。')
+                              '握手成功，所有业务工具名称、描述、参数 schema 与 Web registry 完全一致。')
 
                 async def call(name, args):
                     reply = await client.call_tool(name, args)

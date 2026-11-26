@@ -22,7 +22,8 @@ from typing import Iterator
 
 import openpyxl
 
-from .base import ParseIssues, Row, clean, norm_amount, norm_direction, norm_time, should_drop
+from .base import ParseIssues, Row, clean
+from .export_validation import ExportRows
 
 # 支付宝列名变体 → 统一字段名
 HEADER_MAP = {
@@ -150,44 +151,35 @@ def parse_xlsx(path: Path, issues: ParseIssues | None = None) -> Iterator[Row]:
             idx = col.get(key)
             return raw_row[idx] if idx is not None and idx < len(raw_row) else None
 
+        metadata = (clean(cell) for row in selected.iter_rows(max_row=header_row - 1, values_only=True)
+                    for cell in row) if header_row > 1 else ()
+        checked = ExportRows(col, metadata, issues)
         for line_number, raw_row in enumerate(
             selected.iter_rows(min_row=header_row + 1, values_only=True),
             start=header_row + 1,
         ):
-            if not raw_row or not any(value is not None for value in raw_row):
+            if not any(clean(value) for value in raw_row):
                 continue
 
             raw_first = _xlsx_text(raw_row[0] if raw_row else None)
-            if not raw_first:
-                continue
             if is_footer_row([raw_first]):
                 break
 
-            status = clean(value_at(raw_row, "status"))
-            if should_drop(status):
+            result = checked.check(line_number, lambda key: value_at(raw_row, key))
+            if result is None:
                 continue
-
-            time_value = value_at(raw_row, "tx_time")
-            if time_value in (None, ""):
-                time_value = value_at(raw_row, "payment_time")
-            tx_time = norm_time(time_value)
-            amount = norm_amount(value_at(raw_row, "amount"))
-            if tx_time is None or amount is None:
-                if issues is not None:
-                    reason = "交易时间无效" if tx_time is None else "金额无效或不大于零"
-                    issues.add(line_number, reason)
-                continue
+            tx_time, amount, direction, status = result
 
             raw = {
                 header[i]: _xlsx_text(raw_row[i] if i < len(raw_row) else None)
                 for i in range(len(header))
                 if header[i]
             }
-            yield Row(
+            checked.rows.append((line_number, Row(
                 platform_id="alipay",
                 source="支付宝",
                 tx_time=tx_time,
-                direction=norm_direction(value_at(raw_row, "direction")),
+                direction=direction,
                 amount=amount,
                 pay_method=clean(value_at(raw_row, "pay_method")),
                 counterparty=clean(value_at(raw_row, "counterparty")),
@@ -198,7 +190,8 @@ def parse_xlsx(path: Path, issues: ParseIssues | None = None) -> Iterator[Row]:
                 merchant_no=clean(value_at(raw_row, "merchant_no")),
                 remark=clean(value_at(raw_row, "remark")),
                 raw=raw,
-            )
+            )))
+        yield from checked.accepted()
     finally:
         wb.close()
 
@@ -260,8 +253,9 @@ def parse(path: Path, password: str | None = None,
     if missing:
         raise ValueError(f"支付宝账单缺少必需列 {missing}，实际表头：{header}")
 
+    checked = ExportRows(col, lines[:hdr], issues)
     for raw_row in reader:
-        if not raw_row or not clean(raw_row[0]):
+        if not any(clean(value) for value in raw_row):
             continue
         if is_footer_row(raw_row):
             break
@@ -270,23 +264,17 @@ def parse(path: Path, password: str | None = None,
             idx = col.get(key)
             return raw_row[idx] if idx is not None and idx < len(raw_row) else None
 
-        status = clean(get("status"))
-        if should_drop(status):
+        line_number = hdr + reader.line_num
+        result = checked.check(line_number, get)
+        if result is None:
             continue
+        tx_time, amount, direction, status = result
 
-        tx_time = norm_time(get("tx_time") or get("payment_time"))
-        amount = norm_amount(get("amount"))
-        if tx_time is None or amount is None:
-            if issues is not None:
-                reason = "交易时间无效" if tx_time is None else "金额无效或不大于零"
-                issues.add(hdr + reader.line_num, reason)
-            continue
-
-        yield Row(
+        checked.rows.append((line_number, Row(
             platform_id="alipay",
             source="支付宝",
             tx_time=tx_time,
-            direction=norm_direction(get("direction")),
+            direction=direction,
             amount=amount,
             pay_method=clean(get("pay_method")),
             counterparty=clean(get("counterparty")),
@@ -300,4 +288,5 @@ def parse(path: Path, password: str | None = None,
                 header[i]: (raw_row[i] if i < len(raw_row) else "")
                 for i in range(len(header))
             },
-        )
+        )))
+    yield from checked.accepted()

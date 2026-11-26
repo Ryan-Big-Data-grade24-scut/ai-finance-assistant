@@ -93,6 +93,7 @@ function resultLabel(item: Extract<AgentChatItem, { type: 'tool' }>) {
   }
   if (item.name === 'finance_ledger_apply' && result?.state === 'executed') return '账本工作台已执行'
   if (item.name === 'finance_import_commit' && result?.state === 'committed') return '已入库'
+  if (item.name === 'finance_report_brief_write' && result?.state === 'written') return '简报已写入报告页'
   return '结果'
 }
 

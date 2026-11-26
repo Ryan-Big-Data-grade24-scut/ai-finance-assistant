@@ -57,7 +57,7 @@ from backend.ledger2 import store as ledger_store           # noqa: E402
 
 EXPECTED_TOOLS = {
     'finance_query_transactions', 'finance_ledger_read', 'finance_ledger_apply',
-    'finance_import_read', 'finance_import_commit', 'read_skill',
+    'finance_import_read', 'finance_import_commit', 'finance_report_brief_write', 'read_skill',
 }
 SCOPE = 'business'
 
@@ -205,5 +205,7 @@ if __name__ == '__main__':
     if '--selftest' in sys.argv:
         raise SystemExit(asyncio.run(_selftest()))
     # stdio 模式：stdout 是协议通道，这里严禁 print 任何东西。
+    from backend import libraries
+    libraries.bootstrap()
     _ensure_started()
     asyncio.run(_serve())

@@ -238,10 +238,10 @@ def _carry(evts: list[dict], covers: int) -> str:
         if e['id'] > covers or e['kind'] != 'tool_result' or e['payload'].get('is_error'):
             continue
         tool = e['payload'].get('name')
-        if tool not in {'finance_ledger_apply', 'finance_import_commit'}:
+        if tool not in {'finance_ledger_apply', 'finance_import_commit', 'finance_report_brief_write'}:
             continue
         result = result_payload(e)
-        if not result or result.get('state') not in {'executed', 'committed'}:
+        if not result or result.get('state') not in {'executed', 'committed', 'written'}:
             continue
         line = tool + ' ' + json_text(result)
         budget -= approx_tokens(line)

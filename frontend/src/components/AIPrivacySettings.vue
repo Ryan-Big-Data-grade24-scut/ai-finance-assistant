@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { getAIPrivacy, saveAIPrivacy, type AIPrivacyEntry } from '@/api/ai'
+import { deleteAIPrivacy, getAIPrivacy, saveAIPrivacy, type AIPrivacyEntry } from '@/api/ai'
 
 const entries = ref<AIPrivacyEntry[]>([])
 const drafts = ref<Record<string, string>>(Object.create(null))
@@ -55,6 +55,20 @@ async function save(name: string, replacement: string | null, clearForm = false)
   }
 }
 
+async function remove(name: string) {
+  busy.value = true
+  notice.value = ''
+  error.value = ''
+  try {
+    showEntries((await deleteAIPrivacy(name)).entries)
+    notice.value = '筛查项已删除。重新筛查会跳过该项，可手动添加回来。'
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '删除筛查项失败。'
+  } finally {
+    busy.value = false
+  }
+}
+
 onMounted(refresh)
 </script>
 
@@ -66,7 +80,7 @@ onMounted(refresh)
         {{ !loaded && busy ? '筛查中…' : '重新筛查' }}
       </button>
     </div>
-    <p class="privacy-help">疑似中文姓名自动使用别名，食堂、网店等常见商户通常直接通过。星图、账单明细和报告仍显示原文。</p>
+    <p class="privacy-help">疑似中文姓名、昵称、单独姓氏和英文名字会自动使用别名。删除误判项会移除别名，重新筛查也会跳过该项。星图、账单明细和报告仍显示原文。</p>
 
     <div v-if="entries.length" class="privacy-list" role="list" aria-label="隐私别名">
       <div v-for="entry in entries" :key="entry.original" class="privacy-row" role="listitem">
@@ -78,10 +92,12 @@ onMounted(refresh)
           <input v-model="drafts[entry.original]" class="workspace-field" :aria-label="entry.original + ' 的别名'"
                  placeholder="例如 同学A" maxlength="120" :disabled="busy" required />
           <button type="submit" class="workspace-button" :disabled="busy || !drafts[entry.original]?.trim() || drafts[entry.original]?.trim() === entry.alias">保存</button>
-          <button v-if="entry.mode !== 'keep' && entry.detected" type="button" class="workspace-button"
+          <button v-if="entry.mode !== 'keep'" type="button" class="workspace-button"
                   :disabled="busy" @click="save(entry.original, '')">保留原文</button>
-          <button v-else type="button" class="workspace-button" :disabled="busy"
-                  @click="save(entry.original, null)">{{ entry.detected ? '恢复自动' : '移除别名' }}</button>
+          <button v-else-if="entry.detected" type="button" class="workspace-button" :disabled="busy"
+                  @click="save(entry.original, null)">恢复自动</button>
+          <button type="button" class="workspace-button workspace-button--danger" :disabled="busy"
+                  :aria-label="'删除筛查项 ' + entry.original" @click="remove(entry.original)">删除</button>
         </form>
       </div>
     </div>
@@ -113,7 +129,8 @@ h3 { font-size: 14px; }
 .privacy-row + .privacy-row { border-top: 1px solid var(--workspace-line, #e2e8f0); }
 .privacy-source { min-width: 0; overflow-wrap: anywhere; }
 .privacy-source small { display: block; }
-.privacy-edit { display: grid; grid-template-columns: minmax(90px, 1fr) auto auto; align-items: center; gap: 6px; }
+.privacy-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.privacy-edit input { flex: 1 1 112px; width: auto; }
 .privacy-edit .workspace-button { padding-inline: 8px; }
 .privacy-empty { color: var(--workspace-muted); margin-top: 12px; }
 .privacy-custom { margin-top: 16px; }

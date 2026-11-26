@@ -8,6 +8,7 @@ from typing import Callable
 from jsonschema import Draft202012Validator, validators
 
 from backend.ai import privacy
+from backend.reports import brief
 from backend.ledger2.errors import LedgerError
 
 from . import import_tool, ledger_tools, memory, skills, sql_tool, truncate
@@ -191,6 +192,31 @@ _register(ToolSpec(
     handler=lambda args, ctx: import_tool.commit(args['stage_id']),
 ))
 
+_ESTIMATE = {'type': ['integer', 'null'], 'minimum': 0, 'maximum': 99999999999999,
+             'description': '从今天起至本期末尚未发生的估算金额（整数分）。依据不足传 null，确认无此项才传 0。'}
+_BRIEF_LINE = {'type': 'string', 'minLength': 1, 'pattern': r'^[^\r\n]*\S[^\r\n]*(?![\s\S])'}
+_BRIEF_FIELDS = {
+    'period': {'enum': ['week', 'month', 'year'], 'type': 'string'},
+    'value': _string('本地当天所在的 ISO 周 YYYY-Www、月 YYYY-MM 或年 YYYY。', nonempty=True),
+    'summary': {**_BRIEF_LINE, 'maxLength': 45,
+                'description': '一句话评价本期财务状况，最多 45 字。只说最重要的判断，省去标题、分析过程和下方已有的金额。'},
+    'income_cents': _ESTIMATE, 'obligatory_cents': _ESTIMATE, 'flexible_cents': _ESTIMATE,
+    'flags': {'type': 'array', 'maxItems': 2, 'items': {**_BRIEF_LINE, 'maxLength': 32},
+              'description': '最多 2 项，每项最多 32 字，只写支出对象和核对原因。使用可见别名；无已识别项传空数组。'},
+    'advice': {'type': 'array', 'maxItems': 1, 'items': {**_BRIEF_LINE, 'maxLength': 32},
+               'description': '一句具体可执行的建议，最多 32 字。依据不足时传空数组。'},
+}
+_register(ToolSpec(
+    name='finance_report_brief_write',
+    description='用户要求撰写或更新报告简报时，先完成分析，再整封替换指定周期的信纸。'
+                '上屏只需一句财务评价、六项收支数字、最多两项待核对支出和一句建议。文本用纯文字，省去推导和重复金额。'
+                '周、月、年分别写入。预计支出等于义务性加弹性支出，未来活钱等于预计收入减义务性支出；'
+                '扣掉弹性支出后的结余另算。系统自动计算，保留缺口和负数。',
+    schema=_object(_BRIEF_FIELDS, *_BRIEF_FIELDS),
+    handler=lambda args, ctx: brief.write(args, ctx.call_key),
+))
+
+
 def _skill_description() -> str:
     lines = ['开始某类业务时载入对应 Skill，读清操作顺序和理由。可用：']
     for skill in skills.catalog():
@@ -275,6 +301,8 @@ def execute(name: str, args: dict, ctx: ToolContext, *, scope: str = 'all') -> t
         if name in {'finance_ledger_read', 'finance_ledger_apply'}:
             args = policy.ledger_refs(args)
         result = spec.handler(args, ctx)
+    except brief.BriefError as exc:
+        return truncate.error_result(str(exc), code=exc.code), True
     except (ToolInputError, LedgerError, import_tool.ImportError_, sql_tool.SqlRejected) as exc:
         return truncate.error_result(policy.text(exc.message), code=exc.code), True
     except Exception:  # 兜底：内部错误不冒充领域拒绝，也不把本地异常详情发给模型。
@@ -285,7 +313,7 @@ def execute(name: str, args: dict, ctx: ToolContext, *, scope: str = 'all') -> t
 
 def recover(name: str, args: dict, ctx: ToolContext) -> dict | None:
     """只查询已经落盘的回执；进程重启不自动执行工具。"""
-    if name == 'finance_ledger_apply' and ctx.call_key:
+    if name in {'finance_ledger_apply', 'finance_report_brief_write'} and ctx.call_key:
         return ledger_tools.committed_receipt(ctx.call_key)
     if name == 'finance_import_commit' and isinstance(args.get('stage_id'), str):
         return import_tool.committed_receipt(args['stage_id'])

@@ -315,7 +315,7 @@ def test_mcp_sdk_and_web_registry_share_business_schema_and_results(ready_db, st
             assert [(t.name, t.description, t.inputSchema) for t in resources] == [
                 (t['function']['name'], t['function']['description'], t['function']['parameters']) for t in web
             ]
-            assert len(resources) == 6
+            assert 'finance_report_brief_write' in {t.name for t in resources}
             assert not {'finance_ledger_propose', 'finance_import_prepare', 'todo_write', 'read_memory'} & {
                 t.name for t in resources}
             skill = await client.call_tool('read_skill', {'skill_id': 'ledger-classify'})
