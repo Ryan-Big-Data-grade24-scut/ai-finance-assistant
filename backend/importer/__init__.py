@@ -21,7 +21,7 @@ import openpyxl
 from typing import Callable, Iterator
 
 from .. import db
-from . import alipay, wechat
+from . import alipay, alipay_wallet, wechat
 from .base import INSERT_SQL, ParseIssues, Row
 
 
@@ -42,12 +42,15 @@ class ImportResult:
 ADAPTERS: dict[str, Callable[[Path], Iterator[Row]]] = {
     "wechat": wechat.parse,
     "alipay": alipay.parse,
+    "alipay_wallet": alipay_wallet.parse,
 }
 
 # platform_id → (显示名, 类别, 适配器)
 PLATFORM_META = {
     "wechat": ("微信支付", "wallet", "wechat"),
     "alipay": ("支付宝", "wallet", "alipay"),
+    # 小荷包是独立导出（两列金额、订单号空间独立），按独立平台接入。
+    "alipay_wallet": ("支付宝小荷包", "wallet", "alipay_wallet"),
     "manual": ("手动记账", "other", "manual"),
 }
 
@@ -75,8 +78,14 @@ def _detect_xlsx_by_content(path: Path) -> str | None:
         return None
     try:
         for ws in wb.worksheets:
+            # 小荷包工作簿会把尺寸错报成 A1:A1；不重置就只迭代到第 1 行。
+            if hasattr(ws, "reset_dimensions"):
+                ws.reset_dimensions()
             for row in ws.iter_rows(min_row=1, max_row=50, values_only=True):
                 names = {str(value).strip() for value in row if value is not None}
+                # 小荷包：两列金额 + 订单号，没有 收/支 列。
+                if {"订单号", "收入金额", "支出金额"}.issubset(names):
+                    return "alipay_wallet"
                 has_direction = "收/支" in names
                 has_amount = bool(names.intersection({"金额（元）", "金额(元)", "金额"}))
                 if not (has_direction and has_amount):
@@ -106,6 +115,8 @@ def detect(path: Path, alipay_password: str | None = None) -> tuple[str, float]:
 
     if "微信" in name or "wechat" in name:
         return "wechat", 0.98
+    if "小荷包" in name:
+        return "alipay_wallet", 0.98
     if "支付宝" in name or "alipay" in name:
         return "alipay", 0.98
     if suffix in {".csv", ".zip"}:

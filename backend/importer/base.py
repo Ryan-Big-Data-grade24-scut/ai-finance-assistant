@@ -53,6 +53,9 @@ class Row:
     merchant_no: str = ""
     remark: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    # 同一平台下需要再分域的账户标识摘要（如多个小荷包钱包共用订单号空间）。
+    # 只存摘要，不存账户原文；为空时不影响 dedupe_key。
+    wallet_domain: str = ""
 
     # ── 派生字段 ────────────────────────────────────────────
     @property
@@ -86,7 +89,8 @@ class Row:
         所以 ImportCommitResp.skipped 必须暴露给用户看。
         """
         if self.tx_no:
-            return f"{self.source}|{self.tx_no}"
+            scope = f"{self.wallet_domain}:" if self.wallet_domain else ""
+            return f"{self.source}|{scope}{self.tx_no}"
         sig = f"{self.source}|{self.tx_time}|{self.amount}|{self.counterparty}"
         return f"{self.source}|md5:{hashlib.md5(sig.encode('utf-8')).hexdigest()[:16]}"
 

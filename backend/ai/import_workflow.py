@@ -36,7 +36,7 @@ def _serialize_row(row: Row) -> dict:
         "direction": row.direction, "amount": row.amount, "pay_method": row.pay_method,
         "counterparty": row.counterparty, "item": row.item, "tx_type": row.tx_type,
         "status": row.status, "tx_no": row.tx_no, "merchant_no": row.merchant_no,
-        "remark": row.remark, "raw": row.raw,
+        "remark": row.remark, "raw": row.raw, "wallet_domain": row.wallet_domain,
     }
 
 

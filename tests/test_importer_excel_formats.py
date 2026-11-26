@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import zipfile
 from pathlib import Path
 
 import openpyxl
@@ -77,6 +79,66 @@ def make_wechat_xlsx(path: Path) -> Path:
     ])
     wb.save(path)
     wb.close()
+    return path
+
+
+WALLET_HEADER = [
+    "订单号", "交易时间", "交易说明", "备注",
+    "操作人昵称", "操作人姓名", "收入金额", "支出金额",
+]
+
+
+def _force_sheet_dimension(path: Path, ref: str = "A1") -> Path:
+    """把工作簿声明的尺寸改错，复现真实小荷包文件 A1（1×1）的假尺寸。"""
+    tmp = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(path) as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                tag = f'<dimension ref="{ref}"/>'.encode()
+                if b"<dimension" in data:
+                    data = re.sub(rb'<dimension ref="[^"]*"\s*/>', tag, data, count=1)
+                else:
+                    data = re.sub(rb"(<worksheet[^>]*>)", rb"\1" + tag, data, count=1)
+            dst.writestr(item, data)
+    tmp.replace(path)
+    return path
+
+
+def make_wallet_xlsx(path: Path, *, account_id: str = "0000000000000001",
+                     order_prefix: str = "WALLET", wrong_dimension: bool = True) -> Path:
+    """虚构的小荷包账单：12 行表头前的元信息 + 两列金额 + 假尺寸。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "小荷包收支明细"
+    ws.append(["支付宝小荷包余额收支明细"])
+    ws.append(["支付宝小荷包名称：[模拟小荷包]"])
+    ws.append([f"支付宝小荷包账户ID：{account_id}"])
+    ws.append(["支付宝小荷包创建时间：[2026-01-01 00:00:00]"])
+    ws.append(["起始时间：[2026-09-01] 终止时间：[2026-10-01]"])
+    for line in ("特别提示：", "备注：", "说明一", "说明二", "说明三", "说明四", "说明五"):
+        ws.append([line])
+    ws.append(WALLET_HEADER)
+    ws.append([f"{order_prefix}-001", "2026-09-02 09:00:00", "转入", "",
+               "模拟昵称", "模拟姓名", 100.00, ""])
+    ws.append([f"{order_prefix}-002", "2026-09-03 12:30:00", "消费", "",
+               "模拟昵称", "模拟姓名", "", 8.50])
+    ws.append([f"{order_prefix}-003", "2026-09-04 08:00:00", "支付", "",
+               "模拟昵称", "模拟姓名", 5.00, 5.00])
+    ws.append([f"{order_prefix}-004", "2026-09-05 08:00:00", "支付", "",
+               "模拟昵称", "模拟姓名", "", ""])
+    ws.append([f"{order_prefix}-005", "不是时间", "消费", "",
+               "模拟昵称", "模拟姓名", "", 3.00])
+    ws.append(["", "2026-09-06 08:00:00", "消费", "",
+               "模拟昵称", "模拟姓名", "", 3.00])
+    ws.append([f"{order_prefix}-007", "2026-09-07 08:00:00", "转出", "",
+               "模拟昵称", "模拟姓名", "-", 9.90])
+    ws.append([f"{order_prefix}-{'8' * 53}", "2026-09-08 08:00:00", "退款-模拟", "复合订单号",
+               "模拟昵称", "模拟姓名", 2.20, ""])
+    wb.save(path)
+    wb.close()
+    if wrong_dimension:
+        _force_sheet_dimension(path)
     return path
 
 
@@ -162,5 +224,107 @@ def test_alipay_xlsx_preview_and_commit_api(isolated_db: Path):
     conn = db.get_conn()
     try:
         assert conn.execute("SELECT COUNT(*) FROM transactions_raw").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_wallet_xlsx_detected_by_header_despite_wrong_dimensions(isolated_db: Path):
+    path = make_wallet_xlsx(isolated_db / "余额收支明细_随便起的名字.xlsx")
+    # 文件确实把尺寸错报成 A1（1×1），read_only 不修正就只能读到第 1 行。
+    with zipfile.ZipFile(path) as zf:
+        assert b'<dimension ref="A1"/>' in zf.read("xl/worksheets/sheet1.xml")
+
+    assert importer.detect(path) == ("alipay_wallet", 0.99)
+    issues = ParseIssues()
+    rows = importer.parse_file(path, issues=issues)
+    assert len(rows) == 4
+    assert issues.failed == 4
+    assert all(row.platform_id == "alipay_wallet" and row.source == "支付宝小荷包" for row in rows)
+
+
+def test_wallet_xlsx_maps_two_amount_columns_and_keeps_raw(isolated_db: Path):
+    path = make_wallet_xlsx(isolated_db / "wallet.xlsx")
+    rows = importer.parse_file(path)
+    by_no = {row.tx_no: row for row in rows}
+
+    assert (by_no["WALLET-001"].direction, by_no["WALLET-001"].amount) == ("收入", 100.00)
+    assert (by_no["WALLET-002"].direction, by_no["WALLET-002"].amount) == ("支出", 8.50)
+    # 支出侧写成占位符 '-'，仍按另一列判定。
+    assert (by_no["WALLET-007"].direction, by_no["WALLET-007"].amount) == ("支出", 9.90)
+    assert by_no["WALLET-001"].raw["收入金额"] == "100"
+    assert by_no["WALLET-001"].raw["支出金额"] == ""
+    # 操作人姓名/昵称不充当交易对方；订单号保留原文本（含长编号）。
+    assert by_no["WALLET-001"].counterparty == ""
+    assert len(by_no["WALLET-" + "8" * 53].tx_no) > 50
+    # 账户 ID 不进任何持久字段，只留摘要供分域去重。
+    assert by_no["WALLET-001"].wallet_domain
+    assert "0000000000000001" not in json.dumps(by_no["WALLET-001"].raw)
+
+
+def test_wallet_xlsx_dedupe_is_wallet_scoped_and_platform_local(isolated_db: Path):
+    first = make_wallet_xlsx(isolated_db / "a.xlsx", account_id="0000000000000001")
+    second = make_wallet_xlsx(isolated_db / "b.xlsx", account_id="0000000000000002")
+    result_a = importer.import_file(first)
+    result_b = importer.import_file(second)
+    # 两个钱包的订单号相同，但账户域不同 → 不互相吞掉。
+    assert (result_a.inserted, result_b.inserted) == (4, 4)
+
+    # 普通支付宝里出现同样的订单号，也不能和小荷包共用一个去重键。
+    alipay_path = make_alipay_xlsx(isolated_db / "alipay.xlsx")
+    wb = openpyxl.load_workbook(alipay_path)
+    ws = wb.active
+    ws["A6"] = "WALLET-001"
+    wb.save(alipay_path)
+    wb.close()
+    assert importer.import_file(alipay_path).inserted == 1
+
+    conn = db.get_conn()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM transactions_raw").fetchone()[0] == 9
+        assert conn.execute(
+            "SELECT COUNT(DISTINCT platform_id) FROM transactions_raw"
+        ).fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_wallet_xlsx_preview_does_not_write_and_commit_is_idempotent(isolated_db: Path):
+    path = make_wallet_xlsx(isolated_db / "余额收支明细.xlsx")
+    with TestClient(app) as client:
+        with path.open("rb") as stream:
+            preview = client.post(
+                "/api/import/preview",
+                files={"file": (path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            )
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert body["platform_id"] == "alipay_wallet"
+        assert body["platform_name"] == "支付宝小荷包"
+        assert body["total"] == 4
+        assert body["by_direction"] == {"收入": 2, "支出": 2}
+        assert body["amount_sum"] == 18.40
+        assert len(body["warnings"]) == 4
+
+        conn = db.get_conn()
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM transactions_raw").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+        for _ in range(2):
+            with path.open("rb") as stream:
+                committed = client.post(
+                    "/api/import/commit",
+                    files={"file": (path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                )
+            assert committed.status_code == 200, committed.text
+        assert committed.json()["inserted"] == 0
+        assert committed.json()["skipped"] == 4
+
+    conn = db.get_conn()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM transactions_raw").fetchone()[0] == 4
+        assert conn.execute("SELECT name FROM platforms WHERE id='alipay_wallet'").fetchone()[0] == "支付宝小荷包"
     finally:
         conn.close()
